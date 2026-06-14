@@ -1,0 +1,4 @@
+# mailing-list archive: input that motivated the tool, not the tool itself.
+# also provenance-sensitive — don't push to any remote without explicit review.
+*.mbox
+*.mbox.gz
