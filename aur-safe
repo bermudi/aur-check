@@ -552,7 +552,7 @@ if command -v aur-safe >/dev/null 2>&1; then
         -*) ;;
         *)
           if [ "$_mode" = install ] && [ "$_expect_pkg" = 1 ]; then
-            echo "audit $_a"
+            printf '%s\n' "$_a"
           fi
           ;;
       esac
@@ -562,14 +562,18 @@ if command -v aur-safe >/dev/null 2>&1; then
   }
 
   _aur_safe_dispatch() {
-    local _helper=$1 _action _gate=0
+    local _helper=$1 _line _gate=0 _out
     shift
-    for _action in $(_aur_safe_classify "$@"); do
-      case "$_action" in
-        gate)       _gate=1 ;;
-        'audit '*)  aur-safe $_action ;;
-      esac
-    done
+    _out=$(_aur_safe_classify "$@")
+    # line-by-line: package names can't be word-split safely in a for-loop
+    while IFS= read -r _line; do
+      [ -z "$_line" ] && continue
+      if [ "$_line" = gate ]; then
+        _gate=1
+      else
+        aur-safe audit "$_line"
+      fi
+    done <<< "$_out"
     if [ "$_gate" = 1 ]; then
       _aur_safe_gate && command "$_helper" "$@"
     else
@@ -659,6 +663,40 @@ cmd_selftest() {
   t "clean-make"            "make && make install"                     0
   t "clean-eval-string"     'eval "configure --prefix=/usr"'           0
   t "npm-init-clean"        'npm init -y'                              0
+
+  # --- wrapper dispatch (the _aur_safe_classify function) ------------------
+  # Extract the wrapper source, load _aur_safe_classify, verify dispatch
+  # decisions. This is the layer that decides gate vs audit vs passthrough —
+  # every wrapper bypass bug was found here manually before this test existed.
+  log ""
+  log "  $(c_dim "-- wrapper dispatch --")"
+  eval "$(aur-safe wrapper | sed -n '/_aur_safe_classify()/,/^  }/p')"
+  tw() { # tw "name" "expected" args...
+    local name=$1 expected=$2; shift 2
+    local got
+    got=$(_aur_safe_classify "$@" | tr '\n' ',' | sed 's/,$//')
+    if [ "$got" = "$expected" ]; then
+      log "  $(c_green "PASS") $name"; pass=$((pass+1))
+    else
+      log "  $(c_red "FAIL") $name (expected [$expected] got [$got])"; fail=$((fail+1))
+    fi
+  }
+  tw "bare-yay"          "gate"                 
+  tw "-Syu"              "gate"                 -Syu
+  tw "-Sua"              "gate"                 -Sua
+  tw "-Syyu"             "gate"                 -Syyu
+  tw "-Syua"             "gate"                 -Syua
+  tw "-Su"               "gate"                 -Su
+  tw "--sysupgrade"      "gate"                 --sysupgrade
+  tw "-Sua --noconfirm"  "gate"                 -Sua --noconfirm
+  tw "-S foo"            "foo"                  -S foo
+  tw "-S foo bar"        "foo,bar"              -S foo bar
+  tw "-S foo --needed bar" "foo,bar"            -S foo --needed bar
+  tw "-Sy"               ""                     -Sy
+  tw "-Q"                ""                     -Q
+  tw "-Q cursor-bin"     ""                     -Q cursor-bin
+  tw "-Q rustup"         ""                     -Q rustup
+  tw "-R foo"            ""                     -R foo
 
   log ""
   log "  $(c_bold "$pass passed, $fail failed")"
