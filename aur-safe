@@ -519,39 +519,65 @@ cmd_audit() {
 
 cmd_wrapper() {
   cat <<'EOF'
-# --- aur-safe wrapper (NOT installed) ---------------------------------------
-# Add to your shell rc, then `exec $SHELL`. Gates `yay -Syu` / `paru -Syu` and
-# advisory-audits new installs. Everything else (-Q, -R, repo -S) passes through.
+# --- aur-safe wrapper (cross-shell: bash + zsh) ----------------------------
+# Gates `yay -Syu` / `paru -Syu` before they reach pacman, and advisory-audits
+# new installs (`-S <pkg>`). Everything else (-Q, -R, repo -S) passes through.
+# Written POSIX-ish so it loads under both bash and zsh (no bash-only array
+# slicing). Place in a file sourced by both shells, e.g. ~/.shrc.
+#
+# Exit 2 = review-only flags: prompts [y/N] on a TTY, or honors
+# AUR_SAFE_ALLOW_REVIEW=1 for non-interactive use.
 
-yay() {
-  case "$1" in
-    -Syu|-Sy|-Su|--sync|--refresh|--sysupgrade)
-      aur-safe gate; local _rc=$?
-      case $_rc in
-        0) command yay "$@" ;;
-        2) # review-only flags: prompt for consent (or honor AUR_SAFE_ALLOW_REVIEW)
-           if [[ -n "${AUR_SAFE_ALLOW_REVIEW:-}" ]]; then
-             command yay "$@"
-           elif [[ -t 0 ]]; then
-             printf 'aur-safe: review-only flags found. proceed anyway? [y/N] ' >&2
-             local _ans; read -r _ans
-             [[ "$_ans" =~ ^[Yy]$ ]] && command yay "$@"
-           else
-             printf 'aur-safe: review-only flags found (non-interactive; set AUR_SAFE_ALLOW_REVIEW=1 to proceed)\n' >&2
-           fi ;;
-        *) printf 'aur-safe: blocked. run: aur-safe explain\n' >&2 ;;
-      esac ;;
-    -S|--sync)
-      # new install: extract package names (skip flags), advisory-audit each
-      local _a _pkgs=()
-      for _a in "${@:2}"; do [[ "$_a" == -* ]] && continue; _pkgs+=("$_a"); done
-      for _p in ${_pkgs[@]+"${_pkgs[@]}"}; do aur-safe audit "$_p"; done
-      command yay "$@" ;;
-    *) command yay "$@" ;;
-  esac
-}
+if command -v aur-safe >/dev/null 2>&1; then
+  _aur_safe_gate() {
+    aur-safe gate
+    local _rc=$?
+    case $_rc in
+      0) return 0 ;;
+      2) if [ -n "${AUR_SAFE_ALLOW_REVIEW:-}" ]; then
+           return 0
+         elif [ -t 0 ]; then
+           printf 'aur-safe: review-only flags found. proceed anyway? [y/N] ' >&2
+           local _ans; read -r _ans
+           case "$_ans" in y|Y) return 0;; esac
+           return 1
+         else
+           printf 'aur-safe: review-only flags found (non-interactive; set AUR_SAFE_ALLOW_REVIEW=1 to proceed)\n' >&2
+           return 1
+         fi ;;
+      *) printf 'aur-safe: blocked. run: aur-safe explain\n' >&2; return 1 ;;
+    esac
+  }
 
-# To gate paru instead, define the same function named `paru` calling `command paru`.
+  # advisory-audit each non-flag arg (package names) of a `-S` invocation
+  _aur_safe_audit_args() {
+    local _arg
+    for _arg; do
+      case "$_arg" in -*) continue;; esac
+      aur-safe audit "$_arg"
+    done
+  }
+
+  yay() {
+    case "$1" in
+      -Syu|-Sy|-Su|--sync|--refresh|--sysupgrade)
+        _aur_safe_gate && command yay "$@" ;;
+      -S|--sync)
+        _aur_safe_audit_args "$@"; command yay "$@" ;;
+      *) command yay "$@" ;;
+    esac
+  }
+
+  paru() {
+    case "$1" in
+      -Syu|-Sy|-Su|--sync|--refresh|--sysupgrade)
+        _aur_safe_gate && command paru "$@" ;;
+      -S|--sync)
+        _aur_safe_audit_args "$@"; command paru "$@" ;;
+      *) command paru "$@" ;;
+    esac
+  }
+fi
 EOF
 }
 
