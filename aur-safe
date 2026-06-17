@@ -529,6 +529,54 @@ cmd_wrapper() {
 # AUR_SAFE_ALLOW_REVIEW=1 for non-interactive use.
 
 if command -v aur-safe >/dev/null 2>&1; then
+  # Classify an arg list. Emits zero or more `audit <pkg>` lines, then a final
+  # `gate` if the invocation implies an upgrade. Drives _aur_safe_dispatch.
+  # Scans by FLAG SET (not exact first-token match) because yay/paru flags
+  # cluster arbitrarily: -Syu, -Su, -Sua, -Syyu, -Syua all mean upgrade.
+  _aur_safe_classify() {
+    local _a _mode=pass _expect_pkg=0
+    [ $# -eq 0 ] && { echo gate; return 0; }
+    for _a; do
+      case "$_a" in
+        --sysupgrade|--refresh) _mode=gate ;;
+        --sync) [ "$_mode" != gate ] && _mode=install; _expect_pkg=1 ;;
+        --) ;;
+        # short flag cluster: u → upgrade (wins), S → sync/install.
+        # gate must not be overwritten by a later S in the same cluster.
+        -[!-]*)
+          case "$_a" in *u*) _mode=gate ;; esac
+          if [ "$_mode" != gate ]; then
+            case "$_a" in *S*) _mode=install; _expect_pkg=1 ;; esac
+          fi
+          ;;
+        -*) ;;
+        *)
+          if [ "$_mode" = install ] && [ "$_expect_pkg" = 1 ]; then
+            echo "audit $_a"
+          fi
+          ;;
+      esac
+    done
+    [ "$_mode" = gate ] && echo gate
+    return 0
+  }
+
+  _aur_safe_dispatch() {
+    local _helper=$1 _action _gate=0
+    shift
+    for _action in $(_aur_safe_classify "$@"); do
+      case "$_action" in
+        gate)       _gate=1 ;;
+        'audit '*)  aur-safe $_action ;;
+      esac
+    done
+    if [ "$_gate" = 1 ]; then
+      _aur_safe_gate && command "$_helper" "$@"
+    else
+      command "$_helper" "$@"
+    fi
+  }
+
   _aur_safe_gate() {
     aur-safe gate
     local _rc=$?
@@ -549,34 +597,8 @@ if command -v aur-safe >/dev/null 2>&1; then
     esac
   }
 
-  # advisory-audit each non-flag arg (package names) of a `-S` invocation
-  _aur_safe_audit_args() {
-    local _arg
-    for _arg; do
-      case "$_arg" in -*) continue;; esac
-      aur-safe audit "$_arg"
-    done
-  }
-
-  yay() {
-    case "$1" in
-      -Syu|-Sy|-Su|--sync|--refresh|--sysupgrade)
-        _aur_safe_gate && command yay "$@" ;;
-      -S|--sync)
-        _aur_safe_audit_args "$@"; command yay "$@" ;;
-      *) command yay "$@" ;;
-    esac
-  }
-
-  paru() {
-    case "$1" in
-      -Syu|-Sy|-Su|--sync|--refresh|--sysupgrade)
-        _aur_safe_gate && command paru "$@" ;;
-      -S|--sync)
-        _aur_safe_audit_args "$@"; command paru "$@" ;;
-      *) command paru "$@" ;;
-    esac
-  }
+  yay()  { _aur_safe_dispatch yay  "$@"; }
+  paru() { _aur_safe_dispatch paru "$@"; }
 fi
 EOF
 }
