@@ -256,9 +256,11 @@ _installed_matches() {
   [[ -n "$pkgver" && -n "$pkgrel" ]] || return 1
   want="${pkgver}-${pkgrel}"
   [[ -n "$epoch" ]] && want="${epoch}:${want}"
-  # Non-split packages omit pkgname= in .SRCINFO (pkgname == pkgbase); collect
-  # pkgname= lines, falling back to the root pkgbase= line (column 0, no tab).
-  names=$(awk -F' = ' '/^\tpkgname =/ {print $2}' <<<"$srcinfo")
+  # pkgname= is a section header at column 0 (no leading tab), one per
+  # sub-package — identical column placement to pkgbase=. makepkg always emits
+  # it, even for non-split (where it equals pkgbase). The pkgbase= fallback is
+  # defensive only, for malformed files missing pkgname=.
+  names=$(awk -F' = ' '/^pkgname =/ {print $2}' <<<"$srcinfo")
   [[ -n "$names" ]] || names=$(awk -F' = ' '/^pkgbase =/ {print $2; exit}' <<<"$srcinfo")
   while IFS= read -r pkgname; do
     [[ -z "$pkgname" ]] && continue
@@ -872,57 +874,75 @@ cmd_selftest() {
     log "  $(c_green "PASS") accepted-idempotent"; pass=$((pass+1))
   else log "  $(c_red "FAIL") accepted-idempotent"; fail=$((fail+1)); fi
 
-  # install-confirmation + accept: drive _pacman_query / find_pkg_dir via vars
-  # (one override each). Both are invoked only indirectly (_installed_matches /
-  # cmd_accept), hence the SC2329 disable directives below.
-  # shellcheck disable=SC2329  # test seam, called indirectly
-  _pacman_query() { [ -n "$_AUR_TEST_Q" ] && printf '%s\n' "$_AUR_TEST_Q"; }
-  # shellcheck disable=SC2329  # test seam, called indirectly
-  find_pkg_dir()   { [ -n "$_AUR_TEST_DIR" ] && printf '%s\n' "$_AUR_TEST_DIR" || return 1; }
+  # install-confirmation + accept. The _pacman_query seam is NAME-AWARE: it
+  # only reports a package as installed when the queried name matches the
+  # configured "_AUR_TEST_Q" name. This is essential — a seam that ignores its
+  # argument can't catch "parser queried the wrong name" (the exact class of
+  # bug that broke split packages, where pkgbase≠pkgname).
+  # shellcheck disable=SC2329  # test seam, called indirectly by _installed_matches
+  _pacman_query() {
+    [ -n "$_AUR_TEST_Q" ] || return 1
+    [ "$1" = "${_AUR_TEST_Q%% *}" ] && printf '%s\n' "$_AUR_TEST_Q"
+  }
+  # shellcheck disable=SC2329  # test seam, called indirectly by cmd_accept
+  find_pkg_dir() { [ -n "$_AUR_TEST_DIR" ] && printf '%s\n' "$_AUR_TEST_DIR" || return 1; }
 
+  # .SRCINFO samples are faithful to makepkg --printsrcinfo output (verified
+  # against real cached files + /usr/share/makepkg/srcinfo.sh): pkgbase= and
+  # pkgname= are section headers at column 0; attributes are tab-indented; a
+  # blank line separates the pkgbase section from each pkgname section.
+  # Non-split emits exactly one pkgname= (== pkgbase).
+  printf 'pkgbase = test-acc\n\tpkgver = 1.2\n\tpkgrel = 3\n\npkgname = test-acc\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm acc >/dev/null
+  _tsha=$(git -C "$_tmp" rev-parse HEAD)
   _AUR_TEST_Q="test-acc 1.2-3"
-  ta "installed-matches"        0 _installed_matches "$_tmp" "$_tsha"
+  ta "installed-nonsplit-match"    0 _installed_matches "$_tmp" "$_tsha"
   _AUR_TEST_Q="test-acc 1.2-2"
-  ta "installed-mismatch"       1 _installed_matches "$_tmp" "$_tsha"
+  ta "installed-nonsplit-mismatch" 1 _installed_matches "$_tmp" "$_tsha"
   _AUR_TEST_Q=""
-  ta "installed-absent"         1 _installed_matches "$_tmp" "$_tsha"
+  ta "installed-nonsplit-absent"   1 _installed_matches "$_tmp" "$_tsha"
 
-  # epoch handling
-  printf '\tpkgname = test-ep\n\tpkgver = 1\n\tpkgrel = 1\n\tepoch = 2\n' >"$_tmp/.SRCINFO"
-  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm ep
+  # non-split + epoch (epoch in global section, tab-indented)
+  printf 'pkgbase = test-ep\n\tpkgver = 1\n\tpkgrel = 1\n\tepoch = 2\n\npkgname = test-ep\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm ep >/dev/null
   _epsha=$(git -C "$_tmp" rev-parse HEAD)
   _AUR_TEST_Q="test-ep 2:1-1"
   ta "installed-epoch-match"    0 _installed_matches "$_tmp" "$_epsha"
   _AUR_TEST_Q="test-ep 1-1"
   ta "installed-epoch-mismatch" 1 _installed_matches "$_tmp" "$_epsha"
 
-  # non-split package: real .SRCINFO omits pkgname= (it equals pkgbase=), and
-  # pkgbase= sits at column 0 (no leading tab). The install check must resolve
-  # via the pkgbase= fallback.
-  printf 'pkgbase = test-nosplit\n\tpkgver = 9\n\tpkgrel = 1\n' >"$_tmp/.SRCINFO"
-  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm nosplit
-  _nssha=$(git -C "$_tmp" rev-parse HEAD)
-  _AUR_TEST_Q="test-nosplit 9-1"
-  ta "installed-nosplit-match"    0 _installed_matches "$_tmp" "$_nssha"
-  _AUR_TEST_Q="test-nosplit 9-2"
-  ta "installed-nosplit-mismatch" 1 _installed_matches "$_tmp" "$_nssha"
+  # MALFORMED file with no pkgname= at all (a corrupted/manual .SRCINFO).
+  # Exercises the pkgbase= defensive fallback.
+  printf 'pkgbase = test-fb\n\tpkgver = 9\n\tpkgrel = 1\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm fb >/dev/null
+  _fbsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_Q="test-fb 9-1"
+  ta "installed-fallback-match"    0 _installed_matches "$_tmp" "$_fbsha"
+  _AUR_TEST_Q="test-fb 9-2"
+  ta "installed-fallback-mismatch" 1 _installed_matches "$_tmp" "$_fbsha"
 
-  # split package: multiple pkgname= lines. ANY matching pkgname (at the right
-  # version) must count — the PKGBUILD built and its hooks ran. Faithful format:
-  # pkgbase at column 0, pkgname lines tab-indented (as makepkg emits).
-  printf 'pkgbase = test-split\n\tpkgver = 7\n\tpkgrel = 1\n\tpkgname = test-split\n\tpkgname = test-split-tools\n\tpkgname = test-split-docs\n' >"$_tmp/.SRCINFO"
-  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm split
+  # SPLIT package, pkgbase != pkgnames (the case that broke the old parser: it
+  # queried pkgbase, which is never an installable split sub-package name).
+  # Faithful layout: one column-0 pkgname= per sub-package, blank-line separated.
+  printf 'pkgbase = test-split\n\tpkgver = 7\n\tpkgrel = 1\n\npkgname = test-split-core\n\npkgname = test-split-tools\n\npkgname = test-split-docs\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm split >/dev/null
   _splsha=$(git -C "$_tmp" rev-parse HEAD)
+  # only the 2nd sub-package installed → must match via that pkgname
   _AUR_TEST_Q="test-split-tools 7-1"
-  ta "installed-split-second-pkg"  0 _installed_matches "$_tmp" "$_splsha"
+  ta "installed-split-2nd-pkg"  0 _installed_matches "$_tmp" "$_splsha"
+  # only the 3rd sub-package installed
   _AUR_TEST_Q="test-split-docs 7-1"
-  ta "installed-split-third-pkg"   0 _installed_matches "$_tmp" "$_splsha"
-  _AUR_TEST_Q="test-split 7-2"
-  ta "installed-split-wrong-rel"   1 _installed_matches "$_tmp" "$_splsha"
+  ta "installed-split-3rd-pkg"   0 _installed_matches "$_tmp" "$_splsha"
+  # pkgbase itself "installed" is NOT a valid sub-package match (pkgbase != any pkgname)
+  _AUR_TEST_Q="test-split 7-1"
+  ta "installed-split-pkgbase-not-pkg" 1 _installed_matches "$_tmp" "$_splsha"
   _AUR_TEST_Q=""
   ta "installed-split-none"        1 _installed_matches "$_tmp" "$_splsha"
 
-  # accept promotion: stage + manifest + matching install → promoted (moved).
+  # accept promotion: reset HEAD to the test-acc commit, point origin/master at
+  # it, stage, then accept with it confirmed installed → promoted (moved).
+  git -C "$_tmp" update-ref refs/remotes/origin/master "$_tsha" 2>/dev/null || true
+  git -C "$_tmp" checkout -q "$_tsha" -- .SRCINFO
   _AUR_TEST_DIR="$_tmp"
   _AUR_TEST_Q="test-acc 1.2-3"
   write_ref "$_tmp" "$STAGED_DIR/test-acc"

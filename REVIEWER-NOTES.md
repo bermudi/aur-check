@@ -111,10 +111,14 @@ new parser and pkgver can stay identical across a malicious push.
 **Install-confirmation assertion (closes the untested `-Syu` partial-failure
 case):** `accept` compares the installed version (`pacman -Q`) against the
 staged commit's `.SRCINFO` pkgver/pkgrel/epoch — ANY matching pkgname counts
-(for split packages); non-split packages omit `pkgname=` in `.SRCINFO`, so the
-fallback reads the root `pkgbase=` line (column 0, no leading tab). A package
-that didn't build/install won't match → its anchor is left unchanged → next
-gate re-audits. This means `accept` is safe to run on **any** helper exit code.
+(for split packages). The `.SRCINFO` format (verified against makepkg source +
+real cached files): `pkgbase=` and `pkgname=` are section headers at column 0
+(no leading tab); attributes are tab-indented; a blank line separates sections.
+makepkg always emits `pkgname=` (one per sub-package, even for non-split where
+it equals pkgbase). A defensive `pkgbase=` fallback covers malformed files
+missing `pkgname=`. A package that didn't build/install won't match → its anchor
+is left unchanged → next gate re-audits. This means `accept` is safe to run on
+**any** helper exit code.
 
 **Verified (sandboxed, isolated root/dbpath/cachedir):** both `yay` v12.6.0 and
 `paru` v2.1.0 exit non-zero on ANY build failure (`exit status 4` from makepkg
@@ -208,8 +212,10 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 61/61 (31 rule-engine + 16 wrapper-dispatch + 14 accepted-ref /
-  staging / accept / install-confirmation). Run with `aur-safe selftest`.
+- `selftest`: 65/65 (31 rule-engine + 16 wrapper-dispatch + 18 accepted-ref /
+  staging / accept / install-confirmation, incl. faithful split + non-split
+  `.SRCINFO` scenarios verified against makepkg output + real cached files).
+  Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
   install-confirmation (incl. non-split `pkgbase=` fallback), `accept` promotion.
