@@ -907,6 +907,21 @@ cmd_selftest() {
   _AUR_TEST_Q="test-nosplit 9-2"
   ta "installed-nosplit-mismatch" 1 _installed_matches "$_tmp" "$_nssha"
 
+  # split package: multiple pkgname= lines. ANY matching pkgname (at the right
+  # version) must count — the PKGBUILD built and its hooks ran. Faithful format:
+  # pkgbase at column 0, pkgname lines tab-indented (as makepkg emits).
+  printf 'pkgbase = test-split\n\tpkgver = 7\n\tpkgrel = 1\n\tpkgname = test-split\n\tpkgname = test-split-tools\n\tpkgname = test-split-docs\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm split
+  _splsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_Q="test-split-tools 7-1"
+  ta "installed-split-second-pkg"  0 _installed_matches "$_tmp" "$_splsha"
+  _AUR_TEST_Q="test-split-docs 7-1"
+  ta "installed-split-third-pkg"   0 _installed_matches "$_tmp" "$_splsha"
+  _AUR_TEST_Q="test-split 7-2"
+  ta "installed-split-wrong-rel"   1 _installed_matches "$_tmp" "$_splsha"
+  _AUR_TEST_Q=""
+  ta "installed-split-none"        1 _installed_matches "$_tmp" "$_splsha"
+
   # accept promotion: stage + manifest + matching install → promoted (moved).
   _AUR_TEST_DIR="$_tmp"
   _AUR_TEST_Q="test-acc 1.2-3"
