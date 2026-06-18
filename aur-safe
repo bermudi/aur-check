@@ -250,18 +250,23 @@ _pacman_query() { pacman -Q -- "$1" 2>/dev/null; }
 _installed_matches() {
   local dir="$1" sha="$2" srcinfo epoch pkgver pkgrel want pkgname iver names
   srcinfo=$(git -C "$dir" show "${sha}:.SRCINFO" 2>/dev/null) || return 1
-  pkgver=$(awk -F' = ' '/^\tpkgver =/ {print $2; exit}' <<<"$srcinfo")
-  pkgrel=$(awk -F' = ' '/^\tpkgrel =/ {print $2; exit}' <<<"$srcinfo")
-  epoch=$(awk -F' = ' '/^\tepoch =/ {print $2; exit}' <<<"$srcinfo")
+  # Leading whitespace is tolerant on purpose: well-formed files use a single
+  # tab, but some real AUR packages ship space-indented .SRCINFO (e.g.
+  # opera-developer). awk's default-FS already handles this in find_pkg_dir;
+  # these regex anchors must too, or version extraction silently fails and
+  # the install check never matches.
+  pkgver=$(awk -F' = ' '/^[[:space:]]*pkgver =/ {print $2; exit}' <<<"$srcinfo")
+  pkgrel=$(awk -F' = ' '/^[[:space:]]*pkgrel =/ {print $2; exit}' <<<"$srcinfo")
+  epoch=$(awk -F' = ' '/^[[:space:]]*epoch =/ {print $2; exit}' <<<"$srcinfo")
   [[ -n "$pkgver" && -n "$pkgrel" ]] || return 1
   want="${pkgver}-${pkgrel}"
   [[ -n "$epoch" ]] && want="${epoch}:${want}"
   # pkgname= is a section header at column 0 (no leading tab), one per
   # sub-package — identical column placement to pkgbase=. makepkg always emits
-  # it, even for non-split (where it equals pkgbase). The pkgbase= fallback is
-  # defensive only, for malformed files missing pkgname=.
-  names=$(awk -F' = ' '/^pkgname =/ {print $2}' <<<"$srcinfo")
-  [[ -n "$names" ]] || names=$(awk -F' = ' '/^pkgbase =/ {print $2; exit}' <<<"$srcinfo")
+  # it, even for non-split (where it equals pkgbase). Leading-whitespace
+  # tolerant for malformed files; pkgbase= is a defensive fallback only.
+  names=$(awk -F' = ' '/^[[:space:]]*pkgname =/ {print $2}' <<<"$srcinfo")
+  [[ -n "$names" ]] || names=$(awk -F' = ' '/^[[:space:]]*pkgbase =/ {print $2; exit}' <<<"$srcinfo")
   while IFS= read -r pkgname; do
     [[ -z "$pkgname" ]] && continue
     iver=$(_pacman_query "$pkgname" | awk '{print $2}')
@@ -920,6 +925,18 @@ cmd_selftest() {
   ta "installed-fallback-match"    0 _installed_matches "$_tmp" "$_fbsha"
   _AUR_TEST_Q="test-fb 9-2"
   ta "installed-fallback-mismatch" 1 _installed_matches "$_tmp" "$_fbsha"
+
+  # SPACE-INDENTED .SRCINFO (real-world: opera-developer ships 8-space indent
+  # instead of tabs). The parser must tolerate leading whitespace on attribute
+  # lines, or pkgver/pkgrel extraction silently returns empty and the install
+  # check never matches. pkgname stays at column 0 (section header).
+  printf 'pkgbase = test-sp\n        pkgver = 4.4\n        pkgrel = 1\n\npkgname = test-sp\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm sp >/dev/null
+  _spsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_Q="test-sp 4.4-1"
+  ta "installed-spaceindent-match"    0 _installed_matches "$_tmp" "$_spsha"
+  _AUR_TEST_Q="test-sp 4.4-2"
+  ta "installed-spaceindent-mismatch" 1 _installed_matches "$_tmp" "$_spsha"
 
   # SPLIT package, pkgbase != pkgnames (the case that broke the old parser: it
   # queried pkgbase, which is never an installable split sub-package name).

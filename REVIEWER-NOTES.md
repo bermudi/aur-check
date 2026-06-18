@@ -116,16 +116,33 @@ real cached files): `pkgbase=` and `pkgname=` are section headers at column 0
 (no leading tab); attributes are tab-indented; a blank line separates sections.
 makepkg always emits `pkgname=` (one per sub-package, even for non-split where
 it equals pkgbase). A defensive `pkgbase=` fallback covers malformed files
-missing `pkgname=`. A package that didn't build/install won't match → its anchor
-is left unchanged → next gate re-audits. This means `accept` is safe to run on
-**any** helper exit code.
+missing `pkgname=`:
+
+```
+names=$(awk -F' = ' '/^[[:space:]]*pkgname =/ {print $2}' <<<"$srcinfo")
+  [[ -n "$names" ]] || names=$(awk -F' = ' '/^[[:space:]]*pkgbase =/ {print $2; exit}' <<<"$srcinfo")
+```
+Note the `^[[:space:]]*` (not `^\t`): well-formed files indent attributes with
+a single tab, but some real AUR packages ship **space-indented** `.SRCINFO`
+(e.g. `opera-developer` uses 8 spaces). A tab-anchored regex silently extracts
+nothing on those files, so the install check never matches and the anchor never
+advances. The column-0 section headers (`pkgbase=`/`pkgname=`) stay anchored —
+they are never indented in practice. A package that didn't build/install won't
+match → its anchor is left unchanged → next gate re-audits. This means `accept`
+is safe to run on **any** helper exit code.
 
 **Verified (sandboxed, isolated root/dbpath/cachedir):** both `yay` v12.6.0 and
 `paru` v2.1.0 exit non-zero on ANY build failure (`exit status 4` from makepkg
 propagates), `--noconfirm` included, ordering-independent — the good packages
-install, the failing one is blocked. So `rc==0 → accept` alone would suffice
-for the common case; install-confirmation is defense-in-depth for the `-Syu`
-path that wasn't directly tested and any future helper behavior change.
+install, the failing one is blocked. **Source-confirmed via deepwiki:** yay
+(`Jguer/yay`, `main.go`) mirrors makepkg's `exec.ExitError` or defaults to 1,
+`--noconfirm` is orthogonal, no swallow path; paru (`Morganamilo/paru`,
+`--failfast` v1.11.0+) returns non-zero if any package fails to build (continues
+others, but non-zero), no swallow path. So `rc==0 → accept` alone is safe;
+install-confirmation is kept as defense-in-depth against untested code paths or
+future helper changes. A sandboxed `-Syu` was not run (only `-Bi`), but the
+exit-code semantics are now source-grounded rather than inferred for both
+gated helpers.
 
 **Review debate (deepseek-v4-pro/xhigh):** 6 findings raised. Conceded: (2)
 review-consent must also stage [fixed — stage before `return 2`]; (3) no staged
@@ -212,10 +229,10 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 65/65 (31 rule-engine + 16 wrapper-dispatch + 18 accepted-ref /
-  staging / accept / install-confirmation, incl. faithful split + non-split
-  `.SRCINFO` scenarios verified against makepkg output + real cached files).
-  Run with `aur-safe selftest`.
+- `selftest`: 67/67 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
+  staging / accept / install-confirmation, incl. faithful split + non-split +
+  space-indented + pkgbase-fallback `.SRCINFO` scenarios verified against
+  makepkg output + real cached files). Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
   install-confirmation (incl. non-split `pkgbase=` fallback), `accept` promotion.
@@ -224,7 +241,14 @@ These are real open questions where I'd value pushback:
   propagated; review-consent → proceeds → rc 0.
 - `yay`/`paru` exit non-zero on ANY build failure — sandboxed test
   (isolated root/dbpath/cachedir, good+broken PKGBUILDs), both helpers,
-  ordering-independent. See *Accepted-ref state* above.
+  ordering-independent. **Source-confirmed via deepwiki** for both `Jguer/yay`
+  (`main.go`, mirrors `exec.ExitError`) and `Morganamilo/paru` (`--failfast`,
+  non-zero if any build fails). See *Accepted-ref state* above.
+- Full cached-package sweep (18 packages, all installed AUR pkgs on this
+  system): install-confirmation parser verdict matches the ground-truth oracle
+  (MATCH iff installed version == parsed `.SRCINFO` version) on every row —
+  tab-format, space-format (opera-developer), split (windsurf), and stale-cache
+  cases alike. No false positives or negatives.
 - Real AUR updates: clean, exit 0, no regression.
 - Synthetic full-evasion attack: hard rules fire, exit 1.
 - Stealth scenario (impersonation + modified hook + committed binary, no
