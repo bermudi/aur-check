@@ -2,10 +2,13 @@
 #
 # aur-safe — deterministic gate for AUR package updates.
 #
-# Design: yay/paru keep a per-package git clone of the AUR repo. Its checked-out
-# HEAD is the last version you built (treated as known-good). origin/master is the
-# candidate. We fetch, diff, and run deterministic rules against the ADDED lines.
-# No LLM on the trust path — the model is only invoked on-demand via `explain`.
+# Design: yay/paru keep a per-package git clone of the AUR repo. origin/master is
+# the candidate update; the last-known-good state is aur-safe's OWN accepted ref
+# (~/.cache/aur-safe/accepted/<pkgbase>), seeded from the helper HEAD on first
+# contact and advanced only after a build the gate audited AND pacman confirms
+# installed. We fetch, diff accepted..origin/master, and run deterministic rules
+# against the ADDED lines. No LLM on the trust path — the model is only invoked
+# on-demand via `explain`.
 #
 # Threat model: the 2026-05/06 AUR supply-chain campaign. Attacker adopts an
 # orphaned package via a burner account, adds/edits an .install hook that pulls a
@@ -14,9 +17,12 @@
 # Obfuscation is shifting to hex/octal escapes and bun/pnpm installers.
 #
 # Cache layout:
-#   yay:   ~/.cache/yay/<pkg>
-#   paru:  ~/.cache/paru/clone/<pkg>
-# Both are auto-detected. Override with AUR_SAFE_YAY_CACHE / AUR_SAFE_PARU_CACHE.
+#   yay:      ~/.cache/yay/<pkg>
+#   paru:     ~/.cache/paru/clone/<pkg>
+#   accepted: ~/.cache/aur-safe/accepted/<pkgbase>   (trust anchor: audited SHA)
+#   staged:   ~/.cache/aur-safe/staged/<pkgbase>     (candidate, pending build)
+# Both helper caches are auto-detected. Override with AUR_SAFE_YAY_CACHE /
+# AUR_SAFE_PARU_CACHE.
 #
 # LLM explain path requires `pi` (https://github.com/earendil-works/pi or via the
 # @earendil-works/pi-coding-agent package). It reuses pi's stored credentials.
@@ -34,11 +40,14 @@ set -uo pipefail
 YAY_CACHE="${AUR_SAFE_YAY_CACHE:-$HOME/.cache/yay}"
 PARU_CACHE="${AUR_SAFE_PARU_CACHE:-$HOME/.cache/paru/clone}"
 STATE_DIR="${AUR_SAFE_STATE_DIR:-$HOME/.cache/aur-safe}"
+ACCEPTED_DIR="$STATE_DIR/accepted"
+STAGED_DIR="$STATE_DIR/staged"
+MANIFEST_FILE="$STATE_DIR/last-gate"
 EXPLAIN_MODEL="${AUR_SAFE_MODEL:-zai/glm-5.2}"
 EXPLAIN_MAXLINES="${AUR_SAFE_EXPLAIN_MAXLINES:-1000}"
 AUR_REMOTE_BRANCH="${AUR_SAFE_BRANCH:-master}"
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$ACCEPTED_DIR" "$STAGED_DIR"
 
 # Pathspecs excluded from diff scanning. Binary blobs + patch/diff files: the
 # former aren't text, the latter legitimately contain escape sequences that would
@@ -175,9 +184,9 @@ source_domains() {
 # Files changed with a given status filter (A=added, M=modified), whose basename
 # ends with the given literal suffix. Uses --name-only (handles spaces safely).
 files_with_status() {
-  local filter="$1" suffix="$2" dir="$3"
+  local filter="$1" suffix="$2" dir="$3" base="$4"
   git -C "$dir" diff --name-only --diff-filter="$filter" \
-    HEAD.."origin/${AUR_REMOTE_BRANCH}" 2>/dev/null \
+    "${base}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null \
     | awk -v sfx="$suffix" '{
         n=split($0,a,"/"); f=a[n]; ls=length(sfx);
         if (substr(f,length(f)-ls+1)==sfx) print $0
@@ -186,9 +195,9 @@ files_with_status() {
 
 stash_flag() {
   # Persist the offending diff so `explain` can read it.
-  local pkg="$1" dir="$2"
+  local pkg="$1" dir="$2" base="$3"
   local flagfile="$STATE_DIR/flag.${pkg}.diff"
-  git -C "$dir" --no-pager diff HEAD.."origin/${AUR_REMOTE_BRANCH}" -- \
+  git -C "$dir" --no-pager diff "${base}..origin/${AUR_REMOTE_BRANCH}" -- \
     "${EXCLUDE_PATHS[@]}" >"$flagfile" 2>/dev/null || true
   ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
   printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
@@ -197,6 +206,77 @@ stash_flag() {
 # GC old flag diffs so STATE_DIR doesn't grow unbounded.
 gc_state() {
   find "$STATE_DIR" -maxdepth 1 -name 'flag.*.diff' -mtime +30 -delete 2>/dev/null || true
+  # Orphaned staged refs: a gate Ctrl-C'd before `accept` ran, or a package
+  # whose build failed. Sweep so they can't accumulate. accepted/ is
+  # intentionally NOT swept — it's the persistent trust anchor.
+  find "$STAGED_DIR" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null || true
+}
+
+# Resolve the accepted (trust-anchor) ref for a pkgbase. Prints the SHA; seeds
+# from the helper-cache HEAD on first contact and persists it, so the anchor is
+# frozen at first contact — the core fix for finding 1.2: a later manipulated
+# or stale helper HEAD can no longer silently move the diff baseline.
+accepted_ref() {
+  local dir="$1" pkgbase="$2" sha url
+  local f="$ACCEPTED_DIR/$pkgbase"
+  if [[ -s "$f" ]]; then
+    awk -F'\t' '{print $1; exit}' "$f"
+    return 0
+  fi
+  sha=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || return 1
+  url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
+  printf '%s\t%s\t%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$url" >"$f" 2>/dev/null || true
+  printf '%s\n' "$sha"
+}
+
+# Write a ref file (staged or accepted) recording origin/master tip + provenance:
+# <sha>\t<iso-utc>\t<origin-url>. Enables post-mortem forensics.
+write_ref() {
+  local dir="$1" f="$2" url
+  url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
+  printf '%s\t%s\t%s\n' \
+    "$(git -C "$dir" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$url" >"$f"
+}
+
+# Overridable pacman-query seam (for selftest). Prints "<name> <ver>".
+_pacman_query() { pacman -Q -- "$1" 2>/dev/null; }
+
+# Return 0 if a package built from commit $sha (in $dir) is currently installed
+# at exactly that commit's version. Resolves split packages: ANY pkgname at the
+# matching version counts (the PKGBUILD built and its build/install hooks ran).
+# This is the install-confirmation assertion — it prevents advancing the trust
+# anchor for a package whose audited commit didn't actually install.
+_installed_matches() {
+  local dir="$1" sha="$2" srcinfo epoch pkgver pkgrel want pkgname iver names
+  srcinfo=$(git -C "$dir" show "${sha}:.SRCINFO" 2>/dev/null) || return 1
+  pkgver=$(awk -F' = ' '/^\tpkgver =/ {print $2; exit}' <<<"$srcinfo")
+  pkgrel=$(awk -F' = ' '/^\tpkgrel =/ {print $2; exit}' <<<"$srcinfo")
+  epoch=$(awk -F' = ' '/^\tepoch =/ {print $2; exit}' <<<"$srcinfo")
+  [[ -n "$pkgver" && -n "$pkgrel" ]] || return 1
+  want="${pkgver}-${pkgrel}"
+  [[ -n "$epoch" ]] && want="${epoch}:${want}"
+  # Non-split packages omit pkgname= in .SRCINFO (pkgname == pkgbase); collect
+  # pkgname= lines, falling back to the root pkgbase= line (column 0, no tab).
+  names=$(awk -F' = ' '/^\tpkgname =/ {print $2}' <<<"$srcinfo")
+  [[ -n "$names" ]] || names=$(awk -F' = ' '/^pkgbase =/ {print $2; exit}' <<<"$srcinfo")
+  while IFS= read -r pkgname; do
+    [[ -z "$pkgname" ]] && continue
+    iver=$(_pacman_query "$pkgname" | awk '{print $2}')
+    [[ "$iver" = "$want" ]] && return 0
+  done <<<"$names"
+  return 1
+}
+
+# Stage the current origin/master tip for a pkgbase as a candidate to accept
+# after a successful build. Only during `gate` (AUR_SAFE_STAGING=1); `check` is
+# read-only inspection and never stages. Appends to the run manifest so `accept`
+# promotes only this run's packages (cross-run isolation).
+_stage_if_gating() {
+  [[ -n "${AUR_SAFE_STAGING:-}" ]] || return 0
+  local pkgbase="$1" dir="$2"
+  write_ref "$dir" "$STAGED_DIR/$pkgbase"
+  printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
 }
 
 ###############################################################################
@@ -210,6 +290,7 @@ check_pkg() {
     log "$(c_dim "skip") $pkg — not in any AUR cache; use 'aur-safe audit $pkg' for an advisory scan"
     return 0
   fi
+  local pkgbase="${dir##*/}"
 
   # Best-effort fetch; if offline, proceed with whatever origin/master we have.
   git -C "$dir" fetch -q origin 2>/dev/null \
@@ -221,14 +302,21 @@ check_pkg() {
     return 0
   fi
 
-  # No changes => clean.
-  if [[ -z "$(git -C "$dir" diff --name-only HEAD.."origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" ]]; then
+  # Trust anchor: aur-safe's own accepted ref (finding 1.2). Seeded from the
+  # helper-cache HEAD on first contact, then frozen — a later manipulated or
+  # stale helper HEAD can no longer silently move the diff baseline. Falls back
+  # to HEAD only if the seed itself can't be resolved.
+  local base_ref
+  base_ref=$(accepted_ref "$dir" "$pkgbase") || base_ref=HEAD
+
+  # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
+  if [[ -z "$(git -C "$dir" diff --name-only "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" ]]; then
     log "$(c_green "ok")    $pkg — no source changes (version bump only?)"
     return 0
   fi
 
   local added
-  added=$(cd "$dir" && diff_added HEAD.."origin/${AUR_REMOTE_BRANCH}")
+  added=$(cd "$dir" && diff_added "${base_ref}..origin/${AUR_REMOTE_BRANCH}")
 
   local hard_hits=0
   local i
@@ -244,7 +332,7 @@ check_pkg() {
 
   # New .install file introduced (the primary campaign vector).
   local new_installs
-  new_installs=$(files_with_status A '.install' "$dir")
+  new_installs=$(files_with_status A '.install' "$dir" "$base_ref")
   if [[ -n "$new_installs" ]]; then
     log "  $(c_red "BLOCK") [new-install-file]"
     sed 's/^/      /' <<<"$new_installs" | head -8 >&2
@@ -252,7 +340,7 @@ check_pkg() {
   fi
 
   if (( hard_hits )); then
-    stash_flag "$pkg" "$dir"
+    stash_flag "$pkg" "$dir" "$base_ref"
     log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff")"
     return 1
   fi
@@ -273,7 +361,7 @@ check_pkg() {
   # inside are already caught by the hard rules above; this flags the structural
   # change itself as defense-in-depth for unknown evasion payloads.
   local mod_installs
-  mod_installs=$(files_with_status M '.install' "$dir")
+  mod_installs=$(files_with_status M '.install' "$dir" "$base_ref")
   if [[ -n "$mod_installs" ]]; then
     log "  $(c_yellow "review") [modified-install-file]"
     sed 's/^/      /' <<<"$mod_installs" | head -4 >&2
@@ -285,7 +373,7 @@ check_pkg() {
   # unusual and a plausible payload-hiding vector.
   local new_files new_bins
   new_files=$(git -C "$dir" diff --name-only --diff-filter=A \
-    HEAD.."origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)
+    "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)
   if [[ -n "$new_files" ]]; then
     new_bins=$(grep -iE '\.(zip|gz|tar|tgz|bz2|xz|zst|7z|rar|bin|exe|dat|so|dll|pyc)$' \
       <<<"$new_files" 2>/dev/null || true)
@@ -298,7 +386,7 @@ check_pkg() {
 
   # Maintainer email-domain drift (impersonation signal: same name, new domain).
   local old_d new_d drift
-  old_d=$(maintainer_domains HEAD "$dir")
+  old_d=$(maintainer_domains "$base_ref" "$dir")
   new_d=$(maintainer_domains "origin/${AUR_REMOTE_BRANCH}" "$dir")
   if [[ -n "$old_d" && -n "$new_d" ]]; then
     drift=$(comm -13 <(printf '%s\n' "$old_d") <(printf '%s\n' "$new_d"))
@@ -312,7 +400,7 @@ check_pkg() {
   # New source=() host (tarball swapped to a new domain). Set-diff, not regex —
   # a version bump on the same host must NOT fire.
   local old_s new_s sdrift
-  old_s=$(source_domains HEAD "$dir")
+  old_s=$(source_domains "$base_ref" "$dir")
   new_s=$(source_domains "origin/${AUR_REMOTE_BRANCH}" "$dir")
   if [[ -n "$new_s" ]]; then
     sdrift=$(comm -13 <(printf '%s\n' "$old_s") <(printf '%s\n' "$new_s"))
@@ -324,12 +412,14 @@ check_pkg() {
   fi
 
   if (( review_hits )); then
-    stash_flag "$pkg" "$dir"
+    stash_flag "$pkg" "$dir" "$base_ref"
     log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+    _stage_if_gating "$pkgbase" "$dir"
     return 2
   fi
 
   log "$(c_green "ok")    $pkg"
+  _stage_if_gating "$pkgbase" "$dir"
   return 0
 }
 
@@ -343,6 +433,12 @@ cmd_gate() {
   [[ -z "$helper" ]] && die "neither yay nor paru found on PATH"
 
   gc_state
+  # Fresh manifest for this run: check_pkg appends each pkgbase it stages, and
+  # `accept` (called by the wrapper after a successful build) promotes only
+  # these. Truncate here so a stale manifest from a prior/Ctrl-C'd run can't
+  # leak unrelated packages into accept.
+  : >"$MANIFEST_FILE"
+  AUR_SAFE_STAGING=1
 
   local updates pkgs=()
   updates=$("$helper" -Qua 2>/dev/null || true)
@@ -390,6 +486,38 @@ cmd_check() {
     esac
   done
   exit $rc_overall
+}
+
+cmd_accept() {
+  # Promote staged refs → accepted, but ONLY for packages confirmed installed at
+  # the staged version (the install-confirmation assertion). Called by the
+  # wrapper after `yay/paru` returns. Safe on ANY exit code: a package that
+  # didn't build/install won't match its staged version, so its trust anchor is
+  # left unchanged and the next gate re-audits it.
+  local manifest="$MANIFEST_FILE"
+  if [[ ! -s "$manifest" ]]; then
+    log "$(c_dim "accept: no staged refs; nothing to do")"
+    return 0
+  fi
+  local pkgbase staged_file staged_sha dir promoted=0 skipped=0
+  while IFS= read -r pkgbase; do
+    [[ -z "$pkgbase" ]] && continue
+    staged_file="$STAGED_DIR/$pkgbase"
+    [[ -f "$staged_file" ]] || { skipped=$((skipped+1)); continue; }
+    staged_sha=$(awk -F'\t' '{print $1; exit}' "$staged_file")
+    dir=$(find_pkg_dir "$pkgbase") || { skipped=$((skipped+1)); continue; }
+    if _installed_matches "$dir" "$staged_sha"; then
+      mv -f "$staged_file" "$ACCEPTED_DIR/$pkgbase"
+      promoted=$((promoted+1))
+    else
+      skipped=$((skipped+1))
+      log "$(c_dim "accept: $pkgbase not installed at staged version; anchor unchanged")"
+    fi
+  done <"$manifest"
+  # Rotate the manifest so a stale one can't be re-accepted by a later call.
+  : >"$manifest"
+  log "$(c_dim "accept: $promoted promoted, $skipped skipped")"
+  return 0
 }
 
 cmd_explain() {
@@ -562,7 +690,7 @@ if command -v aur-safe >/dev/null 2>&1; then
   }
 
   _aur_safe_dispatch() {
-    local _helper=$1 _line _gate=0 _out
+    local _helper=$1 _line _gate=0 _out _rc
     shift
     _out=$(_aur_safe_classify "$@")
     # line-by-line: package names can't be word-split safely in a for-loop
@@ -575,7 +703,14 @@ if command -v aur-safe >/dev/null 2>&1; then
       fi
     done <<< "$_out"
     if [ "$_gate" = 1 ]; then
-      _aur_safe_gate && command "$_helper" "$@"
+      _aur_safe_gate || return $?
+      command "$_helper" "$@"
+      _rc=$?
+      # Promote audited refs → accepted. Safe on any rc: install-confirmation
+      # inside `aur-safe accept` skips anything not installed at the staged
+      # version, so a failed or partial build can't poison the trust anchor.
+      aur-safe accept || true
+      return "$_rc"
     else
       command "$_helper" "$@"
     fi
@@ -698,6 +833,103 @@ cmd_selftest() {
   tw "-Q rustup"         ""                     -Q rustup
   tw "-R foo"            ""                     -R foo
 
+  # --- accepted-ref / staging / accept (finding 1.2) -----------------------
+  # Exercises the trust-anchor lifecycle with a temp git repo: seeding,
+  # persistence, install-confirmation (version match incl. epoch), manifest
+  # promotion. find_pkg_dir / _pacman_query are overridden in-scope; the
+  # overrides die with this selftest process.
+  log ""
+  log "  $(c_dim "-- accepted-ref state --")"
+  local _tmp _tsha _epsha
+  _tmp=$(mktemp -d)
+  git -C "$_tmp" init -q
+  git -C "$_tmp" remote add origin "file://$_tmp" 2>/dev/null || true
+  printf '\tpkgname = test-acc\n\tpkgver = 1.2\n\tpkgrel = 3\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm base
+  _tsha=$(git -C "$_tmp" rev-parse HEAD)
+  git -C "$_tmp" branch -qM master
+  git -C "$_tmp" update-ref refs/remotes/origin/master HEAD
+
+  # Redirect state dirs into the temp tree so the real ~/.cache/aur-safe is
+  # untouched, then restore at the end.
+  local _osd="$STATE_DIR" _oad="$ACCEPTED_DIR" _ost="$STAGED_DIR" _omf="$MANIFEST_FILE"
+  STATE_DIR="$_tmp/state"; ACCEPTED_DIR="$STATE_DIR/accepted"; STAGED_DIR="$STATE_DIR/staged"; MANIFEST_FILE="$STATE_DIR/last-gate"
+  mkdir -p "$ACCEPTED_DIR" "$STAGED_DIR"
+
+  ta() { # ta "name" expected_rc cmd...
+    local name=$1 expected=$2; shift 2
+    local got
+    "$@" >/dev/null; got=$?
+    if [ "$got" = "$expected" ]; then log "  $(c_green "PASS") $name"; pass=$((pass+1))
+    else log "  $(c_red "FAIL") $name (expected rc $expected, got $got)"; fail=$((fail+1)); fi
+  }
+
+  ta "accepted-seeds-HEAD"      0 accepted_ref "$_tmp" test-acc
+  if [ "$(awk -F'\t' '{print $1}' "$ACCEPTED_DIR/test-acc")" = "$_tsha" ]; then
+    log "  $(c_green "PASS") accepted-persists-sha"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accepted-persists-sha"; fail=$((fail+1)); fi
+  if [ "$(accepted_ref "$_tmp" test-acc)" = "$_tsha" ]; then
+    log "  $(c_green "PASS") accepted-idempotent"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accepted-idempotent"; fail=$((fail+1)); fi
+
+  # install-confirmation + accept: drive _pacman_query / find_pkg_dir via vars
+  # (one override each). Both are invoked only indirectly (_installed_matches /
+  # cmd_accept), hence the SC2329 disable directives below.
+  # shellcheck disable=SC2329  # test seam, called indirectly
+  _pacman_query() { [ -n "$_AUR_TEST_Q" ] && printf '%s\n' "$_AUR_TEST_Q"; }
+  # shellcheck disable=SC2329  # test seam, called indirectly
+  find_pkg_dir()   { [ -n "$_AUR_TEST_DIR" ] && printf '%s\n' "$_AUR_TEST_DIR" || return 1; }
+
+  _AUR_TEST_Q="test-acc 1.2-3"
+  ta "installed-matches"        0 _installed_matches "$_tmp" "$_tsha"
+  _AUR_TEST_Q="test-acc 1.2-2"
+  ta "installed-mismatch"       1 _installed_matches "$_tmp" "$_tsha"
+  _AUR_TEST_Q=""
+  ta "installed-absent"         1 _installed_matches "$_tmp" "$_tsha"
+
+  # epoch handling
+  printf '\tpkgname = test-ep\n\tpkgver = 1\n\tpkgrel = 1\n\tepoch = 2\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm ep
+  _epsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_Q="test-ep 2:1-1"
+  ta "installed-epoch-match"    0 _installed_matches "$_tmp" "$_epsha"
+  _AUR_TEST_Q="test-ep 1-1"
+  ta "installed-epoch-mismatch" 1 _installed_matches "$_tmp" "$_epsha"
+
+  # non-split package: real .SRCINFO omits pkgname= (it equals pkgbase=), and
+  # pkgbase= sits at column 0 (no leading tab). The install check must resolve
+  # via the pkgbase= fallback.
+  printf 'pkgbase = test-nosplit\n\tpkgver = 9\n\tpkgrel = 1\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm nosplit
+  _nssha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_Q="test-nosplit 9-1"
+  ta "installed-nosplit-match"    0 _installed_matches "$_tmp" "$_nssha"
+  _AUR_TEST_Q="test-nosplit 9-2"
+  ta "installed-nosplit-mismatch" 1 _installed_matches "$_tmp" "$_nssha"
+
+  # accept promotion: stage + manifest + matching install → promoted (moved).
+  _AUR_TEST_DIR="$_tmp"
+  _AUR_TEST_Q="test-acc 1.2-3"
+  write_ref "$_tmp" "$STAGED_DIR/test-acc"
+  printf 'test-acc\n' >"$MANIFEST_FILE"
+  ta "accept-promotes"          0 cmd_accept
+  if [ -f "$ACCEPTED_DIR/test-acc" ] && [ ! -f "$STAGED_DIR/test-acc" ]; then
+    log "  $(c_green "PASS") accept-moves-staged"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accept-moves-staged"; fail=$((fail+1)); fi
+
+  # accept skips a package not installed at the staged version (anchor unchanged).
+  _AUR_TEST_Q=""
+  write_ref "$_tmp" "$STAGED_DIR/test-skip"
+  printf 'test-skip\n' >"$MANIFEST_FILE"
+  ta "accept-skips-absent"      0 cmd_accept
+  if [ -f "$STAGED_DIR/test-skip" ] && [ ! -f "$ACCEPTED_DIR/test-skip" ]; then
+    log "  $(c_green "PASS") accept-leaves-orphan"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accept-leaves-orphan"; fail=$((fail+1)); fi
+
+  # restore real state dirs and clean up the temp repo
+  STATE_DIR="$_osd"; ACCEPTED_DIR="$_oad"; STAGED_DIR="$_ost"; MANIFEST_FILE="$_omf"
+  rm -rf "$_tmp"
+
   log ""
   log "  $(c_bold "$pass passed, $fail failed")"
   exit $fail
@@ -713,6 +945,7 @@ usage:
   aur-safe audit <pkg>         advisory scan of an uncached/new package
   aur-safe scan                scan installed pkgs for payload patterns
   aur-safe explain [pkg]       LLM second-opinion on last flagged diff
+  aur-safe accept              promote staged refs (called by the wrapper)
   aur-safe rules               list active rules
   aur-safe wrapper             print the suggested shell wrapper (not installed)
   aur-safe selftest            run built-in rule tests
@@ -737,6 +970,7 @@ case "$1" in
   audit)    shift; cmd_audit "$@" ;;
   scan)     shift; cmd_scan "$@" ;;
   explain)  shift; cmd_explain "$@" ;;
+  accept)   shift; cmd_accept "$@" ;;
   rules)    shift; cmd_rules "$@" ;;
   wrapper)  shift; cmd_wrapper "$@" ;;
   selftest) shift; cmd_selftest "$@" ;;

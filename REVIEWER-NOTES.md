@@ -83,6 +83,57 @@ is locally cached — which is the last successful fetch, still a valid
 known-good baseline. Failing closed would block all updates during routine
 network blips, training users to ignore warnings.
 
+### Accepted-ref state (finding 1.2) — the trust-anchor fix
+
+**Problem:** `check_pkg` used to diff `HEAD..origin/master`, trusting the
+helper-cache HEAD as known-good. But HEAD can advance past the known-good state
+(aborted build, manual `git pull` in the cache, helper restart) → an empty diff
+prints clean while a malicious update lands.
+
+**Design (staging + post-build accept):**
+- `accepted/<pkgbase>` = `<sha>\t<iso-utc>\t<origin-url>`. Seeded from cache HEAD
+  on first contact, then frozen.
+- On a clean or review-only audit, `check_pkg` writes the **gate-time**
+  `origin/master` tip to `staged/<pkgbase>` (NOT on empty-diff / hard-fail /
+  skip paths) and appends `pkgbase` to a per-run manifest (`last-gate`).
+- The wrapper captures the helper's exit code, runs the build, then calls
+  `aur-safe accept`. `accept` promotes `staged → accepted` **only for manifest
+  entries pacman confirms installed at the staged version**.
+
+**Why staging (not deferred acceptance or post-build bump):** the accepted ref
+must mean *the commit we audited*, not *what got installed*. There's a TOCTOU
+window between `check_pkg`'s fetch and the helper's own fetch. Capturing the
+gate-time tip (X) means a window-commit X′ lands installed-but-not-accepted;
+the next gate diffs X..origin/master, surfaces X′ as fresh delta, audits it.
+Deferred acceptance (match installed pkgver vs `.SRCINFO`) was rejected: needs a
+new parser and pkgver can stay identical across a malicious push.
+
+**Install-confirmation assertion (closes the untested `-Syu` partial-failure
+case):** `accept` compares the installed version (`pacman -Q`) against the
+staged commit's `.SRCINFO` pkgver/pkgrel/epoch — ANY matching pkgname counts
+(for split packages); non-split packages omit `pkgname=` in `.SRCINFO`, so the
+fallback reads the root `pkgbase=` line (column 0, no leading tab). A package
+that didn't build/install won't match → its anchor is left unchanged → next
+gate re-audits. This means `accept` is safe to run on **any** helper exit code.
+
+**Verified (sandboxed, isolated root/dbpath/cachedir):** both `yay` v12.6.0 and
+`paru` v2.1.0 exit non-zero on ANY build failure (`exit status 4` from makepkg
+propagates), `--noconfirm` included, ordering-independent — the good packages
+install, the failing one is blocked. So `rc==0 → accept` alone would suffice
+for the common case; install-confirmation is defense-in-depth for the `-Syu`
+path that wasn't directly tested and any future helper behavior change.
+
+**Review debate (deepseek-v4-pro/xhigh):** 6 findings raised. Conceded: (2)
+review-consent must also stage [fixed — stage before `return 2`]; (3) no staged
+GC [fixed — `gc_state` sweeps `staged/` at +7d, `accepted/` never swept]; (5)
+empty-diff staging is a no-op [fixed — stage only on non-empty clean/review];
+(6) bare SHA lacks provenance [fixed — `sha\tts\turl`]. Disputed finding (1)
+"`--all-staged` promotes unbuilt commits" was rated CRITICAL but its premise
+("yay can exit 0 on partial") is disproven by the test above; demoted to
+non-issue. `--all-staged` was dropped entirely in favor of a per-run manifest
+(cross-run isolation) + install-confirmation (intra-run). Finding (4) agreed
+the TOCTOU argument validates staging over deferred.
+
 ### `comm -13` set-diff for domain drift, not regex
 A version bump on the *same* domain (kernel.org → kernel.org) must NOT fire.
 Only NEW domains should. A regex can't express "set membership" cleanly;
@@ -133,9 +184,11 @@ These are real open questions where I'd value pushback:
    in a PKGBUILD" would block legit node-related AUR packages. Currently
    prints findings and proceeds. Should it gate instead?
 
-4. **Wrapper doesn't define a `paru` function.** It only shadows `yay`.
-   `paru` users would need to copy-paste and rename. Worth auto-detecting
-   which helper is in use and defining the right function?
+4. **Wrapper defines both `yay()` and `paru()`.** (Resolved — both are gated
+   cross-shell, bash+zsh.) Residual: `_aur_safe_dispatch` itself is only tested
+   via the classify function, not end-to-end. The 3 historical dispatch bugs
+   were each found manually, not by selftest. Trust the classify tests; verify
+   the full pipeline manually on any wrapper change.
 
 5. **The `scan` subcommand's pattern list is hardcoded.** It checks installed
    packages for a fixed set of payload names (`atomic-lockfile`,
@@ -155,11 +208,20 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 26/26 rules pass, incl. all evasion vectors and FP mitigations
-- Real AUR updates (3 pending): clean, exit 0, no regression
-- Synthetic full-evasion attack: 7 hard rules fire, exit 1
+- `selftest`: 61/61 (31 rule-engine + 16 wrapper-dispatch + 14 accepted-ref /
+  staging / accept / install-confirmation). Run with `aur-safe selftest`.
+- Accepted-ref lifecycle verified end-to-end on a real cached package
+  (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
+  install-confirmation (incl. non-split `pkgbase=` fallback), `accept` promotion.
+- Wrapper dispatch (gate → build → `accept`) verified with a stub helper in
+  both bash and zsh: clean build → accept → rc 0; failed build → rc 1
+  propagated; review-consent → proceeds → rc 0.
+- `yay`/`paru` exit non-zero on ANY build failure — sandboxed test
+  (isolated root/dbpath/cachedir, good+broken PKGBUILDs), both helpers,
+  ordering-independent. See *Accepted-ref state* above.
+- Real AUR updates: clean, exit 0, no regression.
+- Synthetic full-evasion attack: hard rules fire, exit 1.
 - Stealth scenario (impersonation + modified hook + committed binary, no
-  payloads): 3 review rules fire, exit 2
-- `explain` → LLM path confirmed working with glm-5.2
-- paru cache resolution confirmed
-- Not wired up — lives at `~/.local/bin/aur-safe`, enabled via shell wrapper
+  payloads): review rules fire, exit 2.
+- `explain` → LLM path confirmed working with glm-5.2.
+- Wired cross-shell (`~/.shrc`), both `yay` and `paru` gated.
