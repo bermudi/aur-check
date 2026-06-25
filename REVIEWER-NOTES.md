@@ -256,6 +256,33 @@ slow path can return a `.SRCINFO`-only dir (no `.git`) → `git rev-parse` fails
 whole-file content as "FLAGGED DIFF" — cosmetic, the LLM analysis is
 format-agnostic.
 
+### Cache re-seeding — rejected (baseline recovery superseded it)
+A `reseed`/`yay -G` wrapper to restore a missing cache clone was once the
+planned "fix" for the missing-cache path. **Rejected after baseline recovery
+landed**, on three grounds:
+1. **The motivation is gone.** Re-seeding was conceived when missing-cache was a
+de graded path (coarse whole-file scan, `.install` FPs). Baseline recovery made
+the missing-cache path a real diff through the same `scan_diff_rules` pipeline —
+functionally equivalent to the cached path for the common case. Re-seeding no
+longer upgrades a bad path to a good one.
+2. **It would make the next gate *less* scrutinized, not more.** Cached
+first-contact seeds the anchor from clone HEAD and audits *nothing* about the
+tip (trusted wholesale). Missing-cache baseline recovery diffs the installed
+version to the tip and scans the delta. So restoring the cached path to "fix" a
+missing-cache package would reduce scrutiny on its next gate.
+3. **Naive re-seed re-creates the blindspot** for the *currently-pending* update:
+clone → `accepted_ref` auto-seeds from clone HEAD (= origin/master tip) → if
+that update is malicious, the next gate shows an empty diff and prints clean.
+This is identical to fresh-install first-contact semantics (an accepted
+assumption), so it's not a new hole — but it inverts the value proposition.
+
+The escape hatch for the rare convenience case already exists and is free:
+`yay -G <pkg>` clones correctly (incl. split packages, which the missing-cache
+clone URL gets wrong) and behaves as a known first-contact seed. Document, don't
+build. Revisit only if repeated fresh-clone cost on missing-cache packages
+becomes measurable (unlikely — missing-cache is rare and one clone per gate is
+~80ms).
+
 ### Exit codes: 0 clean | 1 hard-fail | 2 review | 3 usage/env
 Maps cleanly to wrapper semantics: 0 → proceed, 1 → abort, 2 → proceed with
 consent, 3 → surface error. More granular codes would just need re-mapping
