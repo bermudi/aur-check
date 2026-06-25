@@ -35,8 +35,13 @@ Two gate paths, both diff-based:
   installed version's commit in AUR history, diff that..origin/master. Falls
   back to a whole-file hard-rule scan only if the installed version isn't found.
 
-Both paths share one rule pipeline (`scan_diff_rules`) so they can't drift. See
-`REVIEWER-NOTES.md` for the full two-tier model and rule-classification rationale.
+There are **two rule pipelines, not one** — keep them straight:
+- The **diff pipeline** (hard + review + structural rules) is shared by the
+  cached path and the baseline-recovery tier, so they can't drift.
+- The **whole-file pipeline** (hard-rules-only — review rules on a
+  baseline-less scan would fire on every legit pip/cargo package) is shared by
+  `audit` and the missing-cache whole-file fallback tier.
+See `REVIEWER-NOTES.md` for the full two-tier model and rule-classification rationale.
 
 ## Threat model (why the rules look the way they do)
 The 2026 attacker adopts an **orphaned** package via a burner account, pushes an
