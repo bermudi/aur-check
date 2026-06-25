@@ -46,6 +46,9 @@ MANIFEST_FILE="$STATE_DIR/last-gate"
 EXPLAIN_MODEL="${AUR_SAFE_MODEL:-zai/glm-5.2}"
 EXPLAIN_MAXLINES="${AUR_SAFE_EXPLAIN_MAXLINES:-1000}"
 AUR_REMOTE_BRANCH="${AUR_SAFE_BRANCH:-master}"
+# Base URL for fresh clones (audit + missing-cache fallback). Override for AUR
+# mirrors. Normal updates use the helper's existing cache clone, not this.
+AUR_URL="${AUR_SAFE_AUR_URL:-https://aur.archlinux.org}"
 
 mkdir -p "$STATE_DIR" "$ACCEPTED_DIR" "$STAGED_DIR"
 
@@ -286,6 +289,45 @@ _stage_if_gating() {
   printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
 }
 
+# Clone <pkg> from AUR (AUR_URL) into a temp dir, run the HARD rule set against
+# PKGBUILD + *.install + *.sh, emit findings, and clean up. Shared by `audit`
+# (advisory, new installs) and by `check_pkg`'s missing-cache fallback
+# (review-level, uncached updates). Sets globals on success:
+#   SCAN_HITS    1 if any hard rule fired, else 0
+#   SCAN_CONTENT concatenated file contents (caller may stash for `explain`)
+# Returns 0 on success regardless of hits; non-zero if the clone or read failed
+# (caller decides the exit-code policy). Review rules are deliberately NOT run:
+# a whole-file scan (no baseline) would fire pip/cargo/go on every legit package
+# that legitimately uses them — the same reason `audit` is hard-rules-only.
+scan_clone() {
+  local pkg="$1" tmp content
+  SCAN_HITS=0; SCAN_CONTENT=""
+  tmp=$(mktemp -d) || return 1
+  log "$(c_dim "→ cloning $pkg from AUR to $tmp")"
+  if ! git clone -q "${AUR_URL}/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
+    rm -rf "$tmp"; return 1
+  fi
+  shopt -s nullglob
+  content=$(cat "$tmp/$pkg"/PKGBUILD "$tmp/$pkg"/*.install "$tmp/$pkg"/*.sh 2>/dev/null || true)
+  shopt -u nullglob
+  rm -rf "$tmp"
+  [[ -z "$content" ]] && return 1
+  SCAN_CONTENT="$content"
+
+  local i hits
+  for i in "${!RULE_NAMES[@]}"; do
+    local name="${RULE_NAMES[$i]}" pat="${RULE_PATTERNS[$i]}"
+    hits=$(grep -Eni -- "$pat" <<<"$content" 2>/dev/null || true)
+    if [[ -n "$hits" ]]; then
+      log "  $(c_yellow "?") [$name]"
+      sed 's/^/      /' <<<"$hits" | head -4 >&2
+      SCAN_HITS=1
+    fi
+  done
+  (( SCAN_HITS )) || log "  $(c_green "clean") no hard-rule matches"
+  return 0
+}
+
 ###############################################################################
 # core: check a single (cached) package
 # returns: 0 clean | 1 hard | 2 review
@@ -294,7 +336,30 @@ check_pkg() {
   local pkg="$1"
   local dir
   if ! dir=$(find_pkg_dir "$pkg"); then
-    log "$(c_dim "skip") $pkg — not in any AUR cache; use 'aur-safe audit $pkg' for an advisory scan"
+    # No cache clone => no diff baseline. A -Qua update with no cache dir used
+    # to silently `return 0` (clean), letting a malicious update through ungated
+    # while the gate still printed "all clear". Fall back to the same absolute-
+    # rule scan `audit` uses (clone + scan PKGBUILD/.install/.sh), but at REVIEW
+    # level: a hard-rule hit returns 2 (wrapper prompts for consent), clean
+    # returns 0. Hard rules only — review rules on a whole-file scan would fire
+    # on every legit pip/cargo package (REVIEWER-NOTES §3). The trust anchor is
+    # NOT touched: no accepted ref exists to stage against, nothing to diff. If
+    # the clone itself fails there is zero signal, so surface for consent (2)
+    # rather than silently passing (the old blindspot).
+    log "  $(c_dim "(no cache clone — advisory scan, no diff baseline)")"
+    if ! scan_clone "$pkg"; then
+      log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
+      return 2
+    fi
+    if (( SCAN_HITS )); then
+      printf '%s\n' "$SCAN_CONTENT" >"$STATE_DIR/flag.${pkg}.diff"
+      ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
+      printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
+      log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
+      log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+      return 2
+    fi
+    log "  $(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
     return 0
   fi
   local pkgbase="${dir##*/}"
@@ -622,33 +687,12 @@ cmd_audit() {
   # Applies absolute rules to PKGBUILD + .install + .sh (the sourced-script
   # surface). Does not block (exit 0); prints findings for human review.
   [[ $# -lt 1 ]] && die "usage: aur-safe audit <pkg>"
-  local pkg="$1" tmp
+  local pkg="$1"
   [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] || die "invalid package name: $pkg"
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
-  log "$(c_dim "→ cloning $pkg from AUR to $tmp")"
-  if ! git clone -q "https://aur.archlinux.org/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
-    die "could not clone $pkg (does it exist on AUR?)"
-  fi
-
-  local content
-  shopt -s nullglob
-  content=$(cat "$tmp/$pkg"/PKGBUILD "$tmp/$pkg"/*.install "$tmp/$pkg"/*.sh 2>/dev/null || true)
-  shopt -u nullglob
-  [[ -z "$content" ]] && die "no PKGBUILD/.install/.sh found"
-
   log "$(c_bold "findings for $pkg (advisory, non-blocking)")"
-  local hits=0 i
-  for i in "${!RULE_NAMES[@]}"; do
-    local name="${RULE_NAMES[$i]}" pat="${RULE_PATTERNS[$i]}" m
-    m=$(grep -Eni -- "$pat" <<<"$content" 2>/dev/null || true)
-    if [[ -n "$m" ]]; then
-      log "  $(c_yellow "?") [$name]"
-      sed 's/^/      /' <<<"$m" | head -4 >&2
-      hits=1
-    fi
-  done
-  (( hits )) || log "  $(c_green "clean") no hard-rule matches"
+  if ! scan_clone "$pkg"; then
+    die "could not clone or read $pkg (does it exist on AUR?)"
+  fi
   return 0
 }
 
@@ -982,6 +1026,38 @@ cmd_selftest() {
   STATE_DIR="$_osd"; ACCEPTED_DIR="$_oad"; STAGED_DIR="$_ost"; MANIFEST_FILE="$_omf"
   rm -rf "$_tmp"
 
+  # --- missing-cache fallback (the ventoy blindspot) -----------------------
+  # An update in yay -Qua whose cache clone is gone used to `return 0` (clean)
+  # with NO scan — a malicious update sailed through ungated while the gate
+  # printed "all clear". check_pkg now falls back to scan_clone (the audit
+  # engine) at REVIEW level: hard-rule hit → exit 2 (consent), clean → exit 0,
+  # clone failure → exit 2 (no silent passthrough). Exercises routing +
+  # exit-code mapping against local fixture repos (AUR_URL → file://), no net.
+  log ""
+  log "  $(c_dim "-- missing-cache fallback --")"
+  local _fbx _fsd _osr _osd2
+  _fbx=$(mktemp -d); _fsd=$(mktemp -d)
+  # build clean + malicious source repos, expose as bare <pkg>.git so the
+  # "${AUR_URL}/${pkg}.git" clone URL in scan_clone resolves to a local path.
+  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/aur"
+  printf 'pkgname=clean-pkg\npkgver=1\npkgrel=1\nsource=("https://example.com/x.tar")\n' >"$_fbx/src/clean-pkg/PKGBUILD"
+  printf 'pkgname=evil-pkg\npkgver=1\npkgrel=1\nbuild() { npm install payload; }\n' >"$_fbx/src/evil-pkg/PKGBUILD"
+  git -C "$_fbx/src/clean-pkg" init -q; git -C "$_fbx/src/clean-pkg" add -A; git -C "$_fbx/src/clean-pkg" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$_fbx/src/evil-pkg"  init -q; git -C "$_fbx/src/evil-pkg"  add -A; git -C "$_fbx/src/evil-pkg"  -c user.email=t@t -c user.name=t commit -qm base
+  git clone -q --bare "$_fbx/src/clean-pkg" "$_fbx/aur/clean-pkg.git"
+  git clone -q --bare "$_fbx/src/evil-pkg"  "$_fbx/aur/evil-pkg.git"
+  # isolate state dir (flag writes) + point scan_clone at the local fixtures +
+  # force the missing-cache branch via the find_pkg_dir seam (empty _AUR_TEST_DIR).
+  _osr="$AUR_URL"; AUR_URL="file://$_fbx/aur"
+  _osd2="$STATE_DIR"; STATE_DIR="$_fsd"
+  _AUR_TEST_DIR=""
+  ta "uncached-clean-returns-ok"       0 check_pkg clean-pkg
+  ta "uncached-evil-returns-review"    2 check_pkg evil-pkg
+  # clone failure (no such fixture) → review (consent), never silent passthrough
+  ta "uncached-clonefail-returns-review" 2 check_pkg nonexistent-pkg
+  AUR_URL="$_osr"; STATE_DIR="$_osd2"
+  rm -rf "$_fbx" "$_fsd"
+
   log ""
   log "  $(c_bold "$pass passed, $fail failed")"
   exit $fail
@@ -1009,6 +1085,7 @@ env:
   AUR_SAFE_MODEL              explain model     (default: zai/glm-5.2)
   AUR_SAFE_EXPLAIN_MAXLINES   diff truncation   (default: 1000)
   AUR_SAFE_BRANCH             remote branch     (default: master)
+  AUR_SAFE_AUR_URL            AUR base URL      (default: https://aur.archlinux.org)
 EOF
 }
 

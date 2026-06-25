@@ -164,6 +164,32 @@ Only NEW domains should. A regex can't express "set membership" cleanly;
 Legitimate C/C++ patches contain hex/octal escapes and `eval`-like patterns.
 Including them would false-positive on most C/C++ AUR packages.
 
+### Missing-cache fallback: review-level, not silent passthrough
+A package in `yay -Qua` whose cache clone is gone (manual `rm`, `yay -Sc`,
+corruption) has no `origin/master` to diff and no accepted ref to diff against.
+The entire gate is a `git diff accepted..origin/master`, so v1 `return 0`'d
+with a dim "skip" — a malicious update sailed through **ungated** while the gate
+still printed `✓ all clear`. This is strictly weaker than the new-install path
+(`audit`), which at least runs the absolute rules.
+
+`check_pkg` now falls back to `scan_clone` (the `audit` engine: fresh clone +
+hard-rule scan of PKGBUILD/`.install`/`.sh`) at **review level**: a hard-rule
+hit returns 2 (wrapper prompts `[y/N]`), clean returns 0. If the clone itself
+fails there is zero signal — surface for consent (2), never silently pass. The
+trust anchor is NOT touched: nothing exists to stage against. `scan_clone` was
+extracted from `cmd_audit` so both share one code path; the clone URL is
+overridable via `AUR_SAFE_AUR_URL` (mirrors + selftest without network).
+
+**Why review (2), not hard-fail (1):** a whole-file scan has no baseline, so the
+`install-hook-*` rules fire on any pre-existing legit `.install` (ventoy-bin,
+vscode-bin, …). Hard-failing would block routine updates of common packages.
+Review-level surfaces the finding for a one-keystroke consent — and the
+missing-cache path is itself rare (most updates keep their clone), so this is
+not the alert-fatigue vector §1 warns about. Why not advisory (0) like `audit`:
+`audit` gates a deliberate *new* install the user just typed; an uncached
+*update* is an unsolicited delta the user expected the gate to have already
+vouched for. Silent auto-proceed on that path is the bug we're fixing.
+
 ### Exit codes: 0 clean | 1 hard-fail | 2 review | 3 usage/env
 Maps cleanly to wrapper semantics: 0 → proceed, 1 → abort, 2 → proceed with
 consent, 3 → surface error. More granular codes would just need re-mapping
@@ -229,10 +255,12 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 67/67 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
+- `selftest`: 70/70 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
   staging / accept / install-confirmation, incl. faithful split + non-split +
   space-indented + pkgbase-fallback `.SRCINFO` scenarios verified against
-  makepkg output + real cached files). Run with `aur-safe selftest`.
+  makepkg output + real cached files; +3 missing-cache fallback routing /
+  exit-code / clone-fail cases via local `file://` fixture repos, no network).
+  Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
   install-confirmation (incl. non-split `pkgbase=` fallback), `accept` promotion.
@@ -250,6 +278,10 @@ These are real open questions where I'd value pushback:
   tab-format, space-format (opera-developer), split (windsurf), and stale-cache
   cases alike. No false positives or negatives.
 - Real AUR updates: clean, exit 0, no regression.
+- Missing-cache fallback verified live on ventoy-bin (cache clone deleted,
+  pending update): v1 silently `return 0`'d; now clones, runs the hard-rule
+  scan, exits 2 (review) on the legit `.install` findings — consent, not
+  block, not silent passthrough. Scan stashed for `explain`.
 - Synthetic full-evasion attack: hard rules fire, exit 1.
 - Stealth scenario (impersonation + modified hook + committed binary, no
   payloads): review rules fire, exit 2.
