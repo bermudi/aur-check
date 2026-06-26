@@ -4,9 +4,15 @@
 `aur-safe` — a deterministic gate for Arch Linux AUR package updates, run as a
 shell wrapper around `yay`/`paru`. Single-user, single-machine, not distributed.
 Born during the May–June 2026 AUR supply-chain attack; its entire reason for
-existing is to stop malicious AUR updates from reaching pacman. **Read
-`REVIEWER-NOTES.md` before touching the trust path** — it's the design ledger
-(threat model, settled decisions, rejected approaches, verification status).
+existing is to stop malicious AUR updates from reaching pacman.
+
+**Read these before touching the trust path:**
+- [REVIEWER-NOTES.md](./REVIEWER-NOTES.md) — canonical design ledger (threat
+  model, settled decisions, rejected approaches, verification status)
+- [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
+  design principles, rule classification
+- [docs/findings/](./docs/findings/) — four deferred security findings with line
+  numbers and fix assessments
 
 ## Stack
 Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory
@@ -14,49 +20,33 @@ Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory
 (`aur-safe`); runtime state under `~/.cache/aur-safe/`.
 
 ## Architecture
-The gate runs **before** the helper on `yay/paru -Syu`. **Deterministic regex
-rules are the gate; the LLM is never on the trust path** — it's an on-demand
-second opinion via `explain` only. This is settled; do not propose
-LLM-in-the-loop gating.
 
-**Trust model (the central invariant):** `~/.cache/aur-safe/accepted/<pkgbase>`
-is the trust anchor — the SHA of the last commit that was *audited AND confirmed
-installed*. Seeded from the helper-cache HEAD on first contact, then advanced
-only by `accept` after a build pacman confirms. The accepted ref must mean *the
-commit we audited, not what got installed*: there's a TOCTOU window between the
-gate's fetch and the helper's, resolved by capturing the gate-time tip into
-`staged/` and promoting only confirmed installs. Any change that lets the anchor
-advance to an unaudited commit reopens the original bug this project was built
-to fix — re-check staging discipline on every gate-path change.
+### Trust model (the central invariant)
+`~/.cache/aur-safe/accepted/<pkgbase>` is the trust anchor — the SHA of the last
+commit that was *audited AND confirmed installed*. Seeded from the helper-cache
+HEAD on first contact, then advanced only by `accept` after a build pacman
+confirms. The accepted ref must mean *the commit we audited, not what got
+installed*: there's a TOCTOU window between the gate's fetch and the helper's,
+resolved by capturing the gate-time tip into `staged/` and promoting only
+confirmed installs. **Any change that lets the anchor advance to an unaudited
+commit reopens the original bug this project was built to fix** — re-check
+staging discipline on every gate-path change.
 
-Two gate paths, both diff-based:
+### Two gate paths (both diff-based)
 - **Cached:** helper has a git clone → `git diff accepted..origin/master` → rules.
 - **Missing-cache (clone gone):** baseline recovery — clone fresh, find the
   installed version's commit in AUR history, diff that..origin/master. Falls
   back to a whole-file hard-rule scan only if the installed version isn't found.
 
-There are **two rule pipelines, not one** — keep them straight:
-- The **diff pipeline** (hard + review + structural rules) is shared by the
-  cached path and the baseline-recovery tier, so they can't drift.
-- The **whole-file pipeline** (hard-rules-only — review rules on a
-  baseline-less scan would fire on every legit pip/cargo package) is shared by
+### Two rule pipelines (not one)
+- **Diff pipeline** (`scan_diff_rules`): hard + review + structural rules.
+  Shared by the cached path and the baseline-recovery tier, so they can't drift.
+- **Whole-file pipeline** (`_scan_whole_pkg`): hard-rules-only. Review rules on
+  a baseline-less scan would fire on every legit pip/cargo package. Shared by
   `audit` and the missing-cache whole-file fallback tier.
-See `REVIEWER-NOTES.md` for the full two-tier model and rule-classification rationale.
 
-## Threat model (why the rules look the way they do)
-The 2026 attacker adopts an **orphaned** package via a burner account, pushes an
-`.install` hook running `npm install <payload>` (e.g. `atomic-lockfile`,
-`crypto-javascript` — they exfiltrate Telegram/browser/SSH data), impersonates
-the prior maintainer (same name, swapped email domain), and shifts obfuscation
-(hex/octal escapes, `bun`/`pnpm`/`pip`, alternate interpreters). This is why:
-- JS package managers (npm/pnpm/bun/yarn) are **hard-fail**; pip/gem/cargo/go
-  are **review-only** (legit AUR use is common).
-- `.install` hooks + new/modified `.install` files are the primary vector.
-- Maintainer + `source=()` domain drift is flagged (the impersonation signal).
-
-The attacker rotates names faster than blacklists track, so the design is
-**structural pattern detection, not a payload-name list.** Do not propose adding
-names to a blacklist — that loses the race.
+There is also a **third ad-hoc pipeline** in `cmd_scan` (retroactive scan of
+installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adhoc-pipeline.md).
 
 ## Conventions
 - **Comments point to REVIEWER-NOTES** for rationale; code comments are dense
@@ -74,7 +64,7 @@ names to a blacklist — that loses the race.
 ## Workflow
 ```sh
 bash -n aur-safe          # syntax check
-./aur-safe selftest       # the gate — must stay green
+./aur-safe selftest       # the gate — must stay green (87/87)
 shellcheck -s bash aur-safe
 ```
 Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known
@@ -91,6 +81,12 @@ installed by default.
   entry point without the guard.
 - **Don't swallow exceptions.** `grep … || true` is deliberate where grep's exit
   is a signal, not a failure — never blanket-swallow in new code.
+- **Don't add names to blacklists.** The design is structural pattern detection;
+  the attacker rotates names faster than lists track. See
+  [threat model](./docs/threat-model.md).
+- **`git init` defaults to `main`, not `master`.** Any new fixture or clone
+  logic assuming `master` will silently fail (empty `origin/master`). Always
+  force `-c init.defaultBranch=master`.
 
 ## Quality Bar
 - **Security tool: code is not done until verified.** `selftest` green + `bash -n`
