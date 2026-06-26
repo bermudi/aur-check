@@ -1,7 +1,7 @@
 # Finding A — Empty PKGBUILD in tier 2 treated as clean
 
 **Source:** kimi-k2.6 delegate review, session `019f0184-3dbd-7d44-b9b3-8ef793ee553b`  
-**Status:** open (deferred, low severity)  
+**Status:** closed (fixed — `_scan_whole_pkg` failure surfaces as review exit 2)  
 **Lines:** `_scan_whole_pkg()` at `aur-safe:382`, caller at `aur-safe:595`
 
 ## What happens

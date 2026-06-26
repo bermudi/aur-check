@@ -1,0 +1,5 @@
+# Deliberately kept warnings — see REVIEWER-NOTES.md:
+#   SC2016 — backticks in single-quoted regex are chars to match, not command
+#            substitution; double-quoting would execute them during selftest.
+#   SC2001 — sed 's/^/  /' is clearer than ${var//$'\n'/...} for line indent.
+disable=SC2016,SC2001

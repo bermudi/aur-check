@@ -52,9 +52,10 @@ installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adh
 - **Comments point to REVIEWER-NOTES** for rationale; code comments are dense
   and reference the doc by section. Keep this coupling.
 - **Deliberately-kept shellcheck warnings** — do NOT "fix" these (documented in
-  REVIEWER-NOTES): SC2016 (backticks in single-quoted regex are *chars to match*,
-  not command-subst — double-quoting executes the string) and SC2001 (`sed`
-  indent is clearer than `${var//$'\n'/...}`).
+ REVIEWER-NOTES): SC2016 (backticks in single-quoted regex are *chars to match*,
+ not command-subst — double-quoting executes the string) and SC2001 (`sed`
+ indent is clearer than `${var//$'\n'/...}`). Excluded via `.shellcheckrc` so
+ `shellcheck -s bash aur-safe` exits clean in CI.
 - **`set -uo pipefail` without `set -e`** — the script relies on explicit
   `case $rc` propagation; `-e` fights that pattern.
 - **Bash, not Go/Rust/Python.** Security tool — every line must be eyeballable.
@@ -64,8 +65,8 @@ installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adh
 ## Workflow
 ```sh
 bash -n aur-safe          # syntax check
-./aur-safe selftest       # the gate — must stay green (87/87)
-shellcheck -s bash aur-safe
+./aur-safe selftest       # the gate — must stay green (92/92)
+shellcheck -s bash aur-safe  # SC2016/SC2001 excluded via .shellcheckrc
 ```
 Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known
 missing-cache baseline-recovery case). The wrapper (`aur-safe wrapper`) is not

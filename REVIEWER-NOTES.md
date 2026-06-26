@@ -348,17 +348,18 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 87/87 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
+- `selftest`: 92/92 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
   staging / accept / install-confirmation, incl. faithful split + non-split +
   space-indented + pkgbase-fallback `.SRCINFO` scenarios verified against
-  makepkg output + real cached files; +10 missing-cache fallback cases: routing
-  / exit-code / clone-fail / review-rules-skipped / .install-hit / staging-tip
-  / manifest / stash, via local `file://` fixture repos, no network; +10
-  baseline-recovery cases: FP-elimination / hard-hit-blocks / review-hit /
+  makepkg output + real cached files; +11 missing-cache fallback cases: routing
+  / exit-code / clone-fail / review-rules-skipped / .install-hit / empty-PKGBUILD
+  / staging-tip / manifest / stash, via local `file://` fixture repos, no network;
+  +10 baseline-recovery cases: FP-elimination / hard-hit-blocks / review-hit /
   review-hit-stashes-diff / not-found-falls-back / clean-stages-tip /
   hard-hit-no-stage / skips-missing-srcinfo / comment-missing-no-desync /
   tree-type-no-desync, via local fixtures with real git history + committed
-  `.SRCINFO`).
+  `.SRCINFO`; +5 diff-failure cases: diff_added bad-ref / scan_diff_rules /
+  corrupt-anchor review / no-stage on audit-unavailable).
   Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,

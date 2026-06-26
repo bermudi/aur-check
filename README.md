@@ -92,7 +92,7 @@ aur-safe explain [pkg]     LLM second-opinion on last flagged diff
 aur-safe accept            promote staged refs (called by the wrapper)
 aur-safe rules             list active rules
 aur-safe wrapper           print the suggested shell wrapper
-aur-safe selftest          run built-in rule tests (87/87)
+aur-safe selftest          run built-in rule tests (92/92)
 ```
 
 ## Environment
@@ -113,12 +113,20 @@ Wrapper-level (set in your shell rc):
 |---|---|
 | `AUR_SAFE_ALLOW_REVIEW=1` | Auto-proceed on review flags (non-interactive) |
 
+**Warning:** `AUR_SAFE_ALLOW_REVIEW=1` also auto-proceeds when the gate cannot
+audit at all — e.g. AUR clone failure on the missing-cache path (zero signal).
+In automation that cannot tolerate a blocked update, this recreates a silent
+passthrough hole. Do not set it in unattended scripts unless you accept that
+tradeoff.
+
 ## Status
 
 Single-user, single-machine. Hardened through multiple independent reviews (see
 commit history and `docs/findings/`). The trust anchor is aur-safe's own
 accepted-ref state, seeded from the helper HEAD on first contact and advanced
-only after a gate-audited build that pacman confirms installed. Selftest: 87/87.
+only after a gate-audited build that pacman confirms installed. Selftest: 92/92.
+
+Licensed under the [MIT License](./LICENSE).
 
 ## Docs
 
@@ -126,5 +134,5 @@ only after a gate-audited build that pacman confirms installed. Selftest: 87/87.
   architecture, settled decisions, rejected approaches, verification)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   principles, rule classification
-- [docs/findings/](./docs/findings/) — deferred security findings (pending
-  fixes, documented for visibility)
+- [docs/findings/](./docs/findings/) — documented security findings (A and C
+  closed; B and D deferred)
