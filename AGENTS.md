@@ -7,7 +7,7 @@ Born during the May–June 2026 AUR supply-chain attack; its entire reason for
 existing is to stop malicious AUR updates from reaching pacman.
 
 **Read these before touching the trust path:**
-- [REVIEWER-NOTES.md](./REVIEWER-NOTES.md) — canonical design ledger (threat
+- [docs/design-ledger.md](./docs/design-ledger.md) — canonical design ledger (threat
   model, settled decisions, rejected approaches, verification status)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   design principles, rule classification
@@ -49,10 +49,10 @@ There is also a **third ad-hoc pipeline** in `cmd_scan` (retroactive scan of
 installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adhoc-pipeline.md).
 
 ## Conventions
-- **Comments point to REVIEWER-NOTES** for rationale; code comments are dense
+- **Comments point to design-ledger** for rationale; code comments are dense
   and reference the doc by section. Keep this coupling.
 - **Deliberately-kept shellcheck warnings** — do NOT "fix" these (documented in
- REVIEWER-NOTES): SC2016 (backticks in single-quoted regex are *chars to match*,
+ design-ledger): SC2016 (backticks in single-quoted regex are *chars to match*,
  not command-subst — double-quoting executes the string) and SC2001 (`sed`
  indent is clearer than `${var//$'\n'/...}`). Excluded via `.shellcheckrc` so
  `shellcheck -s bash aur-safe` exits clean in CI.

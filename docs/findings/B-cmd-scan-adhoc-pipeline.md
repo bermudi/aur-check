@@ -1,6 +1,7 @@
 # Finding B — `cmd_scan` is an ad-hoc third rule pipeline
 
 **Source:** kimi-k2.6 delegate review, session `019f0184-3dbd-7d44-b9b3-8ef793ee553b`  
+**Updated:** 2026-06-26 — added campaign evidence from `aur-general` mailing list  
 **Status:** open (deferred, needs design decision)  
 **Lines:** `cmd_scan()` at `aur-safe:815-835`
 
@@ -23,7 +24,26 @@ Additionally, `cmd_scan` hardcodes the exact blacklist names
 (`atomic-lockfile|crypto-javascript|lockfile-js|nextfile-js|js-digest`) that the
 main gate deliberately avoids — the gate uses structural pattern detection
 because "the attacker rotates names faster than blacklists track"
-(REVIEWER-NOTES.md).
+(design-ledger.md).
+
+### Evidence from the June 2026 campaign (aur-general list)
+
+The `aur-general` mailing list (301 messages, 2026-06-01 through 2026-06-24)
+documents the actual campaign. The attacker *did* rotate names and installers
+exactly as the gate's structural approach predicted:
+
+- **Payload names beyond the blacklist:** `yargs`, `chalk`, `minimist`,
+  `ansicolor`, `nextfile-js`. `cmd_scan`'s hardcoded list misses all of them.
+- **Wave 2 switched installers:** `bun add` (not `npm install`). `cmd_scan`
+  covers `bun add\|x` but misses `bun install` — the gate's `RULE_PATTERNS` has
+  `add\|x\|install`, `cmd_scan` has `add\|x`.
+- **Wave 3 used escape obfuscation:** `$'\x63'"d"` / `$'\141\x6e'` etc. —
+  `cmd_scan`'s grep would miss this entirely because it pattern-matches
+  strings, not structural features. The main gate's hex/octal escape-run
+  detector (a structural rule) catches it.
+
+The divergence is not theoretical — it's a documented gap against a real
+campaign that evolved across three waves in four days.
 
 ### Why this exists
 

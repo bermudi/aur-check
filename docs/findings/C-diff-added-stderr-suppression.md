@@ -33,7 +33,7 @@ The gate's "ok — no source changes" output is reachable from both:
 - "properly audited and found nothing" (correct)
 - "couldn't run the audit at all" (silent failure)
 
-The fetch-failure rationale from REVIEWER-NOTES ("failing closed would train
+The fetch-failure rationale from design-ledger ("failing closed would train
 users to ignore warnings") doesn't apply here — a corrupted baseline has no
 cached fallback like a stale `origin/master` does. If the diff command itself
 can't run, the data we need is absent, not stale.

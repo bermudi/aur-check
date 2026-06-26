@@ -6,23 +6,10 @@ that were deliberate. **Read this before reviewing the script.**
 
 ## What problem it solves (threat model)
 
-An active, evolving supply-chain attack on the AUR (May–June 2026, still
-ongoing). The attacker's MO:
-
-1. Creates a burner account (single-package, throwaway email).
-2. Adopts an **orphaned** AUR package (automatic adoption, no review).
-3. Pushes a commit that adds/edits an `.install` hook running
-   `npm install <payload-package>` — currently `atomic-lockfile`,
-   `crypto-javascript`, `lockfile-js`, `nextfile-js`, `js-digest`. The npm
-   package ships a binary blob that exfiltrates data (Telegram `tdata`,
-   browser dirs, SSH keys).
-4. **Impersonates the prior maintainer** — keeps the name, swaps the email
-   domain — so the diff looks benign at a glance.
-5. Obfuscation is shifting: hex/octal shell escapes, `bun add`/`pip install`
-   instead of `npm`, alternate interpreters for `| sh`.
-
-The attacker rotates package names and installers faster than blacklists can
-track. Static name lists are already a losing race.
+See **[threat-model.md](threat-model.md)** for the full, sourced
+account — attacker profile, three-wave obfuscation timeline, homograph vector,
+and related community tools. This document focuses on *design decisions*,
+not threat narrative.
 
 ## Architecture (settled — don't propose alternatives unless you see a real flaw)
 

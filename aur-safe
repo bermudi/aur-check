@@ -158,7 +158,7 @@ find_pkg_dir() {
 # Emit only ADDED lines from a git diff (leading '+' stripped, '+++' headers
 # skipped). Binary blobs and patch files are excluded (see EXCLUDE_PATHS).
 # Assert git diff exit code: with pipefail, a pipeline masks git's failure
-# behind sed — capture first (finding C; REVIEWER-NOTES §3).
+# behind sed — capture first (finding C; design-ledger §3).
 diff_added() {
   local diff_out
   diff_out=$(git --no-pager diff "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null) || return 1
@@ -564,7 +564,7 @@ scan_diff_rules() {
 #   2. WHOLE-FILE FALLBACK: if no commit matches the installed version (or the
 #      version can't be queried), clone + hard-rules-only absolute scan at
 #      review level (2 on hit / 0 on clean) — review rules on a baseline-less
-#      scan would fire on every legit pip/cargo package (REVIEWER-NOTES §3).
+#      scan would fire on every legit pip/cargo package (design-ledger §3).
 # Clone failure always returns 2 (zero signal — surface for consent, never
 # silently pass). Staging: the scan-time tip (SCAN_SHA, captured at clone) is
 # staged on clean/review but NOT hard-fail (a blocked update never reaches the
@@ -658,7 +658,7 @@ check_pkg() {
 
   # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
   # Assert git diff exit code — empty output from a failed diff is not "clean"
-  # (finding C; REVIEWER-NOTES §3).
+  # (finding C; design-ledger §3).
   local changes
   if ! changes=$(git -C "$dir" diff --name-only \
       "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null); then

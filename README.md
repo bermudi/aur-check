@@ -4,7 +4,7 @@ Deterministic gate for [Arch Linux AUR](https://aur.archlinux.org/) package
 updates. Born during the May–June 2026 AUR supply-chain attack — catches
 malicious updates **before** they reach pacman. The LLM is advisory only;
 deterministic regex rules are the gate. See
-[REVIEWER-NOTES.md](./REVIEWER-NOTES.md) for the full design ledger (threat
+[docs/design-ledger.md](./docs/design-ledger.md) for the full design ledger (threat
 model, settled decisions, rejected approaches, verification status).
 
 ## How it works
@@ -130,7 +130,7 @@ Licensed under the [MIT License](./LICENSE).
 
 ## Docs
 
-- [REVIEWER-NOTES.md](./REVIEWER-NOTES.md) — canonical design ledger (threat model,
+- [docs/design-ledger.md](./docs/design-ledger.md) — canonical design ledger (threat model,
   architecture, settled decisions, rejected approaches, verification)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   principles, rule classification

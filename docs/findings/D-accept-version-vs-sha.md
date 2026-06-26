@@ -41,7 +41,7 @@ lets the next gate catch any window-commit delta.
 
 ## Action
 
-No code change. The REVIEWER-NOTES §"Why staging" paragraph should be refined to
+No code change. The design-ledger §"Why staging" paragraph should be refined to
 clarify the version-equivalence-vs-SHA-equivalence distinction: the staged commit
 is the *audited* commit; what got installed is version-confirmed but may be a
 different SHA — and that's fine, because the next gate audits the delta.
