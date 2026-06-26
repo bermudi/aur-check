@@ -60,7 +60,7 @@ git clone https://github.com/bermudi/aur-safe ~/build/aur-check
 ln -s ~/build/aur-check/aur-safe ~/.local/bin/aur-safe
 ```
 
-Dependencies: `bash` ≥ 5.0, `git`, an AUR helper (`yay` or `paru`). `pi` is
+Dependencies: `bash` ≥ 4.3, `git`, an AUR helper (`yay` or `paru`). `pi` is
 required only for the `explain` subcommand.
 
 ## Enable

@@ -11,8 +11,8 @@ existing is to stop malicious AUR updates from reaching pacman.
   model, settled decisions, rejected approaches, verification status)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   design principles, rule classification
-- [docs/findings/](./docs/findings/) — four deferred security findings with line
-  numbers and fix assessments
+- [docs/findings/](./docs/findings/) — four documented security findings with line
+  numbers and fix assessments (three deferred, one closed as working-as-designed)
 
 ## Stack
 Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory

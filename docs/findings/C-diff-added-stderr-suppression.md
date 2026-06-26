@@ -2,7 +2,7 @@
 
 **Source:** glm-5.1 delegate review, session `019f0184-3dba-7727-bac9-7f203e6516af`  
 **Status:** open (deferred, low exploitability but trust-path failure)  
-**Lines:** `diff_added()` at `aur-safe:160-163`, pre-diff short-circuit at `aur-safe:645-648`
+**Lines:** `diff_added()` at `aur-safe:160-163`, pre-diff short-circuit at `aur-safe:648`
 
 ## What happens
 
