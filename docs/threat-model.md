@@ -7,13 +7,13 @@ against and why the rules look the way they do.
 ## Attacker profile
 
 The May–June 2026 AUR supply-chain attack — documented in real time on the
-`aur-general` mailing list (301 messages, 2026-06-01 through 2026-06-24) —
-followed this pattern:
+`aur-general` mailing list ([archive](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/),
+~300 messages, snapshot from 2026-06-26) — followed this pattern:
 
-1. **Creates burner accounts** with throwaway emails on the AUR. Known
-   attacker accounts: `franziskaweber`, `tobiaswesterburg`, `ellenmyklebust`,
-   `vitoriapires`, `catringiess`, `dominikgross`, `meryemplath`,
-   `laurentbavaud`, `ivonahruskova`.
+1. **Creates burner accounts** with throwaway emails on the AUR. At least
+   nine burner accounts were identified, including `franziskaweber`,
+   `tobiaswesterburg`, `ellenmyklebust`, `vitoriapires`, `catringiess`,
+   `dominikgross`, `meryemplath`, `laurentbavaud`, `ivonahruskova`.
 2. **Adopts orphaned packages** (automatic adoption, no review required).
    Targets included `gnome-randr-rust`, `rtspeccy-git`, `pypiserver`,
    `python-dbapi-compliance`, `anythingllm-cli-bin`, `alvr`, `workbench`,
@@ -43,7 +43,8 @@ The attacker rotates names faster than blacklists can track, so aur-safe
 detects *structural patterns* rather than payload names:
 
 - **JS package managers** (npm/pnpm/bun/yarn) are **hard-fail** — they are the
-  primary campaign vector and have no legitimate use in an `.install` hook.
+  primary campaign vector and have no legitimate use in aur-safe's audit
+  surface (`.install` hooks, `PKGBUILD` install functions).
 - **Other package managers** (pip/gem/cargo/go) are **review-only** — they have
   legitimate use in real AUR packages (Python/Ruby/Rust tooling).
 - **Hex/octal escape runs** (2+ adjacent) are hard-fail — they spell out hidden
@@ -159,7 +160,7 @@ whitelisting is a trap — the attacker mixes `\x63`, `\141`, `\x6e`, `\143`,
 
 Pacman hooks run *after* install — by then the malicious `.install` has already
 executed. Interception must happen before makepkg/pacman, hence the shell
-wrapper around yay/paru.
+wrapper around yay/paru. Also discussed in [design-ledger.md](design-ledger.md) §Architecture.
 
 ## Homograph attacks (unaddressed vector)
 

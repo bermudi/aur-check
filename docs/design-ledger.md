@@ -6,10 +6,12 @@ that were deliberate. **Read this before reviewing the script.**
 
 ## What problem it solves (threat model)
 
-See **[threat-model.md](threat-model.md)** for the full, sourced
-account — attacker profile, three-wave obfuscation timeline, homograph vector,
-and related community tools. This document focuses on *design decisions*,
-not threat narrative.
+aur-safe is a deterministic gate for Arch Linux AUR package updates — it
+catches malicious updates **before** they reach pacman. See
+**[threat-model.md](threat-model.md)** for the full, sourced account —
+attacker profile, three-wave obfuscation timeline, homograph vector, and
+related community tools. This document focuses on *design decisions*, not
+threat narrative.
 
 ## Architecture (settled — don't propose alternatives unless you see a real flaw)
 
