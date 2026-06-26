@@ -467,3 +467,11 @@ staged commits.
   payloads): review rules fire, exit 2.
 - `explain` → LLM path confirmed working with glm-5.2.
 - Wired cross-shell (`~/.shrc`), both `yay` and `paru` gated.
+- **Red-team review (2026-06-26):** three delegate reviewers (glm-5.1 adversarial
+  auditor, kimi-k2.6 edge-case hunter, qwen3.7-max bug spotter) against the full
+  codebase + docs — 23 findings across 14 new finding files (E–R) + 9 low-severity
+  items. Two critical (E: IDN homograph silent bypass; F: .SRCINFO trust-anchor
+  poisoning), six high (G: tier-2 review-rules skipped; H: bunx/pnpm exec/yarn
+  dlx missing; I: pip3 bypass; J: git-config breaks diff; K: epoch=0; L:
+  manifest race). See [BACKLOG.md](../../BACKLOG.md) for prioritized task list
+  and [docs/findings/](docs/findings/) for individual write-ups.

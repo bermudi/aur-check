@@ -11,8 +11,11 @@ existing is to stop malicious AUR updates from reaching pacman.
   model, settled decisions, rejected approaches, verification status)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   design principles, rule classification
-- [docs/findings/](./docs/findings/) — four documented security findings with line
-  numbers and fix assessments (three deferred, one closed as working-as-designed)
+- [docs/findings/](./docs/findings/) — 18 documented security findings with line
+  numbers and fix assessments (A–D from prior reviews: A/B/C closed, D deferred;
+  E–R from the 2026-06-26 red-team review: all open, 2 critical, 6 high, 6 medium)
+- [BACKLOG.md](./BACKLOG.md) — prioritized task list with fix order, effort,
+  and status tracking (all 23 findings from the 2026-06-26 review)
 
 ## Stack
 Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory
@@ -91,6 +94,24 @@ installed by default.
 - **`git init` defaults to `main`, not `master`.** Any new fixture or clone
   logic assuming `master` will silently fail (empty `origin/master`). Always
   force `-c init.defaultBranch=master`.
+
+## Known vulnerability classes (2026-06-26 red-team review)
+
+Two critical attack paths discovered that escape the gate silently:
+- **IDN homograph `source=()` bypass** (Finding E) — non-ASCII chars in
+  `source=(...)` URLs are invisible to both domain-drift detection and the
+  boring classifier → silent exit 0. Fix: any `source=` line with bytes ≥ 0x80
+  must not classify as boring.
+- **`.SRCINFO` trust-anchor poisoning** (Finding F) — `_installed_matches` parses
+  pkgname/pkgver from attacker-controlled `.SRCINFO`, not PKGBUILD. Attacker
+  claims pkgname=glibc → `pacman -Q` matches → `accept` promotes malicious SHA.
+  Fix: parse PKGBUILD for install-confirmation, assert pkgname ∈ pkgbase's split set.
+
+Also: tier-2 whole-file fallback skips review rules (Finding G — pip/cargo/gem
+payloads can exit 0); `bunx`/`pnpm exec`/`yarn dlx` not matched by JS
+package-manager rules (Finding H); user git config (`diff.colorWords`,
+`diff.noprefix`) can break the entire diff pipeline (Finding J). See
+BACKLOG.md for the full list.
 
 ## Quality Bar
 - **Security tool: code is not done until verified.** `selftest` green + `bash -n`

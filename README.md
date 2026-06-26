@@ -139,7 +139,9 @@ tradeoff.
 ## Status
 
 Single-user, single-machine. Hardened through multiple independent reviews (see
-commit history and `docs/findings/`). The trust anchor is aur-safe's own
+commit history and `docs/findings/`). A 2026-06-26 red-team review by three
+delegate models found 23 findings — see [BACKLOG.md](./BACKLOG.md) for the
+prioritized task list. The trust anchor is aur-safe's own
 accepted-ref state, seeded from the helper HEAD on first contact and advanced
 only after a gate-audited build that pacman confirms installed. Selftest: 137/137.
 
@@ -151,5 +153,6 @@ Licensed under the [MIT License](./LICENSE).
   architecture, settled decisions, rejected approaches, verification)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   principles, rule classification
-- [docs/findings/](./docs/findings/) — documented security findings (A, B, and C
-  closed; D deferred)
+- [docs/findings/](./docs/findings/) — 18 documented security findings (A–R:
+  A/B/C closed, D deferred, E–R open from 2026-06-26 red-team review)
+- [BACKLOG.md](./BACKLOG.md) — prioritized task list from 2026-06-26 review
