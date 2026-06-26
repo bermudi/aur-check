@@ -211,6 +211,22 @@ diff_added() {
   sed -n '/^+++/!s/^+//p' <<<"$diff_out"
 }
 
+_srcinfo_leading_ws_only_added_line() {
+  local dir="$1" base_ref="$2" wanted="$3"
+  git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
+    .SRCINFO 2>/dev/null \
+    | awk -v wanted="$wanted" '
+        function norm(s) { sub(/^[[:space:]]+/, "", s); return s }
+        /^\+\+\+/ || /^---/ { next }
+        /^-/ { removed[norm(substr($0, 2))] = 1; next }
+        /^\+/ {
+          text = substr($0, 2)
+          if (text == wanted && removed[norm(text)]) found = 1
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
 # Domains seen in # Maintainer: / # Contributor: lines at a given ref.
 # Email regex is bracket-agnostic (works with or without < >).
 maintainer_domains() {
@@ -261,16 +277,19 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch|source|[[:alnum:]]+sums(_[[:alnum:]_]+)?)[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
     return 0
   fi
-  # .SRCINFO optdepends entries are advisory metadata. They do not affect build
-  # or install execution, so a plain added/changed optional dependency should
-  # not interrupt an upgrade as "non-boring".
-  if grep -Eq '^[[:space:]]*optdepends[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
+  # .SRCINFO advisory/package metadata. These fields do not affect build or
+  # install execution, so plain added/changed entries should not interrupt an
+  # upgrade as "non-boring".
+  if grep -Eq '^[[:space:]]*(pkgdesc|url|arch|license|groups|optdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
     return 0
   fi
   if grep -Eq '^[[:space:]]*source=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
   if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
+    return 0
+  fi
+  if grep -Eq '^[[:space:]]*["'"'"']?(SKIP|[A-Fa-f0-9]{16,})["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
   if grep -Eq '^[[:space:]]*source(_[[:alnum:]_]+)?=' <<<"$line" 2>/dev/null; then
@@ -323,6 +342,16 @@ _pkgbuild_optdepends_added_line() {
         }
         END { exit found ? 0 : 1 }
       '
+}
+
+_srcinfo_repo_dep_added_line() {
+  local line="$1" dep spec
+  grep -Eq '^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null || return 1
+  spec=$(sed -E 's/^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+//; s/[[:space:]].*$//' <<<"$line")
+  _pacman_dep_satisfied "$spec" && return 0
+  dep=$(sed -E 's/[<>=].*$//' <<<"$spec")
+  [[ "$dep" =~ ^[A-Za-z0-9@._+-]+$ ]] || return 1
+  _pacman_sync_info "$dep"
 }
 
 _describe_added_line() {
@@ -496,6 +525,15 @@ write_ref() {
 
 # Overridable pacman-query seam (for selftest). Prints "<name> <ver>".
 _pacman_query() { pacman -Q -- "$1" 2>/dev/null; }
+
+# Overridable pacman sync-db seam (for selftest). Returns 0 when $1 is a known
+# repository package. AUR/unknown deps must stay review because otherwise an AUR
+# update could pull in a new unaudited AUR dependency through .SRCINFO.
+_pacman_sync_info() { pacman -Si -- "$1" >/dev/null 2>&1; }
+
+# Overridable dependency-satisfaction seam (for selftest). Returns 0 when the
+# currently installed package set already satisfies the dependency/provision.
+_pacman_dep_satisfied() { pacman -T -- "$1" >/dev/null 2>&1; }
 
 # Return 0 if a package built from commit $sha (in $dir) is currently installed
 # at exactly that commit's version. Resolves split packages: ANY pkgname at the
@@ -831,7 +869,13 @@ classify_diff_rules() {
 
   local line cls boring_edge=0 detail summary
   while IFS= read -r line; do
+    if _srcinfo_leading_ws_only_added_line "$dir" "$base_ref" "$line"; then
+      continue
+    fi
     if _pkgbuild_optdepends_added_line "$dir" "$base_ref" "$line"; then
+      continue
+    fi
+    if _srcinfo_repo_dep_added_line "$line"; then
       continue
     fi
     _boring_added_line_class "$line"; cls=$?
@@ -2250,7 +2294,20 @@ cmd_selftest() {
     fi
   }
 
-  local _sum1 _sum2 _old_src _new_src _old_basic _new_basic
+  _pacman_sync_info() {
+    case "$1" in
+      alsa-lib|cmake) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  _pacman_dep_satisfied() {
+    case "$1" in
+      ttf-font) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  local _sum1 _sum2 _old_src _new_src _old_basic _new_basic _old_multi_sum_pkg _new_multi_sum_pkg _old_space_src _new_tab_src
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
   local _old_opt_pkg _new_opt_pkg _new_opt_expansion_pkg _new_opt_sed_pkg _old_opt_src _new_opt_src
   _sum1=1111111111111111111111111111111111111111111111111111111111111111
@@ -2259,6 +2316,8 @@ cmd_selftest() {
   _new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.1\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
   printf -v _old_basic 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
   printf -v _new_basic 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _old_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum1"
+  printf -v _new_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum2"
   printf -v _sum2_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum2"
   _sum2_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
   printf -v _host_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-2.tar")\nsha256sums=(%s)' "$_sum2"
@@ -2272,11 +2331,19 @@ cmd_selftest() {
   printf -v _new_opt_sed_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfsprogs: NTFS partition support'\n)\nprepare() {\n  # Correct package name containing ntfsresize\n  sed -i 's/ntfs-3g/ntfsprogs/g' tool/VentoyWorker.sh\n}" "$_sum1"
   _old_opt_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\toptdepends = ntfs-3g: NTFS partition support\n\npkgname = cls-pkg'
   _new_opt_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\toptdepends = ntfsprogs: NTFS partition support\n\npkgname = cls-pkg'
+  _old_space_src=$'pkgbase = cls-pkg\n        pkgver = 1.0\n        pkgrel = 1\n        provides = cls-virtual\n        conflicts = cls-old\n        options = !strip\n        backup = etc/cls.conf\n\npkgname = cls-pkg'
+  _new_tab_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tprovides = cls-virtual\n\tconflicts = cls-old\n\toptions = !strip\n\tbackup = etc/cls.conf\n\npkgname = cls-pkg'
   tc_class version-bump boring 0 "$_old_basic" "$_new_basic" "$_old_src" "$_new_src"
 
   tc_class checksum-only boring 0 \
     "$_old_basic" \
     "$_sum2_pkg" \
+    "$_old_src" \
+    "$_sum2_src"
+
+  tc_class multiline-checksum-only boring 0 \
+    "$_old_multi_sum_pkg" \
+    "$_new_multi_sum_pkg" \
     "$_old_src" \
     "$_sum2_src"
 
@@ -2291,6 +2358,30 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_src" \
     "$_old_src"$'\n\toptdepends = ntfsprogs: NTFS partition support'
+
+  tc_class srcinfo-advisory-metadata boring 0 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src" \
+    "$_old_src"$'\n\tpkgdesc = Fast, secure browser\n\turl = https://example.com/project\n\tarch = x86_64\n\tlicense = custom:opera\n\tgroups = browsers'
+
+  tc_class srcinfo-repo-deps boring 0 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src" \
+    "$_old_src"$'\n\tdepends = alsa-lib\n\tdepends = ttf-font\n\tmakedepends = cmake\n\tcheckdepends = alsa-lib>=1.2'
+
+  tc_class srcinfo-unknown-dep-review review 2 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src" \
+    "$_old_src"$'\n\tdepends = suspicious-aur-dep'
+
+  tc_class srcinfo-leading-ws-only boring 0 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_space_src" \
+    "$_new_tab_src"
 
   tc_class optdepends-pkgbuild-srcinfo boring 0 \
     "$_old_opt_pkg" \

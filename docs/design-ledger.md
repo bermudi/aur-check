@@ -232,9 +232,19 @@ exit 1 + stash) → review rules + modified-`.install` + added/removed files + n
 binaries + maintainer/source drift (→ `review`, exit 2 + stash) → deterministic
 boring metadata allowlist (→ `boring`, exit 0) → parser-ambiguous known boring
 fields (→ `boring_edge`, exit 2 unless the opt-in strict verifier returns
-exactly `VERDICT: BORING_EDGE_OK`). Literal `.SRCINFO optdepends = ...` entries
-and literal single-quoted `PKGBUILD optdepends=(...)` entries are boring
-metadata; non-literal PKGBUILD shell expansion inside optdepends stays review.
+exactly `VERDICT: BORING_EDGE_OK`). `.SRCINFO` lines that changed only leading
+whitespace are ignored before metadata classification (makepkg regeneration can
+flip spaces↔tabs without semantic change). Literal `.SRCINFO` advisory/package
+metadata entries (`pkgdesc`, `url`, `arch`, `license`, `groups`, `optdepends`)
+and `.SRCINFO` dependency entries either already satisfied by the installed
+package set or proven by pacman sync DB to be repository packages are boring
+metadata; unknown/AUR-looking dependencies stay review so a package update
+cannot silently pull an unaudited AUR dependency. Literal single-quoted
+`PKGBUILD optdepends=(...)` entries and standalone quoted/bare `SKIP`/hex
+tokens — the per-line shape inside a PKGBUILD multiline `sha256sums=(...)`
+array, distinct from the `.SRCINFO` `sha256sums = <hex>` form already handled
+above — are boring metadata; non-literal PKGBUILD shell expansion inside
+optdepends stays review.
 Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
 never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
@@ -425,8 +435,10 @@ staged commits.
   local fixtures with real git history + committed `.SRCINFO`; +4 diff-failure
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
   no-stage on audit-unavailable; +20 classifier/LLM cases covering boring
-  version/checksum/same-host source passes, literal `.SRCINFO` and `PKGBUILD`
-  optdepends metadata passes, non-literal optdepends shell-expansion review,
+  version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
+  regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata,
+  repo/satisfied dependency metadata, and `PKGBUILD` optdepends metadata passes,
+  unknown dependency review, non-literal optdepends shell-expansion review,
   optdepends-plus-prepare review, source-host drift review, multiline-source
   boring-edge review, build logic review, hard-pattern block, audit-unavailable
   no-LLM, disabled verifier no-call, exact OK auto-pass,
