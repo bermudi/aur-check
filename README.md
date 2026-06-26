@@ -2,8 +2,9 @@
 
 Deterministic gate for [Arch Linux AUR](https://aur.archlinux.org/) package
 updates. Born during the May–June 2026 AUR supply-chain attack — catches
-malicious updates **before** they reach pacman. The LLM is advisory only;
-deterministic regex rules are the gate. See
+malicious updates **before** they reach pacman. Deterministic rules are the gate;
+an opt-in LLM verifier can only auto-clear narrowly classified boring-edge
+diffs. See
 [docs/design-ledger.md](./docs/design-ledger.md) for the full design ledger (threat
 model, settled decisions, rejected approaches, verification status).
 
@@ -37,7 +38,7 @@ can't drift.
 
 | Pipeline | When used | Rules applied |
 |---|---|---|
-| **Diff** (`scan_diff_rules`) | Cached path, baseline recovery (tier 1) | Hard-fail + review + structural |
+| **Diff** (`scan_diff_rules`) | Cached path, baseline recovery (tier 1) | Hard-fail + deterministic boring metadata allowlist + boring-edge review/optional verifier + structural review |
 | **Whole-file** (`_scan_whole_pkg`) | `audit`, missing-cache fallback (tier 2) | Hard-fail only |
 
 Review rules (pip/gem/cargo/go) can't run on a whole-file scan — they'd fire on
@@ -50,7 +51,7 @@ every legit package that uses those tools. Whole-file scans are always review-le
 |---|---|---|
 | 0 | Clean — no rule hits | Proceed |
 | 1 | Hard-fail — block | Abort |
-| 2 | Review — flagged, consent required | Prompt (or auto-proceed if `AUR_SAFE_ALLOW_REVIEW=1`) |
+| 2 | Review — flagged, consent required | `aur-safe gate` / wrapper prompt: `[l]ist`, `[v]iew` diff, `[e]xplain`, `[y]es`, or `[N]o` (or auto-proceed if `AUR_SAFE_ALLOW_REVIEW=1`); `check` exits 2 for caller handling |
 | 3 | Usage/env error | Surface |
 
 ## Install
@@ -61,7 +62,7 @@ ln -s ~/build/aur-check/aur-safe ~/.local/bin/aur-safe
 ```
 
 Dependencies: `bash` ≥ 4.3, `git`, an AUR helper (`yay` or `paru`). `pi` is
-required only for the `explain` subcommand.
+required only for `explain` and the optional boring-edge verifier.
 
 ## Enable
 
@@ -85,14 +86,14 @@ aur-safe: gating 4 AUR update(s)
 
 ```
 aur-safe gate              gate every pending AUR update
-aur-safe check <pkg> ...   gate specific cached package(s)
+aur-safe check <pkg> ...   gate specific cached package(s); exits 2 on review
 aur-safe audit <pkg>       advisory scan of an uncached/new package
 aur-safe scan              retroactive scan of installed packages
 aur-safe explain [pkg]     LLM second-opinion on last flagged diff
 aur-safe accept            promote staged refs (called by the wrapper)
 aur-safe rules             list active rules
 aur-safe wrapper           print the suggested shell wrapper
-aur-safe selftest          run built-in rule tests (92/92)
+aur-safe selftest          run built-in rule tests (137/137)
 ```
 
 ## Environment
@@ -106,6 +107,22 @@ aur-safe selftest          run built-in rule tests (92/92)
 | `AUR_SAFE_BRANCH` | `master` | AUR remote branch |
 | `AUR_SAFE_AUR_URL` | `https://aur.archlinux.org` | AUR base URL (mirrors, testing) |
 | `AUR_SAFE_EXPLAIN_MAXLINES` | `1000` | Diff truncation for `explain` |
+| `AUR_SAFE_CONFIG` | `~/.config/aur-safe/config` | Optional config file path |
+| `AUR_SAFE_LLM_AUTO_BORING` | `0` | Set `1` to let the strict LLM verifier auto-clear boring-edge diffs |
+
+Optional config file:
+
+```sh
+mkdir -p ~/.config/aur-safe
+printf 'AUR_SAFE_LLM_AUTO_BORING=1\n' > ~/.config/aur-safe/config
+```
+
+Environment variables override the config file. Enabling
+`AUR_SAFE_LLM_AUTO_BORING=1` trades deterministic-only gating for convenience on
+diffs that deterministic checks already confined to parser-ambiguous metadata,
+optional dependency, checksum, or same-host `source=()` changes. It cannot
+override hard blocks, review hits, audit-unavailable results, or staging/accept
+checks.
 
 Wrapper-level (set in your shell rc):
 
@@ -124,7 +141,7 @@ tradeoff.
 Single-user, single-machine. Hardened through multiple independent reviews (see
 commit history and `docs/findings/`). The trust anchor is aur-safe's own
 accepted-ref state, seeded from the helper HEAD on first contact and advanced
-only after a gate-audited build that pacman confirms installed. Selftest: 92/92.
+only after a gate-audited build that pacman confirms installed. Selftest: 137/137.
 
 Licensed under the [MIT License](./LICENSE).
 
@@ -134,5 +151,5 @@ Licensed under the [MIT License](./LICENSE).
   architecture, settled decisions, rejected approaches, verification)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   principles, rule classification
-- [docs/findings/](./docs/findings/) — documented security findings (A and C
-  closed; B and D deferred)
+- [docs/findings/](./docs/findings/) — documented security findings (A, B, and C
+  closed; D deferred)

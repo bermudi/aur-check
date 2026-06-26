@@ -49,16 +49,20 @@ detects *structural patterns* rather than payload names:
   legitimate use in real AUR packages (Python/Ruby/Rust tooling).
 - **Hex/octal escape runs** (2+ adjacent) are hard-fail — they spell out hidden
   strings. Single escapes are review-only (could be ANSI color codes).
-- **Pipe-to-interpreter** (`curl … | sh`) and **eval-of-substitution**
-  (`eval $(...)`) are hard-fail — they execute arbitrary fetched content.
+- **Pipe/fetch-to-interpreter** (`curl … | sh`, `curl -o file; bash file`) and
+  **eval-of-substitution** (`eval $(...)`) are hard-fail — they execute
+  arbitrary fetched content.
 - **Maintainer and `source=()` domain drift** is flagged (review) — this catches
   the impersonation signal without blocking legitimate version bumps.
 
-### The LLM is never on the trust path
+### The LLM cannot override deterministic risk
 
-The gate is deterministic regex rules. The LLM (`explain` subcommand) is an
-on-demand second opinion on *already-flagged* diffs — advisory only. This is
-settled; do not propose LLM-in-the-loop gating.
+The gate is deterministic classification. Hard-fail, review, and
+audit-unavailable results are never auto-cleared by the LLM. The `explain`
+subcommand remains an on-demand second opinion on stashed diffs. Separately,
+`AUR_SAFE_LLM_AUTO_BORING=1` can ask a strict LLM verifier to auto-clear only
+`boring_edge` diffs: parser-ambiguous changes that deterministic checks have
+already confined to metadata, checksum, or same-host `source=()` fields.
 
 ### The trust anchor is decoupled from the helper
 
@@ -73,13 +77,16 @@ bug this project was built to fix.
 
 | Class | Examples | Gate behavior |
 |---|---|---|
-| **Hard-fail** | npm/pnpm/bun/yarn, pipe-to-interpreter, eval-subst, base64-decode, escape runs (2+) | Block (exit 1) |
+| **Hard-fail** | npm/pnpm/bun/yarn, pipe-to-interpreter, fetch-file-exec, eval-subst, base64/hex decode, escape runs (2+) | Block (exit 1) |
+| **Boring** | version/pkgrel/pkgver, checksum-only, literal optional dependency metadata, same-host `source=()` updates with no structural signals | Pass (exit 0) |
+| **Boring-edge** | Same narrow field set, but parser-ambiguous array/quoting/continuation shape | Review (exit 2), or optional strict verifier pass |
 | **Review** | pip/gem/cargo/go, single hex/octal escape, maintainer/source drift, python-inline-net | Warn (exit 2) |
+| **Audit unavailable** | Diff/read/clone failure | Warn (exit 2), never LLM auto-clear |
 
 The asymmetry (JS package managers → hard-fail, others → review) is intentional:
 the observed campaign uses JS package managers; Python/Ruby/Rust/Go legitimate
 use is more common in real AUR packages. This is a judgment call documented as a
-genuinely contestable decision in design-ledger.md.
+pressure point in design-ledger.md.
 
 ## Primary vector: `.install` hooks
 
@@ -151,10 +158,13 @@ whitelisting is a trap — the attacker mixes `\x63`, `\141`, `\x6e`, `\143`,
   payload in the middle).
 - **Alternate interpreters** — `| python`, `| node`, `| ruby`, `| perl` in
   addition to `| sh`/`| bash`.
-- **JS package managers** — `npm install`, `bun add`, `pnpm install`,
-  `yarn add`. All are hard-fail in `.install` hooks regardless of quoting
-  style, because the campaign's payload delivery mechanism is fundamentally
-  "JS package manager in a hook".
+- **JS package managers** — `npm install`, `npm -g install`, `bun --cwd … add`,
+  `pnpm --dir … install`, `yarn install`. All are hard-fail in `.install` hooks
+  regardless of quoting style, because the campaign's payload delivery mechanism
+  is fundamentally "JS package manager in a hook".
+- **Decode-then-execute building blocks** — `base64 -d`, `openssl enc -d
+  -base64`, and `xxd -r` are hard-fail because they are compact ways to hide a
+  shell payload in added PKGBUILD/scriptlet text.
 
 ## Why not a pacman hook
 

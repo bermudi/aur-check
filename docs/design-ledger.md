@@ -15,24 +15,34 @@ threat narrative.
 
 ## Architecture (settled — don't propose alternatives unless you see a real flaw)
 
-**Deterministic rules are the gate. The LLM is never on the trust path.**
+**Deterministic classification is the gate. The LLM cannot override risk.**
 
 - yay/paru keep a per-package git clone (`~/.cache/yay/<pkg>` or
   `~/.cache/paru/clone/<pkg>`). Checked-out `HEAD` = last version you built
   (treated as known-good). `origin/master` = candidate.
-- On update: `git fetch`, diff `HEAD..origin/master`, run regex rules against
-  ADDED lines only.
+- On update: `git fetch`, diff `HEAD..origin/master`, classify the ADDED lines
+  plus changed-file structure.
 - Hard-fail rules → exit 1, block the update.
-- Review-only rules → exit 2, warn but don't block.
+- Deterministic boring metadata allowlist (version/pkgrel/pkgver, checksum-only,
+  literal optional dependency metadata, same-host `source=()` changes, no
+  structural signals) → exit 0.
+- Boring-edge (same narrow fields, but parser-ambiguous formatting/array shape)
+  → exit 2 unless `AUR_SAFE_LLM_AUTO_BORING=1` and the strict verifier returns
+  exactly `VERDICT: BORING_EDGE_OK`.
+- Review-only rules, structural signals, or audit-unavailable results → exit 2,
+  warn but don't block.
 - `explain` subcommand pipes a *flagged* diff to an LLM (`zai/glm-5.2` via
   `pi`, reusing existing auth) for a second opinion. Advisory only.
 
-**Why not LLM-in-the-loop as the gate:** the attacker is using obfuscated bash
-(hex/octal escapes). LLMs handle obfuscated bash inconsistently — false
-negatives on the real attack, false positives on legit updates. The
-deterministic gate catches the observed vectors reliably; the LLM is better as
-an on-demand explainer of *flagged* diffs than as a trust boundary. This was
-debated extensively and settled.
+**LLM boundary:** the attacker is using obfuscated bash (hex/octal escapes).
+LLMs handle obfuscated bash inconsistently — false negatives on the real attack,
+false positives on legit updates. The LLM therefore cannot override hard,
+review, audit-unavailable, clone/diff, staging, or accept decisions. The only
+opt-in gate use is a narrow convenience verifier for deterministic
+`boring_edge`: the diff already has no dangerous patterns, no review patterns,
+no changed files outside `PKGBUILD`/`.SRCINFO`, no added/removed files, and no
+new maintainer/source host domains. Anything except an exact first-line
+`VERDICT: BORING_EDGE_OK` stays review.
 
 **Why not a pacman hook:** pacman hooks run *after* install — by then the
 malicious `.install` has already executed. Interception must happen before
@@ -186,10 +196,11 @@ header, not the commit's, so the commit↔`.SRCINFO` association is restored by
 passing the oldest-first commit list into awk and mapping by block index. It
 returns the **OLDEST** matching commit: if several commits share the installed
 pkgver (e.g. a malicious push keeping pkgver identical), the oldest match
-maximizes diff coverage and surfaces any intervening commit. Conservative by
-design — it may over-report on a benign re-commit at the same version, never
-under-report. Whitespace-tolerant version extraction mirrors `_installed_matches`
-(some packages ship space-indented `.SRCINFO`, e.g. opera-developer).
+maximizes diff coverage and surfaces any intervening commit **within retained
+AUR history**. Conservative within that history — it may over-report on a benign
+re-commit at the same version. Whitespace-tolerant version extraction mirrors
+`_installed_matches` (some packages ship space-indented `.SRCINFO`, e.g.
+opera-developer).
 
 **Why tier-2 is review (2), not hard-fail (1):** a whole-file scan has no
 baseline, so the `install-hook-*` rules fire on any pre-existing legit `.install`
@@ -216,10 +227,39 @@ to accept. `$pkg` is used as pkgbase (correct for non-split; split packages fail
 the clone URL anyway since AUR repos are keyed by pkgbase).
 
 **`scan_diff_rules` is shared by both diff paths** (cached + baseline recovery)
-so they can never drift: `diff_added` → hard rules + new-`.install` (→ 1 + stash)
-→ review rules + modified-`.install` + new binaries + maintainer/source drift
-(→ 2 + stash) → 0. Staging stays in the callers (cached uses `_stage_if_gating`
-with a cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
+so they can never drift: `diff_added` → hard rules + new-`.install` (→ `hard`,
+exit 1 + stash) → review rules + modified-`.install` + added/removed files + new
+binaries + maintainer/source drift (→ `review`, exit 2 + stash) → deterministic
+boring metadata allowlist (→ `boring`, exit 0) → parser-ambiguous known boring
+fields (→ `boring_edge`, exit 2 unless the opt-in strict verifier returns
+exactly `VERDICT: BORING_EDGE_OK`). Literal `.SRCINFO optdepends = ...` entries
+and literal single-quoted `PKGBUILD optdepends=(...)` entries are boring
+metadata; non-literal PKGBUILD shell expansion inside optdepends stays review.
+Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
+never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
+cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
+
+**Optional LLM boring-edge verifier.** Config is loaded from
+`~/.config/aur-safe/config` (`KEY=value`, currently only
+`AUR_SAFE_LLM_AUTO_BORING=0|1`), with environment variables taking precedence.
+When disabled, `boring_edge` is ordinary review. When enabled, `llm_check_boring_edge`
+uses `pi` with no tools/session and accepts only an exact first-line
+`VERDICT: BORING_EDGE_OK`; command failure, missing `pi`, malformed output,
+`NEEDS_HUMAN`, truncation, or anything else returns review. This can stage only
+through the normal clean rc-0 caller path, so the staged SHA remains the
+gate-time tip and `accept` still requires installed-version confirmation.
+
+**Known limitation — missing-cache baseline recovery trusts retained AUR
+history.** The cached path anchors on aur-safe's frozen SHA, but a missing-cache
+package has no local accepted/cache ref. Baseline recovery reconstructs a diff
+base from the fresh clone's history by matching the installed version string. If
+an attacker force-pushes AUR history so the only commit matching the installed
+version is at or after a payload commit, that payload is in the reconstructed
+baseline and excluded from the diff. The oldest-match policy is conservative
+only among commits still visible in the fetched history; it cannot recover
+history that was rewritten away. This does NOT affect staging/accept: clean or
+review scans still stage only the gate-time tip, and hard/unknown audits still
+do not stage.
 
 **Known limitation — `AUR_SAFE_ALLOW_REVIEW=1` auto-proceeds clone failures.**
 The wrapper honors this env var for all exit-2 results, including a clone
@@ -250,7 +290,7 @@ A `reseed`/`yay -G` wrapper to restore a missing cache clone was once the
 planned "fix" for the missing-cache path. **Rejected after baseline recovery
 landed**, on three grounds:
 1. **The motivation is gone.** Re-seeding was conceived when missing-cache was a
-de graded path (coarse whole-file scan, `.install` FPs). Baseline recovery made
+degraded path (coarse whole-file scan, `.install` FPs). Baseline recovery made
 the missing-cache path a real diff through the same `scan_diff_rules` pipeline —
 functionally equivalent to the cached path for the common case. Re-seeding no
 longer upgrades a bad path to a good one.
@@ -293,9 +333,9 @@ For prefixing every line of a multi-line string, `sed` is more readable than
 the `${var//$'\n'/...}` equivalent. The subprocess-perf argument is irrelevant
 outside a hot loop, and this isn't one.
 
-## Genuinely contestable — feedback wanted here
+## Open pressure points — useful feedback belongs here
 
-These are real open questions where I'd value pushback:
+These are the real pressure points where future work should stay focused:
 
 1. **Hard-fail vs review classification.** Currently `npm`/`pnpm`/`bun`/`yarn`
    in a PKGBUILD diff are hard-fails; `pip`/`gem`/`cargo`/`go install` are
@@ -319,12 +359,43 @@ These are real open questions where I'd value pushback:
    were each found manually, not by selftest. Trust the classify tests; verify
    the full pipeline manually on any wrapper change.
 
-5. **The `scan` subcommand's pattern list is hardcoded.** It checks installed
-   packages for a fixed set of payload names (`atomic-lockfile`,
-   `crypto-javascript`, etc.). This is the blacklist approach the main gate
-   deliberately avoids. Justified for retroactive triage (you want to catch
-   known-bad names that already landed), or should it reuse the main rule
-   engine?
+5. **Missing-cache baseline recovery is weaker than a frozen accepted SHA.**
+   It is a real diff path for retained history, but force-pushed-away history
+   cannot be reconstructed from a fresh clone. Should this narrow path escalate
+   to mandatory review, or is the current documented limitation acceptable for
+   the rare missing-cache case?
+
+## Path forward (current priorities)
+
+The core update gate is the protected asset: cached updates, missing-cache
+baseline recovery, staging/accept, and diff-failure handling now share the same
+diff-based trust discipline. Future work should improve that discipline or
+remove drift; it should not broaden the trust path casually.
+
+1. **Split "audit unavailable" from "review hit".** Clone/diff failures have
+   zero signal and should not be auto-consented by `AUR_SAFE_ALLOW_REVIEW=1`.
+   The smallest safe contract change is a separate wrapper result for audit
+   unavailable; `AUR_SAFE_ALLOW_REVIEW=1` should apply only to real rule hits.
+2. **Add a review-level homograph check for `source=()` URLs.** Flag newly-added
+   or changed source hostnames containing non-ASCII characters (and show the
+   punycode/ASCII form if available). Start review-only; hard-fail only with
+   real campaign evidence.
+3. **Decide the missing-cache history-rewrite policy.** Baseline recovery is
+   precise when the installed version still exists in fetched history, but the
+   attacker-controlled repo can erase earlier commits. Consider whether this
+   should stay documented, force review, or get a stronger external baseline.
+4. **Measure before changing new-install gating or thresholds.** Keep `audit`
+   advisory until real AUR samples quantify false positives. Any move toward
+   blocking new installs, changing the hex/octal threshold, or reclassifying
+   package managers needs fixtures that prove the false-positive cost is worth
+   the added protection.
+
+Definition of done for trust-path changes: update this ledger, link code
+comments to the relevant section/finding, run `bash -n aur-safe`,
+`./aur-safe selftest`, and `shellcheck -s bash aur-safe`, and re-check the
+TOCTOU invariant: blocked/unknown audits never stage; clean/review audits stage
+only the gate-time tip; `accept` promotes only installed-version-confirmed
+staged commits.
 
 ## What I don't need feedback on
 
@@ -337,18 +408,30 @@ These are real open questions where I'd value pushback:
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 92/92 (31 rule-engine + 16 wrapper-dispatch + 20 accepted-ref /
-  staging / accept / install-confirmation, incl. faithful split + non-split +
-  space-indented + pkgbase-fallback `.SRCINFO` scenarios verified against
-  makepkg output + real cached files; +11 missing-cache fallback cases: routing
-  / exit-code / clone-fail / review-rules-skipped / .install-hit / empty-PKGBUILD
-  / staging-tip / manifest / stash, via local `file://` fixture repos, no network;
-  +10 baseline-recovery cases: FP-elimination / hard-hit-blocks / review-hit /
-  review-hit-stashes-diff / not-found-falls-back / clean-stages-tip /
-  hard-hit-no-stage / skips-missing-srcinfo / comment-missing-no-desync /
-  tree-type-no-desync, via local fixtures with real git history + committed
-  `.SRCINFO`; +5 diff-failure cases: diff_added bad-ref / scan_diff_rules /
-  corrupt-anchor review / no-stage on audit-unavailable).
+- `selftest`: 137/137 (47 rule-engine cases, including flag-bearing JS package
+  managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
+  and `xxd -r`; +3 config-policy cases for config-file loading, env override,
+  and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
+  wrapper-dispatch; +20
+  accepted-ref / staging / accept / install-confirmation, incl. faithful split +
+  non-split + space-indented + pkgbase-fallback `.SRCINFO` scenarios verified
+  against makepkg output + real cached files; +11 missing-cache fallback cases:
+  routing / exit-code / clone-fail / review-rules-skipped / .install-hit /
+  empty-PKGBUILD / staging-tip / manifest / stash, via local `file://` fixture
+  repos, no network; +10 baseline-recovery cases: FP-elimination /
+  hard-hit-blocks / review-hit / review-hit-stashes-diff /
+  not-found-falls-back / clean-stages-tip / hard-hit-no-stage /
+  skips-missing-srcinfo / comment-missing-no-desync / tree-type-no-desync, via
+  local fixtures with real git history + committed `.SRCINFO`; +4 diff-failure
+  cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
+  no-stage on audit-unavailable; +20 classifier/LLM cases covering boring
+  version/checksum/same-host source passes, literal `.SRCINFO` and `PKGBUILD`
+  optdepends metadata passes, non-literal optdepends shell-expansion review,
+  optdepends-plus-prepare review, source-host drift review, multiline-source
+  boring-edge review, build logic review, hard-pattern block, audit-unavailable
+  no-LLM, disabled verifier no-call, exact OK auto-pass,
+  NEEDS_HUMAN/malformed/failure/missing-`pi` review, and LLM auto-green staging
+  of the gate-time tip).
   Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,

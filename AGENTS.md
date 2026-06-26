@@ -16,8 +16,9 @@ existing is to stop malicious AUR updates from reaching pacman.
 
 ## Stack
 Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory
-`explain` subcommand. No build system, no other dependencies. Single-file script
-(`aur-safe`); runtime state under `~/.cache/aur-safe/`.
+`explain` subcommand and the optional boring-edge verifier. No build system, no
+other dependencies. Single-file script (`aur-safe`); runtime state under
+`~/.cache/aur-safe/`.
 
 ## Architecture
 
@@ -39,8 +40,9 @@ staging discipline on every gate-path change.
   back to a whole-file hard-rule scan only if the installed version isn't found.
 
 ### Two rule pipelines (not one)
-- **Diff pipeline** (`scan_diff_rules`): hard + review + structural rules.
-  Shared by the cached path and the baseline-recovery tier, so they can't drift.
+- **Diff pipeline** (`scan_diff_rules`): hard + deterministic boring metadata
+  allowlist + boring-edge review/optional verifier + structural rules. Shared by
+  the cached path and the baseline-recovery tier, so they can't drift.
 - **Whole-file pipeline** (`_scan_whole_pkg`): hard-rules-only. Review rules on
   a baseline-less scan would fire on every legit pip/cargo package. Shared by
   `audit` and the missing-cache whole-file fallback tier.
@@ -65,7 +67,7 @@ installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adh
 ## Workflow
 ```sh
 bash -n aur-safe          # syntax check
-./aur-safe selftest       # the gate — must stay green (92/92)
+./aur-safe selftest       # the gate — must stay green (137/137)
 shellcheck -s bash aur-safe  # SC2016/SC2001 excluded via .shellcheckrc
 ```
 Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known
@@ -73,8 +75,9 @@ missing-cache baseline-recovery case). The wrapper (`aur-safe wrapper`) is not
 installed by default.
 
 ## Constraints & Red Lines
-- **Never put the LLM on the trust path.** `explain` is advisory; deterministic
-  rules decide block/warn/allow.
+- **Never let the LLM override deterministic risk.** `explain` is advisory; the
+  optional verifier can only auto-clear deterministic `boring_edge` diffs, never
+  hard/review/audit-unavailable results.
 - **Never let the trust anchor advance to an unaudited commit.** Staging/`accept`
   discipline is the TOCTOU fix — see Architecture.
 - **Validate external input at boundaries.** Package names go into git URLs and

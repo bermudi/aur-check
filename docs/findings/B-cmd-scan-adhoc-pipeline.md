@@ -1,15 +1,15 @@
 # Finding B — `cmd_scan` is an ad-hoc third rule pipeline
 
 **Source:** kimi-k2.6 delegate review, session `019f0184-3dbd-7d44-b9b3-8ef793ee553b`  
-**Updated:** 2026-06-26 — added campaign evidence from `aur-general` mailing list  
-**Status:** open (deferred, needs design decision)  
-**Lines:** `cmd_scan()` at `aur-safe:815-835`
+**Updated:** 2026-06-26 — fixed by converging `cmd_scan` on the shared rule arrays  
+**Status:** closed (fixed in code; retroactive scanner is report-only and advisory)
+**Lines:** `_scan_report_file()` / `cmd_scan()` at `aur-safe:842-887`
 
 ## What happens
 
-`cmd_scan` hardcodes its own `grep -rE` patterns for retroactive scanning of
-already-installed packages. These patterns lag the `RULE_PATTERNS` arrays the
-live gate uses.
+`cmd_scan` used to hardcode its own `grep -rE` patterns for retroactive scanning
+of already-installed packages. Those patterns lagged the `RULE_PATTERNS` arrays
+the live gate uses.
 
 ### Rule divergence table
 
@@ -48,24 +48,35 @@ campaign that evolved across three waves in four days.
 ### Why this exists
 
 `cmd_scan` is a *retroactive* scan of already-installed packages (different
-purpose from the live gate). The divergence may be intentional — less aggressive
-to avoid noise on installed things. But it's undocumented and a maintenance
-hazard: updating the main `RULE_PATTERNS` arrays won't update `cmd_scan`; adding
-a new hard-fail rule to the gate won't make `cmd_scan` retroactively catch
-already-installed instances.
+purpose from the live gate). The divergence may have been accidental or an
+unwritten attempt to reduce noise on installed things, but it was a maintenance
+hazard: updating the main `RULE_PATTERNS` arrays did not update `cmd_scan`;
+adding a new hard-fail rule to the gate did not make `cmd_scan` retroactively
+catch already-installed instances.
 
-## Fix options
+## Fix
 
-1. **Reuse `RULE_PATTERNS`** — make `cmd_scan` loop over the same arrays as the
-   gate (one source of truth). Risk: may be too aggressive for retroactive
-   scanning (every installed package with `npm install` in its build function
-   will fire).
-2. **Document the divergence with rationale** — keep the separate patterns but
-   add a comment in `cmd_scan` explaining why and linking to this finding.
-3. **Deprecate `cmd_scan`** — if the retroactive-triage use case is weak now that
-   the live gate is hardened, remove it.
+`cmd_scan` now uses `_scan_report_file()`, a report-only scanner over the live
+gate's `RULE_NAMES` / `RULE_PATTERNS` and `REVIEW_NAMES` / `REVIEW_PATTERNS`.
+There is no longer a blacklist of payload package names and no separate
+package-manager regex list.
 
-## Test gap
+Two details keep the retroactive scanner useful without weakening the gate:
 
-No selftest for `cmd_scan` at all — it exits via `exit $found`, not part of the
-selftest framework.
+- `cmd_scan` feeds only installed execution surfaces:
+  `/var/lib/pacman/local/*/install`, `/etc/pacman.d/hooks/*`, and
+  `/usr/share/libalpm/hooks/*`.
+- `_scan_report_file()` skips the two hook-surface marker rules
+  (`install-hook-ref`, `install-hook-func`) because the selected inputs are
+  already installed hook/scriptlet surfaces. A clean `post_install()` scriptlet
+  is not itself a payload signal; npm/bun/yarn, pipe-to-interpreter,
+  decode/obfuscation, and review rules still come from the shared arrays.
+
+The command remains advisory retroactive triage: it exits non-zero when it finds
+anything, but it is not part of the update trust path.
+
+## Verification
+
+Selftests now cover the shared-rule scanner with `npm ci`, `bun install`,
+`yarn install`, hex escape runs, pipe-to-interpreter, and a clean hook. Updating
+`RULE_PATTERNS` now automatically changes retroactive scan coverage.
