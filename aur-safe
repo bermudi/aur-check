@@ -317,12 +317,12 @@ find_baseline_commit() {
         }
         ver = rel = epoch = ""
       }
-      /^[0-9a-f]{40} blob / { if (bi > 0) emit(); bi++; next }
-      # cat-file --batch prints "<full-rev>:<path> missing" for absent objects
-      # (not "<sha> missing"), so anchor on the trailing " missing" — a sha-led
-      # regex silently fails to match, desyncing the block index by one per
-      # missing commit and mapping every later commit to the wrong (older) one.
-      / missing$/             { if (bi > 0) emit(); bi++; ver = rel = epoch = ""; next }
+      /^[0-9a-f]{40} (blob|tree|commit|tag) [0-9]+$/ { if (bi > 0) emit(); bi++; next }
+      # cat-file --batch prints "<full-rev>:<path> missing" for absent objects.
+      # Match the EXACT line format (sha:.SRCINFO, space, "missing") so blob
+      # content lines ending in the word "missing" (e.g. "# arm64 binary is
+      # missing") are never confused with a missing-object header.
+      /^[0-9a-f]{40}:\.SRCINFO missing$/            { if (bi > 0) emit(); bi++; next }
       {
         if      ($0 ~ /^[[:space:]]*pkgver =/) { sub(/^[[:space:]]*pkgver = */, ""); ver = $0 }
         else if ($0 ~ /^[[:space:]]*pkgrel =/) { sub(/^[[:space:]]*pkgrel = */, ""); rel = $0 }
@@ -1396,6 +1396,74 @@ cmd_selftest() {
     fail=$((fail+1))
   fi
   rm -rf "$_ms_clone"
+
+  # COMMENT-LINE DESYNC: a .SRCINFO blob containing a line that ends with
+  # " missing" (e.g. "# arm64 binary is missing") must NOT be confused with a
+  # cat-file --batch missing-object header. The old `/ missing$/` regex matched
+  # blob content and desynced the block index. The fix matches the exact
+  # "<sha>:.SRCINFO missing" header format.
+  _cl_src="$_fbx/src/cl-pkg"; mkdir -p "$_cl_src"
+  ( cd "$_cl_src" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=cl-pkg\npkgver=1.0\npkgrel=1\n' > PKGBUILD
+    printf 'pkgbase = cl-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = cl-pkg\n' > .SRCINFO
+    git add -A; git commit -qm v1.0
+    # v2: .SRCINFO with a comment line ending in "missing" (benign, real-world)
+    printf 'pkgname=cl-pkg\npkgver=2.0\npkgrel=1\n' > PKGBUILD
+    printf '# arm64 binary is missing\npkgbase = cl-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\npkgname = cl-pkg\n' > .SRCINFO
+    git add -A; git commit -qm v2.0-comment
+    # v3: clean tip
+    printf 'pkgname=cl-pkg\npkgver=3.0\npkgrel=1\n' > PKGBUILD
+    printf 'pkgbase = cl-pkg\n\tpkgver = 3.0\n\tpkgrel = 1\n\npkgname = cl-pkg\n' > .SRCINFO
+    git add -A; git commit -qm v3.0
+  )
+  _cl3=$(git -C "$_cl_src" rev-list --reverse master | sed -n '3p')
+  _cl_clone=$(mktemp -d)
+  git clone -q "$_cl_src" "$_cl_clone/cl-pkg" 2>/dev/null
+  local _cl_got
+  _cl_got=$(find_baseline_commit "$_cl_clone/cl-pkg" "3.0-1")
+  if [ "$_cl_got" = "$_cl3" ]; then
+    log "  $(c_green "PASS") baseline-comment-missing-no-desync"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") baseline-comment-missing-no-desync (expected ${_cl3:0:12}, got ${_cl_got:0:12})"
+    fail=$((fail+1))
+  fi
+  rm -rf "$_cl_clone"
+
+  # TREE-TYPE DESYNC: a commit where .SRCINFO is a DIRECTORY (git emits
+  # "<sha> tree <size>" in cat-file --batch). Neither the old "blob " nor
+  # the loose "/ missing$/" regex matches this — the block index desyncs
+  # silently. The fix matches all 4 object types (blob|tree|commit|tag).
+  _tr_src="$_fbx/src/tr-pkg"; mkdir -p "$_tr_src"
+  ( cd "$_tr_src" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    # R0: .SRCINFO as a directory (attacker force-push scenario)
+    printf 'pkgname=tr-pkg\npkgver=1.0\npkgrel=1\n' > PKGBUILD
+    mkdir .SRCINFO && touch .SRCINFO/placeholder
+    git add -A; git commit -qm R0-tree-srcinfo
+    # R1: normal .SRCINFO at 1.0
+    rm -rf .SRCINFO
+    printf 'pkgbase = tr-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = tr-pkg\n' > .SRCINFO
+    git add -A; git commit -qm R1-normal
+    # R2: tip at 2.0
+    printf 'pkgname=tr-pkg\npkgver=2.0\npkgrel=1\n' > PKGBUILD
+    printf 'pkgbase = tr-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\npkgname = tr-pkg\n' > .SRCINFO
+    git add -A; git commit -qm R2-tip
+  )
+  _tr1=$(git -C "$_tr_src" rev-list --reverse master | sed -n '2p')
+  _tr_clone=$(mktemp -d)
+  git clone -q "$_tr_src" "$_tr_clone/tr-pkg" 2>/dev/null
+  local _tr_got
+  _tr_got=$(find_baseline_commit "$_tr_clone/tr-pkg" "1.0-1")
+  if [ "$_tr_got" = "$_tr1" ]; then
+    log "  $(c_green "PASS") baseline-tree-type-no-desync"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") baseline-tree-type-no-desync (expected ${_tr1:0:12}, got ${_tr_got:0:12})"
+    fail=$((fail+1))
+  fi
+  rm -rf "$_tr_clone"
 
   _AUR_TEST_Q=""
   unset -f _bl_bld
