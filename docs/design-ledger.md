@@ -255,7 +255,14 @@ optdepends/checksum array-state trackers (`_pkgbuild_optdepends_added_line`,
 `_pkgbuild_checksum_array_line`) recover the enclosing array opener not only
 from a hunk body line but also from git's `@@ … @@ <label>` hunk-header
 context, so a changed element deep in a large array — where git splits the diff
-and emits the opener only in the header label — still classifies correctly.
+and emits the opener only in the header label — still classifies correctly. All
+git invocations are isolated from user/system config via `export
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` at script load (Finding
+J): user options like `diff.noprefix` (strips the `b/` prefix → file trackers
+never match), `diff.colorWords`/`diff.wordDiff` (word-oriented output, no `+`
+prefixes → empty `added`), and `textconv` (arbitrary code on `git show`) would
+otherwise break the pipeline or execute attacker code; the export overrides any
+hostile caller env (last export wins) and makes diff output deterministic.
 Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
 never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
@@ -429,7 +436,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 162/162 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 163/163 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -443,9 +450,11 @@ staged commits.
   hard-hit-blocks / review-hit / review-hit-stashes-diff /
   not-found-falls-back / clean-stages-tip / hard-hit-no-stage /
   skips-missing-srcinfo / comment-missing-no-desync / tree-type-no-desync, via
-  local fixtures with real git history + committed `.SRCINFO`; +4 diff-failure
+  local fixtures with real git history + committed `.SRCINFO`; +5 diff-failure
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
-  no-stage on audit-unavailable; +26 classifier/LLM cases covering boring
+  no-stage on audit-unavailable / git-config-isolation-hard-rules-fire
+  (Finding J: GIT_CONFIG_GLOBAL=/dev/null defeats hostile noprefix/colorWords);
+  +26 classifier/LLM cases covering boring
   version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
   regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata
   (incl. `noextract=`), repo/satisfied/**intra-pkgbase** dependency metadata,

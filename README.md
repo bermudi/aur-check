@@ -93,7 +93,7 @@ aur-safe explain [pkg]     LLM second-opinion on last flagged diff
 aur-safe accept            promote staged refs (called by the wrapper)
 aur-safe rules             list active rules
 aur-safe wrapper           print the suggested shell wrapper
-aur-safe selftest          run built-in rule tests (162/162)
+aur-safe selftest          run built-in rule tests (163/163)
 ```
 
 ## Environment
@@ -143,7 +143,7 @@ commit history and `docs/findings/`). A 2026-06-26 red-team review by three
 delegate models found 23 findings — see [BACKLOG.md](./BACKLOG.md) for the
 prioritized task list. The trust anchor is aur-safe's own
 accepted-ref state, seeded from the helper HEAD on first contact and advanced
-only after a gate-audited build that pacman confirms installed. Selftest: 162/162.
+only after a gate-audited build that pacman confirms installed. Selftest: 163/163.
 
 Licensed under the [MIT License](./LICENSE).
 

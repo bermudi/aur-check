@@ -46,12 +46,14 @@ Red-team review backlog — 2026-06-26 session (glm-5.1, kimi-k2.6, qwen3.7-max)
   glm-5.1 (HIGH #5). Regex requires literal `pip`. Fix: `pip3?` or
   `(pip|pip3|python -m pip)`.
 
-- [ ] **J — User git config breaks diff parsing**
+- [x] **J — User git config breaks diff parsing** (FIXED 2026-06-28)
   [docs/findings/J-git-config-breaks-diff.md](docs/findings/J-git-config-breaks-diff.md)
   kimi-k2.6 (HIGH #2). `diff.colorWords`, `diff.noprefix`, `textconv` filters
   can break the entire classification pipeline. Fix: export
   `GIT_CONFIG_GLOBAL=/dev/null` + pass normalizing flags to all git diff/show
-  commands in the trust path.
+  commands in the trust path. **Applied:** `export GIT_CONFIG_GLOBAL=/dev/null
+  GIT_CONFIG_SYSTEM=/dev/null` at script load (overrides hostile caller env);
+  +1 selftest (`git-config-isolation-hard-rules-fire`).
 
 - [ ] **K — `epoch=0` breaks install confirmation and baseline recovery**
   [docs/findings/K-epoch-zero.md](docs/findings/K-epoch-zero.md)
