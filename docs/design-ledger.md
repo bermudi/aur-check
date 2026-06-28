@@ -237,16 +237,25 @@ fields (→ `boring_edge`, exit 2 unless the opt-in strict verifier returns
 exactly `VERDICT: BORING_EDGE_OK`). `.SRCINFO` lines that changed only leading
 whitespace are ignored before metadata classification (makepkg regeneration can
 flip spaces↔tabs without semantic change). Literal `.SRCINFO` advisory/package
-metadata entries (`pkgdesc`, `url`, `arch`, `license`, `groups`, `optdepends`)
-and `.SRCINFO` dependency entries either already satisfied by the installed
-package set or proven by pacman sync DB to be repository packages are boring
-metadata; unknown/AUR-looking dependencies stay review so a package update
-cannot silently pull an unaudited AUR dependency. Literal single-quoted
-`PKGBUILD optdepends=(...)` entries and standalone quoted/bare `SKIP`/hex
-tokens — the per-line shape inside a PKGBUILD multiline `sha256sums=(...)`
-array, distinct from the `.SRCINFO` `sha256sums = <hex>` form already handled
-above — are boring metadata; non-literal PKGBUILD shell expansion inside
-optdepends stays review.
+metadata entries (`pkgdesc`, `url`, `arch`, `license`, `groups`, `optdepends`,
+`noextract` — `noextract=` is a versioned *filename* pointing at a `source=()`
+entry, never executed) and `.SRCINFO` dependency entries either already
+satisfied by the installed package set, proven by pacman sync DB to be
+repository packages, OR **intra-pkgbase** (the dep's name matches this
+pkgbase's `pkgbase=` or a declared `pkgname=` member at the new tip — a
+self-reference that cannot pull in unaudited code from outside the package
+under review) are boring metadata; all other unknown/AUR-looking dependencies
+stay review so a package update cannot silently pull an unaudited AUR
+dependency. Literal single-quoted `PKGBUILD optdepends=(...)` entries and
+standalone quoted/bare `SKIP`/hex tokens — the per-line shape inside a PKGBUILD
+multiline `sha256sums=(...)` array, distinct from the `.SRCINFO`
+`sha256sums = <hex>` form already handled above — are boring metadata;
+non-literal PKGBUILD shell expansion inside optdepends stays review. The
+optdepends/checksum array-state trackers (`_pkgbuild_optdepends_added_line`,
+`_pkgbuild_checksum_array_line`) recover the enclosing array opener not only
+from a hunk body line but also from git's `@@ … @@ <label>` hunk-header
+context, so a changed element deep in a large array — where git splits the diff
+and emits the opener only in the header label — still classifies correctly.
 Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
 never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
@@ -420,7 +429,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 156/156 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 162/162 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -436,16 +445,18 @@ staged commits.
   skips-missing-srcinfo / comment-missing-no-desync / tree-type-no-desync, via
   local fixtures with real git history + committed `.SRCINFO`; +4 diff-failure
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
-  no-stage on audit-unavailable; +20 classifier/LLM cases covering boring
+  no-stage on audit-unavailable; +26 classifier/LLM cases covering boring
   version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
-  regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata,
-  repo/satisfied dependency metadata, and `PKGBUILD` optdepends metadata passes,
+  regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata
+  (incl. `noextract=`), repo/satisfied/**intra-pkgbase** dependency metadata,
+  and `PKGBUILD` optdepends metadata passes,
   unknown dependency review, non-literal optdepends shell-expansion review,
   optdepends-plus-prepare review, source-host drift review, multiline-source
   boring-edge review, build logic review, hard-pattern block, audit-unavailable
   no-LLM, disabled verifier no-call, exact OK auto-pass,
   NEEDS_HUMAN/malformed/failure/missing-`pi` review, and LLM auto-green staging
-  of the gate-time tip; +8 split-package missing-cache cases (Finding N):
+  of the gate-time tip; deep-in-multi-hunk-array checksum/optdepends passes
+  (hunk-header opener recovery); +8 split-package missing-cache cases (Finding N):
   baseline-recovery-via-pkgbase-resolution / stages-under-pkgbase /
   stages-audited-tip / manifest-pkgbase / accept-promotes-pkgbase /
   accept-moves-to-accepted / accept-anchor-is-audited-tip /

@@ -283,8 +283,10 @@ _boring_added_line_class() {
   fi
   # .SRCINFO advisory/package metadata. These fields do not affect build or
   # install execution, so plain added/changed entries should not interrupt an
-  # upgrade as "non-boring".
-  if grep -Eq '^[[:space:]]*(pkgdesc|url|arch|license|groups|optdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
+  # upgrade as "non-boring". noextract= is a versioned *filename* pointing at a
+  # source=() entry — it runs no code, only tells makepkg not to auto-extract;
+  # on a version bump it always tracks the renamed source tarball.
+  if grep -Eq '^[[:space:]]*(pkgdesc|url|arch|license|groups|optdepends|noextract)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
     return 0
   fi
   if grep -Eq '^[[:space:]]*source=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
@@ -328,7 +330,13 @@ _pkgbuild_optdepends_added_line() {
           next
         }
         /^@@ / {
+          # Carry the enclosing optdepends=( opener from the @@ header label
+          # into the hunk (same fix as _pkgbuild_checksum_array_line): when the
+          # changed entry is deep enough to land in a separate hunk, git puts
+          # the opener only in the @@ ... @@ header label, not the body.
           in_opt=0
+          hdr=$0; sub(/^@@ [^@]+@@[[:space:]]*/, "", hdr)
+          if (file == "PKGBUILD" && hdr ~ /^[[:space:]]*optdepends=\(/) in_opt=1
           next
         }
         /^\+\+\+/ || /^---/ { next }
@@ -369,7 +377,18 @@ _pkgbuild_checksum_array_line() {
           in_cs=0
           next
         }
-        /^@@ / { in_cs=0; next }
+        /^@@ / {
+          # git emits the enclosing section as a trailing label after the
+          # 2nd @@ (e.g. @@ -33,7 +33,7 @@ sha256sums=( ). When the array
+          # opener is in the header label and NOT the hunk body — which happens
+          # whenever the changed element is far enough below the opener to land
+          # in a separate hunk — carry that opener into the hunk so the deep
+          # element still matches. Same opener regex as the body-line check.
+          in_cs=0
+          hdr=$0; sub(/^@@ [^@]+@@[[:space:]]*/, "", hdr)
+          if (file == "PKGBUILD" && hdr ~ /^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\(/) in_cs=1
+          next
+        }
         /^\+\+\+/ || /^---/ { next }
         /^[ +]/ {
           marker=substr($0, 1, 1)
@@ -393,13 +412,28 @@ _pkgbuild_checksum_array_line() {
 }
 
 _srcinfo_repo_dep_added_line() {
-  local line="$1" dep spec
+  local dir="$1" base_ref="$2" line="$3" dep spec members
   grep -Eq '^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null || return 1
   spec=$(sed -E 's/^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+//; s/[[:space:]].*$//' <<<"$line")
   _pacman_dep_satisfied "$spec" && return 0
   dep=$(sed -E 's/[<>=].*$//' <<<"$spec")
   [[ "$dep" =~ ^[A-Za-z0-9@._+-]+$ ]] || return 1
-  _pacman_sync_info "$dep"
+  _pacman_sync_info "$dep" && return 0
+  # Intra-pkgbase dep: the name is this pkgbase itself or a sibling pkgname
+  # member declared at the new tip. Such a dep cannot pull in unaudited code
+  # from outside the package under review (the external-AUR-dep guard above
+  # remains intact for every other name). Real shape: split nvidia-580xx-utils,
+  # where opencl-nvidia-580xx depends on nvidia-580xx-utils (a sibling member)
+  # with a version pinned to the pkgbase's pkgver. pkgbase= and pkgname= are
+  # column-0 section headers; awk default-FS splits "<key>\t=\t<val>" into
+  # $1/$2/$3 (same idiom find_pkg_dir relies on, also tolerant of the
+  # space-indented .SRCINFO edge case). See design-ledger "boring-diff gate".
+  members=$(git -C "$dir" show "origin/${AUR_REMOTE_BRANCH}:.SRCINFO" 2>/dev/null) || return 1
+  awk -v d="$dep" '
+    $1=="pkgbase" && $3==d { f=1 }
+    $1=="pkgname" && $3==d { f=1 }
+    END { exit !f }
+  ' <<<"$members"
 }
 
 _describe_added_line() {
@@ -962,7 +996,7 @@ classify_diff_rules() {
     if _pkgbuild_optdepends_added_line "$dir" "$base_ref" "$line"; then
       continue
     fi
-    if _srcinfo_repo_dep_added_line "$line"; then
+    if _srcinfo_repo_dep_added_line "$dir" "$base_ref" "$line"; then
       continue
     fi
     if _pkgbuild_checksum_array_line "$dir" "$base_ref" "$line"; then
@@ -2588,6 +2622,24 @@ cmd_selftest() {
   # moves from pkgbase section to pkgname section with the SAME indent.
   _old_src_move_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tdepends = foo\n\npkgname = cls-pkg'
   _new_src_move_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = cls-pkg\n\tdepends = foo'
+  # Test fixtures for intra-pkgbase deps: a split pkgbase (cls-split) with two
+  # members, cls-split and cls-split-tools. The version-pinned depends= below
+  # reference the pkgbase itself or a sibling member — they are NOT in the test
+  # pacman sync db, so the only thing that can clear them is the intra-pkgbase
+  # branch of _srcinfo_repo_dep_added_line. This is the nvidia-580xx-utils
+  # shape (opencl-nvidia-580xx depends on sibling nvidia-580xx-utils). PKGBUILD
+  # is a multi-pkgname split build; only pkgver changes across the diff.
+  printf -v _split_old_pkgbuild 'pkgbase=cls-split\npkgver=1.0\npkgrel=1\nsource=("https://example.com/split.tar")\nsha256sums=(%s)\npkgname=(cls-split cls-split-tools)' "$_sum1"
+  printf -v _split_new_pkgbuild 'pkgbase=cls-split\npkgver=2.0\npkgrel=1\nsource=("https://example.com/split.tar")\nsha256sums=(%s)\npkgname=(cls-split cls-split-tools)' "$_sum1"
+  # Dep on the pkgbase itself (also a member): cls-split-tools depends on
+  # cls-split, version-pinned to pkgver. pkgver bump 1.0 -> 2.0.
+  _split_base_old_src=$'pkgbase = cls-split\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\npkgname = cls-split-tools\n\tdepends = cls-split=1.0'
+  _split_base_new_src=$'pkgbase = cls-split\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\npkgname = cls-split-tools\n\tdepends = cls-split=2.0'
+  # Dep on a sibling member (not the pkgbase): cls-split depends on
+  # cls-split-tools, version-pinned to pkgver.
+  _split_member_old_src=$'pkgbase = cls-split\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\tdepends = cls-split-tools=1.0\n\npkgname = cls-split-tools'
+  _split_member_new_src=$'pkgbase = cls-split\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\tdepends = cls-split-tools=2.0\n\npkgname = cls-split-tools'
+
   tc_class version-bump boring 0 "$_old_basic" "$_new_basic" "$_old_src" "$_new_src"
 
   tc_class checksum-only boring 0 \
@@ -2632,6 +2684,47 @@ cmd_selftest() {
     "$_old_src" \
     "$_old_src"$'\n\tdepends = suspicious-aur-dep'
 
+  # noextract= is .SRCINFO metadata (a versioned *filename*, runs no code) —
+  # an added/changed line must not force review. Append to an otherwise
+  # unchanged .SRCINFO so the only diff is the noextract line.
+  tc_class srcinfo-noextract-boring boring 0 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src" \
+    "$_old_src"$'\n\tnoextract = foo-1.0.deb'
+
+  # Real cursor-bin shape: version bump renames the noextract= filename AND the
+  # source= URL (same host) AND the sha512sum. noextract + source + checksum
+  # must all clear as boring.
+  printf -v _noextract_old_pkgbuild 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/foo-1.0.deb")\nsha256sums=(%s)' "$_sum1"
+  printf -v _noextract_new_pkgbuild 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("https://example.com/foo-2.0.deb")\nsha256sums=(%s)' "$_sum1"
+  _noextract_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tnoextract = foo-1.0.deb\n\tsource = https://example.com/foo-1.0.deb\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _noextract_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tnoextract = foo-2.0.deb\n\tsource = https://example.com/foo-2.0.deb\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+
+  tc_class srcinfo-noextract-version-rename boring 0 \
+    "$_noextract_old_pkgbuild" \
+    "$_noextract_new_pkgbuild" \
+    "$_noextract_old_src" \
+    "$_noextract_new_src"
+
+  # Intra-pkgbase dep: cls-split-tools depends on cls-split (the pkgbase, also a
+  # member), version-pinned to pkgver. Neither is in the test pacman sync db, so
+  # only the intra-pkgbase branch can clear it. The nvidia-580xx-utils shape.
+  tc_class srcinfo-intra-pkgbase-dep-base boring 0 \
+    "$_split_old_pkgbuild" \
+    "$_split_new_pkgbuild" \
+    "$_split_base_old_src" \
+    "$_split_base_new_src"
+
+  # Intra-pkgbase dep on a SIBLING member (not the pkgbase name): cls-split
+  # depends on cls-split-tools. Proves the pkgname= member branch, not just
+  # pkgbase-name equality.
+  tc_class srcinfo-intra-pkgbase-dep-member boring 0 \
+    "$_split_old_pkgbuild" \
+    "$_split_new_pkgbuild" \
+    "$_split_member_old_src" \
+    "$_split_member_new_src"
+
   tc_class srcinfo-leading-ws-only boring 0 \
     "$_old_basic" \
     "$_old_basic" \
@@ -2649,6 +2742,43 @@ cmd_selftest() {
     "$_new_vpgp_pkg" \
     "$_old_vpgp_src" \
     "$_new_vpgp_src"
+
+  # Regression: a checksum element changed DEEP in a multi-element array, where
+  # git splits the diff into separate hunks and emits the sha256sums=( opener
+  # ONLY in the @@ header label (not the hunk body). Before the fix,
+  # _pkgbuild_checksum_array_line reset in_cs on every @@ and never re-entered
+  # the array → the changed hex fell through to review (the nvidia-580xx-utils
+  # false positive). The gap between pkgver and the changed sum forces the
+  # 2-hunk split on git's default config.
+  _deep_pad=""
+  for _ in $(seq 1 12); do _deep_pad+=$'# padding to force a 2-hunk split\n'; done
+  printf -v _deep_cs_old_pkg 'pkgbase=cls-pkg\npkgver=1.0\n%ssource=("https://example.com/pkg.tar")\nsha256sums=(\n  %s\n  %s\n  %s\n  %s\n)' \
+    "$_deep_pad" "$_sum1" "$_sum1" "$_sum1" "$_sum1"
+  printf -v _deep_cs_new_pkg 'pkgbase=cls-pkg\npkgver=2.0\n%ssource=("https://example.com/pkg.tar")\nsha256sums=(\n  %s\n  %s\n  %s\n  %s\n)' \
+    "$_deep_pad" "$_sum1" "$_sum1" "$_sum1" "$_sum2"
+  _deep_cs_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _deep_cs_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  tc_class pkgbuild-checksum-deep-in-array-boring boring 0 \
+    "$_deep_cs_old_pkg" \
+    "$_deep_cs_new_pkg" \
+    "$_deep_cs_old_src" \
+    "$_deep_cs_new_src"
+
+  # Same latent bug for optdepends: a deep entry change where git puts
+  # optdepends=( only in the @@ header label. pkgver also changes (above the
+  # padding) so git emits two hunks and the optdepends=( opener lands in the
+  # 2nd hunk's @@ label, not the body.
+  printf -v _deep_opt_old_pkg 'pkgbase=cls-pkg\npkgver=1.0\n%soptdepends=(\n  %s\n  %s\n  %s\n  %s\n)' \
+    "$_deep_pad" "'dep1: one'" "'dep2: two'" "'dep3: three'" "'dep4: four'"
+  printf -v _deep_opt_new_pkg 'pkgbase=cls-pkg\npkgver=2.0\n%soptdepends=(\n  %s\n  %s\n  %s\n  %s\n)' \
+    "$_deep_pad" "'dep1: one'" "'dep2: two'" "'dep3: three'" "'dep4: RENAMED'"
+  _deep_opt_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = cls-pkg'
+  _deep_opt_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\npkgname = cls-pkg'
+  tc_class pkgbuild-optdepends-deep-in-array-boring boring 0 \
+    "$_deep_opt_old_pkg" \
+    "$_deep_opt_new_pkg" \
+    "$_deep_opt_old_src" \
+    "$_deep_opt_new_src"
 
   tc_class optdepends-pkgbuild-srcinfo boring 0 \
     "$_old_opt_pkg" \
