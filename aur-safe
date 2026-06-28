@@ -218,10 +218,14 @@ _srcinfo_leading_ws_only_added_line() {
     | awk -v wanted="$wanted" '
         function norm(s) { sub(/^[[:space:]]+/, "", s); return s }
         /^\+\+\+/ || /^---/ { next }
-        /^-/ { removed[norm(substr($0, 2))] = 1; next }
+        /^-/ {
+          raw = substr($0, 2)
+          removed[norm(raw)] = raw
+          next
+        }
         /^\+/ {
           text = substr($0, 2)
-          if (text == wanted && removed[norm(text)]) found = 1
+          if (text == wanted && removed[norm(text)] != "" && removed[norm(text)] != text) found = 1
         }
         END { exit found ? 0 : 1 }
       '
@@ -289,9 +293,10 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
-  if grep -Eq '^[[:space:]]*["'"'"']?(SKIP|[A-Fa-f0-9]{16,})["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$line" 2>/dev/null; then
-    return 0
-  fi
+  # Bare hex/SKIP is no longer classified here; it MUST be contextualized
+  # through _pkgbuild_checksum_array_line in classify_diff_rules (finding E).
+  # Without checksum-array context, a validpgpkeys fingerprint or bare SKIP
+  # would incorrectly auto-clear as boring.
   if grep -Eq '^[[:space:]]*source(_[[:alnum:]_]+)?=' <<<"$line" 2>/dev/null; then
     return 1
   fi
@@ -301,7 +306,8 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 1
   fi
-  if grep -Eq '^[[:space:]]*["'"'"']?(SKIP|[A-Fa-f0-9]{16,}|[A-Za-z][A-Za-z0-9+.-]*://[^"'"'"'[:space:]]+)["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$line" 2>/dev/null; then
+  # Standalone URLs (not hex/SKIP — those are contextualized above).
+  if grep -Eq '^[[:space:]]*["'"'"']?[A-Za-z][A-Za-z0-9+.-]*://[^"'"'"'[:space:]]+["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 1
   fi
   return 2
@@ -338,6 +344,48 @@ _pkgbuild_optdepends_added_line() {
           }
           if (file == "PKGBUILD" && in_opt && text ~ /^[[:space:]]*\)[[:space:]]*$/) {
             in_opt=0
+          }
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+# Verify a bare hex/SKIP added line appears within a checksum array in the
+# PKGBUILD diff (finding E). Without this check, a standalone hex fingerprint
+# or SKIP token added to validpgpkeys=() or any non-checksum context would
+# match the bare-hex fast-path and classify as boring, silently auto-clearing
+# a trust-anchor change. This follows the same pattern as
+# _pkgbuild_optdepends_added_line: parse the full diff, track array context.
+_pkgbuild_checksum_array_line() {
+  local dir="$1" base_ref="$2" wanted="$3"
+  # Only handle lines that look like bare hex/SKIP tokens.
+  grep -Eq '^[[:space:]]*["'"'"']?(SKIP|[A-Fa-f0-9]{16,})["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$wanted" 2>/dev/null || return 1
+  git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
+    "${EXCLUDE_PATHS[@]}" 2>/dev/null \
+    | awk -v wanted="$wanted" '
+        /^diff --git / { file=""; in_cs=0; next }
+        /^\+\+\+ b\// {
+          file=substr($0, 7)
+          in_cs=0
+          next
+        }
+        /^@@ / { in_cs=0; next }
+        /^\+\+\+/ || /^---/ { next }
+        /^[ +]/ {
+          marker=substr($0, 1, 1)
+          text=substr($0, 2)
+          # Enter checksum array on (md5|sha...|b2)sums(_...)?=(
+          # Only from added (+) or context ( ) lines — a removed checksum
+          # array header does not grant context for new hex tokens elsewhere.
+          if (file == "PKGBUILD" && marker != "-" && text ~ /^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\(/) {
+            in_cs=1
+          }
+          if (marker == "+" && file == "PKGBUILD" && in_cs && text == wanted) {
+            found=1
+            exit
+          }
+          if (file == "PKGBUILD" && in_cs && text ~ /^[[:space:]]*\)[[:space:]]*$/) {
+            in_cs=0
           }
         }
         END { exit found ? 0 : 1 }
@@ -876,6 +924,9 @@ classify_diff_rules() {
       continue
     fi
     if _srcinfo_repo_dep_added_line "$line"; then
+      continue
+    fi
+    if _pkgbuild_checksum_array_line "$dir" "$base_ref" "$line"; then
       continue
     fi
     _boring_added_line_class "$line"; cls=$?
@@ -2310,6 +2361,7 @@ cmd_selftest() {
   local _sum1 _sum2 _old_src _new_src _old_basic _new_basic _old_multi_sum_pkg _new_multi_sum_pkg _old_space_src _new_tab_src
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
   local _old_opt_pkg _new_opt_pkg _new_opt_expansion_pkg _new_opt_sed_pkg _old_opt_src _new_opt_src
+  local _old_vpgp_pkg _new_vpgp_pkg _old_vpgp_src _new_vpgp_src _old_src_move_src _new_src_move_src
   _sum1=1111111111111111111111111111111111111111111111111111111111111111
   _sum2=2222222222222222222222222222222222222222222222222222222222222222
   _old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
@@ -2333,6 +2385,22 @@ cmd_selftest() {
   _new_opt_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\toptdepends = ntfsprogs: NTFS partition support\n\npkgname = cls-pkg'
   _old_space_src=$'pkgbase = cls-pkg\n        pkgver = 1.0\n        pkgrel = 1\n        provides = cls-virtual\n        conflicts = cls-old\n        options = !strip\n        backup = etc/cls.conf\n\npkgname = cls-pkg'
   _new_tab_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tprovides = cls-virtual\n\tconflicts = cls-old\n\toptions = !strip\n\tbackup = etc/cls.conf\n\npkgname = cls-pkg'
+  # Test fixtures for validpgpkeys hex bypass (finding E): baseline has a
+  # validpgpkeys array; update adds one 40-char hex fingerprint. Before the
+  # fix, the bare-hex fast-path in _boring_added_line_class would classify
+  # this as boring (0), silently auto-clearing a trust-anchor change.
+  printf -v _old_vpgp_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nvalidpgpkeys=("' "$_sum1"
+  _old_vpgp_pkg+="  0123456789ABCDEF0123456789ABCDEF01234567"
+  _old_vpgp_pkg+=$'\n)\n'
+  printf -v _new_vpgp_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nvalidpgpkeys=("' "$_sum1"
+  _new_vpgp_pkg+="  0123456789ABCDEF0123456789ABCDEF01234567"
+  _new_vpgp_pkg+=$'\n  \'"FEDCBA9876543210FEDCBA9876543210FEDCBA98'"\n)\n"
+  _old_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\npkgname = cls-pkg'
+  _new_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\tvalidpgpkeys = FEDCBA9876543210FEDCBA9876543210FEDCBA98\n\npkgname = cls-pkg'
+  # Test fixture for .SRCINFO section-move (finding CR-major): depends=foo
+  # moves from pkgbase section to pkgname section with the SAME indent.
+  _old_src_move_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tdepends = foo\n\npkgname = cls-pkg'
+  _new_src_move_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = cls-pkg\n\tdepends = foo'
   tc_class version-bump boring 0 "$_old_basic" "$_new_basic" "$_old_src" "$_new_src"
 
   tc_class checksum-only boring 0 \
@@ -2382,6 +2450,18 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_space_src" \
     "$_new_tab_src"
+
+  tc_class srcinfo-section-move-review review 2 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src_move_src" \
+    "$_new_src_move_src"
+
+  tc_class validpgpkeys-hex-review review 2 \
+    "$_old_vpgp_pkg" \
+    "$_new_vpgp_pkg" \
+    "$_old_vpgp_src" \
+    "$_new_vpgp_src"
 
   tc_class optdepends-pkgbuild-srcinfo boring 0 \
     "$_old_opt_pkg" \
