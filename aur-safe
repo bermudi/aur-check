@@ -293,6 +293,27 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch|source|[[:alnum:]]+sums(_[[:alnum:]_]+)?)[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
     return 0
   fi
+  # PKGBUILD build-variable assigned a bare git SHA (e.g. _commit=<40hex>,
+  # _gittag=<short-sha>), optionally single/double-quoted. The RHS of a shell
+  # string assignment is never executed, so this is the same inert-metadata
+  # class as pkgver= above — it just selects which same-host path source=()
+  # fetches, and the downloaded artifact is verified by the *sums=() array,
+  # classified independently. Hex length 7..40 covers git short and full SHAs.
+  # NOT routed through _pkgbuild_checksum_array_line: this is a var *assignment*,
+  # not an array element, so checksum-array context doesn't apply.
+  #
+  # Var-name RESTRICTED to conventional SHA holders (_commit/_gittag/_gitrev/
+  # _tag/_rev, optional _<suffix>). A prior version matched ANY _-prefixed var,
+  # which let _evil=<lowercase-40hex> auto-clear even when an unchanged
+  # validpgpkeys=($_evil) made it a trust-anchor change (the finding-E class —
+  # lowercase is NOT a defense, validpgpkeys= accepts any case). Restricting to
+  # conventional names closes the indirection: an attacker can't name a
+  # fingerprint-holding var _commit without it reading as a SHA in context, and
+  # a real _evil=<hex> now falls through to review. Add a name here only when a
+  # real AUR package needs it (every added name re-opens the surface).
+  if grep -Eq '^[[:space:]]*_(commit|gittag|gitrev|tag|rev)(_[[:alnum:]_]*)?=[[:space:]]*['"'"'"]?[0-9a-f]{7,40}['"'"'"]?[[:space:]]*$' <<<"$line" 2>/dev/null; then
+    return 0
+  fi
   # .SRCINFO advisory/package metadata. These fields do not affect build or
   # install execution, so plain added/changed entries should not interrupt an
   # upgrade as "non-boring". noextract= is a versioned *filename* pointing at a
@@ -2727,6 +2748,50 @@ cmd_selftest() {
     "$_old_src" \
     "$_old_src"$'\n\tdepends = suspicious-aur-dep'
 
+  # PKGBUILD build-var assigned a bare git SHA (_commit=<hex>, optionally
+  # quoted). Inert: the RHS of a string assignment is never executed; it just
+  # selects which same-host path source=() fetches, verified by the *sums=()
+  # array. The cursor-bin shape. Three variants: unquoted, single, double.
+  printf -v _commit_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_commit=%s\nsource=("https://example.com/${_commit}/pkg.tar")\nsha256sums=(%s)' \
+    "4aa8ff1b7877ed7bd01bcba308698f71a6735380" "$_sum1"
+  printf -v _commit_new_pkg_unq 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_commit=%s\nsource=("https://example.com/${_commit}/pkg.tar")\nsha256sums=(%s)' \
+    "042b3c1a4c53f2c3808067f519fbfc67b72cad8b" "$_sum1"
+  printf -v _commit_new_pkg_sq "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_commit='%s'\nsource=(\"https://example.com/\${_commit}/pkg.tar\")\nsha256sums=(%s)" \
+    "042b3c1a4c53f2c3808067f519fbfc67b72cad8b" "$_sum1"
+  printf -v _commit_new_pkg_dq 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_commit="%s"\nsource=("https://example.com/${_commit}/pkg.tar")\nsha256sums=(%s)' \
+    "042b3c1a4c53f2c3808067f519fbfc67b72cad8b" "$_sum1"
+  _commit_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/4aa8ff1b7877ed7bd01bcba308698f71a6735380/pkg.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _commit_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/042b3c1a4c53f2c3808067f519fbfc67b72cad8b/pkg.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  tc_class pkgbuild-commit-var-unquoted boring 0 \
+    "$_commit_old_pkg" "$_commit_new_pkg_unq" "$_commit_old_src" "$_commit_new_src"
+  tc_class pkgbuild-commit-var-single-quoted boring 0 \
+    "$_commit_old_pkg" "$_commit_new_pkg_sq" "$_commit_old_src" "$_commit_new_src"
+  tc_class pkgbuild-commit-var-double-quoted boring 0 \
+    "$_commit_old_pkg" "$_commit_new_pkg_dq" "$_commit_old_src" "$_commit_new_src"
+
+  # Regression: a build-var RHS that is command substitution (not a bare hex
+  # SHA) must NOT clear via the _commit rule — it executes at source time. Use a
+  # payload-free substitution so the hard-rule pipeline doesn't fire first; this
+  # isolates the classifier question (regex must reject `$`/non-hex RHS). Note:
+  # a real malicious payload (curl|sh etc.) is caught earlier by the hard rules
+  # as rc=1 hard-block, which is even stronger — this test exercises the
+  # classifier's own rejection path.
+  printf -v _commit_subst_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_commit=$(date)\nsource=("https://example.com/pkg.tar")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-commit-var-command-subst-review review 2 \
+    "$_commit_old_pkg" "$_commit_subst_pkg" "$_commit_old_src" "$_commit_new_src"
+
+  # Regression (delegate-review Finding 1): a NON-conventional _var assigned a
+  # lowercase 40-hex value must NOT clear via the _commit rule — even though
+  # such a value is a valid PGP fingerprint. This closes the validpgpkeys-
+  # indirection gap: with an unchanged validpgpkeys=($_evil) already present, a
+  # newly-added _evil=<lowercase-40hex> would change the trust anchor, so it
+  # must reach review. The rule's var-name allowlist (_commit/_gittag/_gitrev/
+  # _tag/_rev) is what closes the gap — _evil is not in it. (Lowercase is NOT
+  # a defense; validpgpkeys= accepts any case. The var-name restriction is.)
+  _commit_evil_pkg=$'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nvalidpgpkeys=($_evil)\n_evil=0123456789abcdef0123456789abcdef01234567\nsource=("https://example.com/pkg.tar")\nsha256sums='"($_sum1)"
+  tc_class pkgbuild-commit-var-arbitrary-name-review review 2 \
+    "$_commit_old_pkg" "$_commit_evil_pkg" "$_commit_old_src" "$_commit_new_src"
+
   # noextract= is .SRCINFO metadata (a versioned *filename*, runs no code) —
   # an added/changed line must not force review. Append to an otherwise
   # unchanged .SRCINFO so the only diff is the noextract line.
@@ -2767,6 +2832,23 @@ cmd_selftest() {
     "$_split_new_pkgbuild" \
     "$_split_member_old_src" \
     "$_split_member_new_src"
+
+  # kimi E: a dep on a NEWLY-ADDED member. The new tip adds a
+  # pkgname = cls-split-extra section (absent in old) and a dep on it. The dep
+  # itself WOULD clear via the intra-pkgbase branch (the member exists at the
+  # new tip), BUT introducing a new pkgname = section is itself a non-boring
+  # change — a new sub-package output — and correctly forces review regardless.
+  # This pins that the member set is read at origin/<branch> (so the dep is
+  # recognized as intra-pkgbase, not a phantom unknown dep) AND that a new
+  # member section stays a review signal. PKGBUILD pkgname=() is held unchanged
+  # so the only review driver is the new .SRCINFO member section.
+  _split_added_old_src=$'pkgbase = cls-split\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split'
+  _split_added_new_src=$'pkgbase = cls-split\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\tdepends = cls-split-extra=2.0\n\npkgname = cls-split-extra'
+  tc_class srcinfo-intra-pkgbase-dep-new-member-review review 2 \
+    "$_split_old_pkgbuild" \
+    "$_split_new_pkgbuild" \
+    "$_split_added_old_src" \
+    "$_split_added_new_src"
 
   tc_class srcinfo-leading-ws-only boring 0 \
     "$_old_basic" \

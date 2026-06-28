@@ -246,23 +246,36 @@ pkgbase's `pkgbase=` or a declared `pkgname=` member at the new tip — a
 self-reference that cannot pull in unaudited code from outside the package
 under review) are boring metadata; all other unknown/AUR-looking dependencies
 stay review so a package update cannot silently pull an unaudited AUR
-dependency. Literal single-quoted `PKGBUILD optdepends=(...)` entries and
-standalone quoted/bare `SKIP`/hex tokens — the per-line shape inside a PKGBUILD
-multiline `sha256sums=(...)` array, distinct from the `.SRCINFO`
-`sha256sums = <hex>` form already handled above — are boring metadata;
-non-literal PKGBUILD shell expansion inside optdepends stays review. The
-optdepends/checksum array-state trackers (`_pkgbuild_optdepends_added_line`,
-`_pkgbuild_checksum_array_line`) recover the enclosing array opener not only
-from a hunk body line but also from git's `@@ … @@ <label>` hunk-header
-context, so a changed element deep in a large array — where git splits the diff
-and emits the opener only in the header label — still classifies correctly. All
-git invocations are isolated from user/system config via `export
-GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` at script load (Finding
-J): user options like `diff.noprefix` (strips the `b/` prefix → file trackers
-never match), `diff.colorWords`/`diff.wordDiff` (word-oriented output, no `+`
-prefixes → empty `added`), and `textconv` (arbitrary code on `git show`) would
-otherwise break the pipeline or execute attacker code; the export overrides any
-hostile caller env (last export wins) and makes diff output deterministic.
+dependency. `PKGBUILD` build variables assigned a bare **lowercase** git SHA
+(`_commit=<hex>`, `_gittag=<short-sha>`, `_gitrev`/`_tag`/`_rev`, optionally
+quoted, 7..40 hex chars) are boring — the RHS of a string assignment is never
+executed and the fetched artifact is verified by the `*sums=()` array. The
+var-name is RESTRICTED to conventional SHA holders (not any `_`-prefixed var):
+this closes the validpgpkeys-indirection gap a delegate review flagged
+(delegate-review Finding 1), where a `_evil=<lowercase-40hex>` feeding an
+already-present `validpgpkeys=($_evil)` would otherwise auto-clear on a
+trust-anchor surface (lowercase is NOT a defense — `validpgpkeys=` accepts any
+case; the var-name allowlist is). Add a name to the allowlist only when a real
+AUR package needs it — every added name re-opens the surface. Inline
+fingerprints in `validpgpkeys=(...)` remain caught by
+`_pkgbuild_checksum_array_line` (requires a `*sums=(` array). Literal
+single-quoted `PKGBUILD optdepends=(...)` entries and standalone quoted/bare
+`SKIP`/hex tokens — the per-line shape inside a PKGBUILD multiline
+`sha256sums=(...)` array, distinct from the `.SRCINFO` `sha256sums = <hex>`
+form already handled above — are boring metadata; non-literal PKGBUILD shell
+expansion inside optdepends stays review. The optdepends/checksum array-state
+trackers (`_pkgbuild_optdepends_added_line`, `_pkgbuild_checksum_array_line`)
+recover the enclosing array opener not only from a hunk body line but also
+from git's `@@ … @@ <label>` hunk-header context, so a changed element deep in
+a large array — where git splits the diff and emits the opener only in the
+header label — still classifies correctly. All git invocations are isolated
+from user/system config via `export GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_SYSTEM=/dev/null` at script load (Finding J): user options like
+`diff.noprefix` (strips the `b/` prefix → file trackers never match),
+`diff.colorWords`/`diff.wordDiff` (word-oriented output, no `+` prefixes →
+empty `added`), and `textconv` (arbitrary code on `git show`) would otherwise
+break the pipeline or execute attacker code; the export overrides any hostile
+caller env (last export wins) and makes diff output deterministic.
 Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
 never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
@@ -436,7 +449,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 163/163 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 169/169 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -454,7 +467,7 @@ staged commits.
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
   no-stage on audit-unavailable / git-config-isolation-hard-rules-fire
   (Finding J: GIT_CONFIG_GLOBAL=/dev/null defeats hostile noprefix/colorWords);
-  +26 classifier/LLM cases covering boring
+  +33 classifier/LLM cases covering boring
   version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
   regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata
   (incl. `noextract=`), repo/satisfied/**intra-pkgbase** dependency metadata,
@@ -465,7 +478,11 @@ staged commits.
   no-LLM, disabled verifier no-call, exact OK auto-pass,
   NEEDS_HUMAN/malformed/failure/missing-`pi` review, and LLM auto-green staging
   of the gate-time tip; deep-in-multi-hunk-array checksum/optdepends passes
-  (hunk-header opener recovery); +8 split-package missing-cache cases (Finding N):
+  (hunk-header opener recovery), `_commit=<hex>` build-var passes (unquoted /
+  single / double quoted), command-substitution review, an arbitrary-`_var`
+  validpgpkeys-indirection review (var-name restriction, delegate-review
+  Finding 1), and an intra-pkgbase dep-on-newly-added-member review (new member
+  section is itself a review signal); +8 split-package missing-cache cases (Finding N):
   baseline-recovery-via-pkgbase-resolution / stages-under-pkgbase /
   stages-audited-tip / manifest-pkgbase / accept-promotes-pkgbase /
   accept-moves-to-accepted / accept-anchor-is-audited-tip /
