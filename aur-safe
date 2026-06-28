@@ -583,6 +583,35 @@ _pacman_sync_info() { pacman -Si -- "$1" >/dev/null 2>&1; }
 # currently installed package set already satisfies the dependency/provision.
 _pacman_dep_satisfied() { pacman -T -- "$1" >/dev/null 2>&1; }
 
+# Resolve a pkgname to its pkgbase via AUR RPC (Finding N). AUR git repos are
+# keyed by pkgbase, not pkgname — a split member's clone (e.g.
+# opencl-nvidia-580xx.git) 404s without this resolution. Prints pkgbase and
+# returns 0 on success; returns 1 on failure (RPC unreachable, package not
+# found, malformed/empty response). Callers fall back to $pkg itself (correct
+# for non-split, where pkgname == pkgbase). Overridable seam for selftest.
+# Awk parses with RS=',' (comma-delimited records): the AUR JSON has one result
+# per exact-name query, and PackageBase is a simple string field. The regex
+# anchors on the KEY + colon ("Name": / "PackageBase":) so array-value
+# fragments (Depends, CoMaintainers) and the adjacent PackageBaseID field
+# cannot match — pinned by the rpc-parser selftest fixtures below.
+_aur_rpc_info() {
+  local pkg="$1"
+  curl -sG --connect-timeout 3 --max-time 8 \
+      "${AUR_URL}/rpc/v5/info" --data-urlencode "arg[]=$pkg" 2>/dev/null || return 1
+}
+
+_resolve_pkgbase() {
+  local pkg="$1" resp base
+  resp=$(_aur_rpc_info "$pkg") || return 1
+  base=$(printf '%s\n' "$resp" | awk -v pkg="$pkg" -v RS=',' '
+    function val() { sub(/^[^:]*:[[:space:]]*"/, ""); sub(/".*$/, ""); }
+    /"Name"[[:space:]]*:/        { val(); if ($0 == pkg) matched = 1 }
+    /"PackageBase"[[:space:]]*:/ { if (matched) { val(); print; exit } }
+  ')
+  [[ -n "$base" ]] || return 1
+  printf '%s\n' "$base"
+}
+
 # Return 0 if a package built from commit $sha (in $dir) is currently installed
 # at exactly that commit's version. Resolves split packages: ANY pkgname at the
 # matching version counts (the PKGBUILD built and its build/install hooks ran).
@@ -695,20 +724,30 @@ _stage_if_gating() {
 # check_pkg entry; defense-in-depth).
 _clone_aur() {
   local -n _CLONE_DIR=$1
-  local pkg="$2" tmp
+  local pkg="$2" tmp pkgbase
   SCAN_SHA=""; SCAN_URL=""
   _CLONE_DIR=""
+  # Resolve pkgbase before cloning: AUR git repos are keyed by pkgbase, not
+  # pkgname. Without this, a split member (opencl-nvidia-580xx) 404s on clone
+  # and the missing-cache path loses baseline recovery entirely (Finding N).
+  # Best-effort: on RPC failure (offline), fall back to $pkg — non-split still
+  # clones correctly (pkgname == pkgbase); split degrades to clone-fail review.
+  pkgbase=$(_resolve_pkgbase "$pkg") || pkgbase="$pkg"
+  [[ -n "$pkgbase" ]] || pkgbase="$pkg"
   tmp=$(mktemp -d) || return 1
-  log "$(c_dim "→ cloning $pkg from AUR to $tmp")"
-  if ! git clone -q -- "${AUR_URL}/${pkg}.git" "$tmp/$pkg" 2>/dev/null; then
+  log "$(c_dim "→ cloning $pkgbase from AUR to $tmp")"
+  if ! git clone -q -- "${AUR_URL}/${pkgbase}.git" "$tmp/$pkgbase" 2>/dev/null; then
     rm -rf "$tmp"; return 1
   fi
   # A valid AUR repo must have a PKGBUILD; a repo with only .install/.sh is not
   # a real package and scanning its fragments would be noise. Fail (return 1).
-  [[ -f "$tmp/$pkg/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
-  SCAN_SHA=$(git -C "$tmp/$pkg" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null || true)
-  SCAN_URL=$(git -C "$tmp/$pkg" config --get remote.origin.url 2>/dev/null || true)
-  _CLONE_DIR="$tmp/$pkg"
+  [[ -f "$tmp/$pkgbase/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
+  SCAN_SHA=$(git -C "$tmp/$pkgbase" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null || true)
+  SCAN_URL=$(git -C "$tmp/$pkgbase" config --get remote.origin.url 2>/dev/null || true)
+  # _CLONE_DIR leaf IS the resolved pkgbase — callers derive the trust-anchor
+  # key from "${dir##*/}" (mirrors the cached path), so split packages stage
+  # under pkgbase, not pkgname.
+  _CLONE_DIR="$tmp/$pkgbase"
 }
 
 # Absolute (whole-file) scan of a cloned dir against the HARD rule set only.
@@ -1023,12 +1062,20 @@ scan_diff_rules() {
 # discipline and preserves the finding-1.2 TOCTOU guarantee (the AUDITED commit
 # is what `accept` would promote, not the helper's later fetch).
 missing_cache_gate() {
-  local pkg="$1" dir want baseline rc
+  local pkg="$1" dir want baseline rc pkgbase
   _clone_aur dir "$pkg" || {
     log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
     return 2
   }
+  # _clone_aur resolved pkgname→pkgbase (Finding N) and cloned to $tmp/<pkgbase>.
+  # The trust-anchor key is pkgbase (accepted/<pkgbase>), NOT pkgname — staging
+  # under pkgname would write accepted/<pkgname>, invisible to the cached path's
+  # pkgbase lookup on the next gate, silently re-seeding the anchor. Flag files
+  # stay keyed by pkgname for user-facing display (explain <pkgname>).
+  pkgbase="${dir##*/}"
   # Tier 1: baseline recovery. Need an installed version to match against.
+  # Query by PKGNAME (what's installed), not pkgbase — split members are
+  # installed under their own name but share the pkgbase's pkgver.
   want=$(_pacman_query "$pkg" | awk '{print $2}')
   if [[ -n "$want" ]]; then
     baseline=$(find_baseline_commit "$dir" "$want")
@@ -1037,9 +1084,9 @@ missing_cache_gate() {
       rm -rf "${dir%/*}"
       case $rc in
         1) return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
-        2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_scan_if_gating "$pkg"
+        2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_scan_if_gating "$pkgbase"
            return 2 ;;
-        *) _stage_scan_if_gating "$pkg"
+        *) _stage_scan_if_gating "$pkgbase"
            log "$(c_green "ok")    $pkg — no flagged changes (baseline-recovery diff)"
            return 0 ;;
       esac
@@ -1063,11 +1110,11 @@ missing_cache_gate() {
     printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
     log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
     log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
-    _stage_scan_if_gating "$pkg"
+    _stage_scan_if_gating "$pkgbase"
     return 2
   fi
   log "$(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
-  _stage_scan_if_gating "$pkg"
+  _stage_scan_if_gating "$pkgbase"
   return 0
 }
 
@@ -1833,6 +1880,44 @@ cmd_selftest() {
   tw "-Q rustup"         ""                     -Q rustup
   tw "-R foo"            ""                     -R foo
 
+  # --- RPC pkgbase parser (Finding N) --------------------------------------
+  # Pins the awk JSON parser against fixture responses so the external-AUR-API
+  # assumptions (key order, PackageBase vs PackageBaseID, array-splitting safety,
+  # Name-must-match) are CHECKED, not implicit. Only _aur_rpc_info is mocked;
+  # _resolve_pkgbase here is the REAL implementation (the _AUR_TEST_PKGBASE
+  # override below is for the missing-cache tests, not yet in scope). Nothing
+  # else calls _resolve_pkgbase before that override, so this is safe.
+  local _rpc_fixture
+  _aur_rpc_info() { [ -n "$_rpc_fixture" ] && printf '%s' "$_rpc_fixture" || return 1; }
+  local _out _rc
+  # split member: Name != PackageBase, PackageBaseID present, multi-element
+  # Depends array (must NOT confuse the parser or return the numeric ID).
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":1,"results":[{"ID":2141419,"Name":"opencl-nvidia-580xx","PackageBase":"nvidia-580xx-utils","PackageBaseID":2094476,"Depends":["zlib","nvidia-580xx-utils"],"Version":"580.173.02-1"}]}'
+  _out=$(_resolve_pkgbase opencl-nvidia-580xx); _rc=$?
+  if [ "$_rc" = 0 ] && [ "$_out" = "nvidia-580xx-utils" ]; then
+    log "  $(c_green "PASS") rpc-split-resolves-pkgbase"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") rpc-split-resolves-pkgbase (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  # non-split: Name == PackageBase
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":1,"results":[{"ID":123,"Name":"cursor-bin","PackageBase":"cursor-bin","PackageBaseID":456,"Version":"3.9.16-1"}]}'
+  _out=$(_resolve_pkgbase cursor-bin); _rc=$?
+  if [ "$_rc" = 0 ] && [ "$_out" = "cursor-bin" ]; then
+    log "  $(c_green "PASS") rpc-nonsplit-resolves-self"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") rpc-nonsplit-resolves-self (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  # empty results (package not found) → rc 1, empty output
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":0,"results":[]}'
+  _out=$(_resolve_pkgbase totally-fake); _rc=$?
+  if [ "$_rc" = 1 ] && [ -z "$_out" ]; then
+    log "  $(c_green "PASS") rpc-notfound-returns-1"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") rpc-notfound-returns-1 (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  # Name mismatch: response is for a DIFFERENT package → must NOT trust its
+  # PackageBase (defends against a wrong/ambiguous RPC result poisoning the clone URL)
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":1,"results":[{"ID":1,"Name":"some-other-pkg","PackageBase":"evil-base","PackageBaseID":2}]}'
+  _out=$(_resolve_pkgbase cursor-bin); _rc=$?
+  if [ "$_rc" = 1 ]; then
+    log "  $(c_green "PASS") rpc-name-mismatch-returns-1"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") rpc-name-mismatch-returns-1 (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  unset _rpc_fixture
+
   # --- accepted-ref / staging / accept (finding 1.2) -----------------------
   # Exercises the trust-anchor lifecycle with a temp git repo: seeding,
   # persistence, install-confirmation (version match incl. epoch), manifest
@@ -1884,6 +1969,15 @@ cmd_selftest() {
   }
   # shellcheck disable=SC2329  # test seam, called indirectly by cmd_accept
   find_pkg_dir() { [ -n "$_AUR_TEST_DIR" ] && printf '%s\n' "$_AUR_TEST_DIR" || return 1; }
+  # shellcheck disable=SC2329  # test seam, called indirectly by _clone_aur
+  # NAME-AWARE: remap only the configured split-member name to its pkgbase.
+  # All other names pass through unchanged (pkgname == pkgbase for non-split
+  # fixtures). Without this, _clone_aur would try to hit the real AUR RPC.
+  _resolve_pkgbase() {
+    [ -n "$_AUR_TEST_PKGBASE" ] || { printf '%s\n' "$1"; return 0; }
+    [ "$1" = "${_AUR_TEST_PKGBASE%% *}" ] && { printf '%s\n' "${_AUR_TEST_PKGBASE#* }"; return 0; }
+    printf '%s\n' "$1"
+  }
 
   # .SRCINFO samples are faithful to makepkg --printsrcinfo output (verified
   # against real cached files + /usr/share/makepkg/srcinfo.sh): pkgbase= and
@@ -2245,6 +2339,99 @@ cmd_selftest() {
     fail=$((fail+1))
   fi
   rm -rf "$_tr_clone"
+
+  # --- split-package missing-cache (Finding N) -----------------------------
+  # A split package (pkgname ≠ pkgbase) whose cache clone is gone: yay reports
+  # the pkgname, but AUR git repos are keyed by pkgbase. Without _resolve_pkgbase,
+  # _clone_aur builds ${AUR_URL}/${pkgname}.git → 404 → review with NO scan.
+  # With _resolve_pkgbase, the clone uses pkgbase → baseline recovery works at
+  # full precision, and staging keys the trust anchor by pkgbase (not pkgname).
+  log ""
+  log "  $(c_dim "-- split-package missing-cache (Finding N) --")"
+  local _sp_base=split-base-pkg
+  mkdir -p "$_fbx/src/$_sp_base"
+  ( cd "$_fbx/src/$_sp_base" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    # v1.0: split pkgbase with two members (pkgname ≠ pkgbase)
+    printf 'pkgbase=%s\npkgname=("%s-mem1" "%s-mem2")\npkgver=1.0\npkgrel=1\n' \
+      "$_sp_base" "$_sp_base" "$_sp_base" > PKGBUILD
+    printf 'pkgbase = %s\n\tpkgver = 1.0\n\tpkgrel = 1\n\npkgname = %s-mem1\n\npkgname = %s-mem2\n' \
+      "$_sp_base" "$_sp_base" "$_sp_base" > .SRCINFO
+    git add -A; git commit -qm v1.0
+    # v2.0: clean version bump (the boring delta baseline recovery must clear)
+    sed -i 's/pkgver=1.0/pkgver=2.0/' PKGBUILD
+    sed -i 's/pkgver = 1.0/\tpkgver = 2.0/' .SRCINFO
+    git add -A; git commit -qm v2.0
+  )
+  # bare repo keyed by PKGBASE (how AUR actually works) — no mem1.git exists
+  git clone -q --bare "$_fbx/src/$_sp_base" "$_fbx/aur/$_sp_base.git"
+  local _sp_tip
+  _sp_tip=$(git -C "$_fbx/src/$_sp_base" rev-parse HEAD)
+
+  # Route the SPLIT MEMBER (not pkgbase) through missing_cache_gate. The
+  # _resolve_pkgbase seam maps split-base-pkg-mem1 → split-base-pkg. Report
+  # mem1 installed at v1.0 so baseline recovery (tier 1) kicks in.
+  # Before fix: clone of split-base-pkg-mem1.git 404s → review (2), no scan.
+  # After fix:  clone of split-base-pkg.git succeeds → baseline diff v1.0..v2.0
+  #             (version bump) → clean (0), same precision as cached path.
+  _AUR_TEST_DIR=""
+  _AUR_TEST_Q="split-base-pkg-mem1 1.0-1"
+  _AUR_TEST_PKGBASE="split-base-pkg-mem1 split-base-pkg"
+  ta "split-pkg-baseline-recovery-clean" 0 check_pkg split-base-pkg-mem1
+
+  # Staging keys by pkgbase (the trust-anchor identity), NOT pkgname. Without
+  # this, accepted/<pkgname> is invisible to the cached path's pkgbase lookup,
+  # silently re-seeding the anchor on the next gate.
+  if [ -f "$STAGED_DIR/$_sp_base" ] && [ ! -f "$STAGED_DIR/split-base-pkg-mem1" ]; then
+    log "  $(c_green "PASS") split-pkg-stages-under-pkgbase"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") split-pkg-stages-under-pkgbase"; fail=$((fail+1)); fi
+  # staged SHA is the audited origin/master tip (finding-1.2 TOCTOU guarantee)
+  if [ "$(awk -F'\t' '{print $1}' "$STAGED_DIR/$_sp_base")" = "$_sp_tip" ]; then
+    log "  $(c_green "PASS") split-pkg-stages-audited-tip"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") split-pkg-stages-audited-tip"; fail=$((fail+1)); fi
+  # manifest keys by pkgbase so `accept` can find_pkg_dir it after the build
+  if grep -qx "$_sp_base" "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") split-pkg-manifest-pkgbase"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") split-pkg-manifest-pkgbase"; fail=$((fail+1)); fi
+
+  # TRUST-ANCHOR ADVANCEMENT (the load-bearing path for Finding N): after the
+  # build, the cache dir for pkgbase exists and the member is installed at the
+  # NEW version. cmd_accept must find_pkg_dir(pkgbase), confirm install, and
+  # promote staged/<pkgbase> → accepted/<pkgbase>. Before the fix, staging was
+  # under <pkgname> → find_pkg_dir(pkgname) failed (cache dir is pkgbase) →
+  # anchor NEVER advanced → re-seeded from cache HEAD next gate, silently
+  # discarding the audit. This is the single most security-critical operation;
+  # leaving it unverified on a trust-path change is not acceptable.
+  # ACCEPTED_DIR is redirected to a temp dir because the missing-cache section
+  # overrides only STATE_DIR/STAGED_DIR/MANIFEST_FILE, not ACCEPTED_DIR.
+  mkdir -p "$_fsd/accepted"
+  local _osave_acc="$ACCEPTED_DIR"; ACCEPTED_DIR="$_fsd/accepted"
+  # post-build simulation: cache dir present (find_pkg_dir seam) + member
+  # installed at the tip version (2.0-1, what the build just produced)
+  _AUR_TEST_DIR="$_fbx/src/$_sp_base"
+  _AUR_TEST_Q="split-base-pkg-mem1 2.0-1"
+  ta "split-pkg-accept-promotes-pkgbase" 0 cmd_accept
+  if [ -f "$ACCEPTED_DIR/$_sp_base" ] && [ ! -f "$STAGED_DIR/$_sp_base" ]; then
+    log "  $(c_green "PASS") split-pkg-accept-moves-to-accepted"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") split-pkg-accept-moves-to-accepted"; fail=$((fail+1)); fi
+  # accepted SHA must be the AUDITED tip (finding-1.2: the scanned commit,
+  # advanced only after install-confirmation) — never a re-seed from cache HEAD
+  if [ "$(awk -F'\t' '{print $1}' "$ACCEPTED_DIR/$_sp_base")" = "$_sp_tip" ]; then
+    log "  $(c_green "PASS") split-pkg-accept-anchor-is-audited-tip"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") split-pkg-accept-anchor-is-audited-tip"; fail=$((fail+1)); fi
+  # restore ACCEPTED_DIR + force missing-cache again for the clonefail test
+  ACCEPTED_DIR="$_osave_acc"
+  _AUR_TEST_DIR=""
+
+  # Without resolution (no pkgbase map): clone of pkgname.git 404s → review (2),
+  # never silent passthrough — same safe-degradation as uncached-clonefail above.
+  _AUR_TEST_PKGBASE=""
+  ta "split-pkg-no-resolution-clonefail" 2 check_pkg split-base-pkg-mem1
+
+  # restore seam state for subsequent test sections
+  _AUR_TEST_PKGBASE=""
+  _AUR_TEST_Q=""
 
   # --- diff failure must not look clean (finding C) ------------------------
   # Corrupt accepted anchor or missing git object → review (2), never clean (0).

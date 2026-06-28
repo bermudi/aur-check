@@ -71,10 +71,11 @@ Red-team review backlog — 2026-06-26 session (glm-5.1, kimi-k2.6, qwen3.7-max)
   [docs/findings/M-allow-review-boolean.md](docs/findings/M-allow-review-boolean.md)
   kimi-k2.6 (MED #4). `[[ -n "0" ]]` is truthy. Fix: `== "1"`.
 
-- [ ] **N — Split-package missing-cache degrades to tier-2**
+- [x] **N — Split-package missing-cache degrades to tier-2** (FIXED 2026-06-28)
   [docs/findings/N-split-pkg-missing-cache.md](docs/findings/N-split-pkg-missing-cache.md)
   kimi-k2.6 (MED #5). Clone URL uses pkgname, not pkgbase → clone fails → tier-2
-  fallback. Fix: resolve pkgbase before `_clone_aur`.
+  fallback. Fix: `_clone_aur` resolves pkgbase via AUR RPC v5 before cloning;
+  `missing_cache_gate` stages under pkgbase (trust-anchor key). 5 selftests added.
 
 - [ ] **O — `find_pkg_dir` slow path no `.git` check → silent skip**
   [docs/findings/O-find-pkg-dir-no-git.md](docs/findings/O-find-pkg-dir-no-git.md)
@@ -163,7 +164,7 @@ These don't have individual finding files; details in delegate transcripts.
 | 11 | Q — files_with_status rc | Small | Capture + assert pattern |
 | 12 | R — pkg name regex | Small | 1 guard clause |
 | 13 | P — quoted source FP | Small | 1 regex extension |
-| 14 | N — split-pkg missing cache | Medium | Need pkgbase resolution |
+| 14 | N — split-pkg missing cache | Medium | **FIXED** — RPC pkgbase resolution |
 | 15 | L1–L9 (low) | Varies | Various |
 
 ## Reviewer transcripts

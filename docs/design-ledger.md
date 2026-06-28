@@ -223,8 +223,10 @@ the clone and yay's own fetch would install, then be auto-seeded as the trusted
 baseline on the next gate (`accepted_ref` falls back to helper-cache HEAD when no
 accepted file exists) — reopening the exact bug finding 1.2 closed. Hard-fail
 exits do NOT stage: a blocked update never reaches the helper, so there's nothing
-to accept. `$pkg` is used as pkgbase (correct for non-split; split packages fail
-the clone URL anyway since AUR repos are keyed by pkgbase).
+to accept. Staging keys by **pkgbase**, derived from the clone dir name
+(`${dir##*/}`, mirroring the cached path). `_clone_aur` resolves pkgname→pkgbase
+via AUR RPC before cloning (Finding N fix), so split packages stage and anchor
+correctly. Flag files stay keyed by pkgname for display (`explain <pkgname>`).
 
 **`scan_diff_rules` is shared by both diff paths** (cached + baseline recovery)
 so they can never drift: `diff_added` → hard rules + new-`.install` (→ `hard`,
@@ -418,7 +420,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 137/137 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 156/156 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -443,7 +445,15 @@ staged commits.
   boring-edge review, build logic review, hard-pattern block, audit-unavailable
   no-LLM, disabled verifier no-call, exact OK auto-pass,
   NEEDS_HUMAN/malformed/failure/missing-`pi` review, and LLM auto-green staging
-  of the gate-time tip).
+  of the gate-time tip; +8 split-package missing-cache cases (Finding N):
+  baseline-recovery-via-pkgbase-resolution / stages-under-pkgbase /
+  stages-audited-tip / manifest-pkgbase / accept-promotes-pkgbase /
+  accept-moves-to-accepted / accept-anchor-is-audited-tip /
+  no-resolution-clonefail; +4 RPC pkgbase-parser cases pinned against AUR
+  JSON fixtures: split-resolves / nonsplit-resolves / notfound-returns-1 /
+  name-mismatch-returns-1). Live end-to-end confirmed against real AUR for
+  `opencl-nvidia-580xx` / `nvidia-580xx-dkms` (split members of
+  `nvidia-580xx-utils`): resolve pkgbase → clone → baseline-recovery diff.
   Run with `aur-safe selftest`.
 - Accepted-ref lifecycle verified end-to-end on a real cached package
   (cursor-bin): seed from HEAD, stage on non-empty clean diff, manifest write,
