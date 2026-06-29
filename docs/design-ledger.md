@@ -258,7 +258,14 @@ trust-anchor surface (lowercase is NOT a defense — `validpgpkeys=` accepts any
 case; the var-name allowlist is). Add a name to the allowlist only when a real
 AUR package needs it — every added name re-opens the surface. Inline
 fingerprints in `validpgpkeys=(...)` remain caught by
-`_pkgbuild_checksum_array_line` (requires a `*sums=(` array). Literal
+`_pkgbuild_checksum_array_line` (requires a `*sums=(` array). Indexed
+checksum-array element assignments (`sha512sums[0]=<hex>` / `'SKIP'` — distinct
+syntax from the `sums=(...)` literal and `sums_<arch>=` var forms; the `[N]`
+index between name and `=` breaks both of those regexes) are boring: the RHS is
+inert data makepkg enforces against the downloaded artifact, and a wrong value
+fails the build before install; the motivating `cursor-bin` shape declares the
+array with a `'SKIP'` placeholder at `[0]`, then overwrites `[0]` in a separate
+statement with the real hash. Literal
 single-quoted `PKGBUILD optdepends=(...)` entries and standalone quoted/bare
 `SKIP`/hex tokens — the per-line shape inside a PKGBUILD multiline
 `sha256sums=(...)` array, distinct from the `.SRCINFO` `sha256sums = <hex>`
@@ -449,7 +456,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 169/169 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 172/172 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -467,7 +474,7 @@ staged commits.
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
   no-stage on audit-unavailable / git-config-isolation-hard-rules-fire
   (Finding J: GIT_CONFIG_GLOBAL=/dev/null defeats hostile noprefix/colorWords);
-  +33 classifier/LLM cases covering boring
+  +36 classifier/LLM cases covering boring
   version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
   regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata
   (incl. `noextract=`), repo/satisfied/**intra-pkgbase** dependency metadata,
@@ -481,8 +488,9 @@ staged commits.
   (hunk-header opener recovery), `_commit=<hex>` build-var passes (unquoted /
   single / double quoted), command-substitution review, an arbitrary-`_var`
   validpgpkeys-indirection review (var-name restriction, delegate-review
-  Finding 1), and an intra-pkgbase dep-on-newly-added-member review (new member
-  section is itself a review signal); +8 split-package missing-cache cases (Finding N):
+  Finding 1), an intra-pkgbase dep-on-newly-added-member review (new member
+  section is itself a review signal), and indexed checksum-array element
+  assignment passes (`sha512sums[0]=<hex>`/`SKIP`, command-subst review); +8 split-package missing-cache cases (Finding N):
   baseline-recovery-via-pkgbase-resolution / stages-under-pkgbase /
   stages-audited-tip / manifest-pkgbase / accept-promotes-pkgbase /
   accept-moves-to-accepted / accept-anchor-is-audited-tip /

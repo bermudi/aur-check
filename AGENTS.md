@@ -70,7 +70,7 @@ installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adh
 ## Workflow
 ```sh
 bash -n aur-safe          # syntax check
-./aur-safe selftest       # the gate — must stay green (169/169)
+./aur-safe selftest       # the gate — must stay green (172/172)
 shellcheck -s bash aur-safe  # SC2016/SC2001 excluded via .shellcheckrc
 ```
 Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known

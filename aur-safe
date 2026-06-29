@@ -328,6 +328,20 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
+  # Indexed checksum-array element assignment: sha512sums[0]=<hex>,
+  # sha256sums[3]='SKIP'. Distinct syntax from the sums=(...) literal and the
+  # sums_<arch>= var forms above (the [N] index between name and = breaks both
+  # of those regexes). The cursor-bin shape: the array is declared with a
+  # 'SKIP' placeholder at [0], then [0] is overwritten in a separate statement
+  # with the real hash. The RHS is never executed — it's data makepkg enforces
+  # against the downloaded artifact, so a wrong/malicious value fails the build
+  # before install. Allow SKIP for consistency with other checksum rules (a new
+  # SKIP disables one checksum but is still inert text; its paired source is
+  # classified independently). Command substitution is rejected: $ and backtick
+  # break the hex/SKIP-only match (same rejection path as the _commit rule).
+  if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums\[[0-9]+\][[:space:]]*=[[:space:]]*['"'"'"]?(SKIP|[0-9a-fA-F]{16,})['"'"'"]?[[:space:]]*$' <<<"$line" 2>/dev/null; then
+    return 0
+  fi
   # Bare hex/SKIP is no longer classified here; it MUST be contextualized
   # through _pkgbuild_checksum_array_line in classify_diff_rules (finding E).
   # Without checksum-array context, a validpgpkeys fingerprint or bare SKIP
@@ -2647,6 +2661,20 @@ cmd_selftest() {
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
   local _old_opt_pkg _new_opt_pkg _new_opt_expansion_pkg _new_opt_sed_pkg _old_opt_src _new_opt_src
   local _old_vpgp_pkg _new_vpgp_pkg _old_vpgp_src _new_vpgp_src _old_src_move_src _new_src_move_src
+  # split-pkgbase intra-pkgbase-dep fixtures (R1)
+  local _split_old_pkgbuild _split_new_pkgbuild _split_base_old_src _split_base_new_src
+  local _split_member_old_src _split_member_new_src _split_added_old_src _split_added_new_src
+  # _commit=<hex> build-var fixtures (R3)
+  local _commit_old_pkg _commit_old_src _commit_new_src _commit_new_pkg_unq _commit_new_pkg_sq
+  local _commit_new_pkg_dq _commit_subst_pkg _commit_evil_pkg
+  # noextract= fixtures (R1)
+  local _noextract_old_pkg _noextract_new_pkg _noextract_old_src _noextract_new_src
+  # deep-in-multi-hunk-array fixtures (R2)
+  local _deep_pad _deep_cs_old_pkg _deep_cs_new_pkg _deep_cs_old_src _deep_cs_new_src
+  local _deep_opt_old_pkg _deep_opt_new_pkg _deep_opt_old_src _deep_opt_new_src
+  # indexed checksum-array element assignment fixtures (sha512sums[0]=)
+  local _sum512_old _sum512_new _idx_cs_old_pkg _idx_cs_new_pkg _idx_cs_old_src _idx_cs_new_src
+  local _idx_skip_old_pkg _idx_skip_new_pkg _idx_subst_new_pkg
   _sum1=1111111111111111111111111111111111111111111111111111111111111111
   _sum2=2222222222222222222222222222222222222222222222222222222222222222
   _old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
@@ -2904,6 +2932,50 @@ cmd_selftest() {
     "$_deep_opt_new_pkg" \
     "$_deep_opt_old_src" \
     "$_deep_opt_new_src"
+
+  # Indexed checksum-array element assignment: sha512sums[0]=<hex>. The
+  # cursor-bin shape — the array is declared with a 'SKIP' placeholder at [0],
+  # then [0] is overwritten in a separate statement with the real hash. The [N]
+  # index between name and = breaks the sums=(...) literal and sums_<arch>=
+  # var regexes, so this needs its own rule. RHS is inert (makepkg-enforced
+  # data, never executed). Three variants: hex value (clear), SKIP (clear),
+  # command substitution (review — $ breaks the hex-only match).
+  _sum512_old=eb651017f6625e7121b0139260e12eb8461232a5960349300fc1c1bba0076b156e674a2c09b54793f2d1b97b9846d2ca83e6b3e7803d98749ee5474a6395d4b6
+  _sum512_new=14ccac68e07d46764c2857c58d630919a357d7c46f2dcf2ffbb3462c456f2fad4cdb02f06be4b215b645064b2084f190f2766ad74769fcc188a5809b7a4a29e4
+  printf -v _idx_cs_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha512sums=('SKIP' '%s' '%s' '%s')\nsha512sums[0]=%s" \
+    "$_sum1" "$_sum1" "$_sum1" "$_sum512_old"
+  printf -v _idx_cs_new_pkg "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsha512sums=('SKIP' '%s' '%s' '%s')\nsha512sums[0]=%s" \
+    "$_sum1" "$_sum1" "$_sum1" "$_sum512_new"
+  _idx_cs_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _idx_cs_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  tc_class pkgbuild-indexed-checksum-assignment-boring boring 0 \
+    "$_idx_cs_old_pkg" \
+    "$_idx_cs_new_pkg" \
+    "$_idx_cs_old_src" \
+    "$_idx_cs_new_src"
+
+  # SKIP is an allowed inert checksum value (disables verification for one
+  # source; common for VCS). Must clear, not review.
+  printf -v _idx_skip_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha512sums=('%s' '%s')\nsha512sums[0]=%s" \
+    "$_sum1" "$_sum1" "$_sum512_old"
+  printf -v _idx_skip_new_pkg "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsha512sums=('%s' '%s')\nsha512sums[0]=SKIP" \
+    "$_sum1" "$_sum1"
+  tc_class pkgbuild-indexed-checksum-skip-boring boring 0 \
+    "$_idx_skip_old_pkg" \
+    "$_idx_skip_new_pkg" \
+    "$_idx_cs_old_src" \
+    "$_idx_cs_new_src"
+
+  # Regression: command substitution as the assigned value must NOT clear — it
+  # executes at source time. Use a payload-free substitution so the hard-rule
+  # pipeline doesn't fire first; isolates the classifier's own rejection.
+  printf -v _idx_subst_new_pkg "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsha512sums=('SKIP' '%s')\nsha512sums[0]=\$(date)" \
+    "$_sum1"
+  tc_class pkgbuild-indexed-checksum-command-subst-review review 2 \
+    "$_idx_cs_old_pkg" \
+    "$_idx_subst_new_pkg" \
+    "$_idx_cs_old_src" \
+    "$_idx_cs_new_src"
 
   tc_class optdepends-pkgbuild-srcinfo boring 0 \
     "$_old_opt_pkg" \
