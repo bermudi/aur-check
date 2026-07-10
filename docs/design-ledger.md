@@ -246,7 +246,13 @@ pkgbase's `pkgbase=` or a declared `pkgname=` member at the new tip — a
 self-reference that cannot pull in unaudited code from outside the package
 under review) are boring metadata; all other unknown/AUR-looking dependencies
 stay review so a package update cannot silently pull an unaudited AUR
-dependency. `PKGBUILD` build variables assigned a bare **lowercase** git SHA
+dependency. The **PKGBUILD array-literal forms** of `license`/`arch`/`groups`/
+`noextract` (`license=('MIT' 'LGPL-2.0-or-later')`, `arch=('x86_64' 'aarch64')`)
+are classified symmetrically with their `.SRCINFO` space-delimited forms —
+makepkg writes them into `.PKGINFO` without executing them; they touch no
+checksum, source host, or trust anchor. (`pkgdesc`/`url` are scalars, never
+array literals; `optdepends` keeps its own stricter handler that rejects shell
+expansion.) `PKGBUILD` build variables assigned a bare **lowercase** git SHA
 (`_commit=<hex>`, `_gittag=<short-sha>`, `_gitrev`/`_tag`/`_rev`, optionally
 quoted, 7..40 hex chars) are boring — the RHS of a string assignment is never
 executed and the fetched artifact is verified by the `*sums=()` array. The
@@ -256,7 +262,20 @@ this closes the validpgpkeys-indirection gap a delegate review flagged
 already-present `validpgpkeys=($_evil)` would otherwise auto-clear on a
 trust-anchor surface (lowercase is NOT a defense — `validpgpkeys=` accepts any
 case; the var-name allowlist is). Add a name to the allowlist only when a real
-AUR package needs it — every added name re-opens the surface. Inline
+AUR package needs it — every added name re-opens the surface. **Dotted-decimal
+version build-vars** (`_nwjs_ffmpeg_version=0.113.0`, `_electron_version=v25.3.0`
+— optional `v` prefix + quotes, any `_-prefixed var name`) are the same
+inert-metadata class and are boring: the RHS never executes, and the version only
+selects a path in `source=()` whose artifact is verified by `*sums=()` (host drift
+/ IDN homograph are caught by `source_domains()` + the Finding E guard, run before
+the per-line loop). Unlike `_commit`, the var-name is NOT restricted here — a
+dotted decimal cannot be a PGP fingerprint (hex) or a checksum (hex/`SKIP`), so
+the RHS **format** is the security boundary, not the name; the validpgpkeys-
+indirection that forced the `_commit` allowlist has no analogue. This matters
+because real package var names don't follow a convention (`_nwjs_ffmpeg_version`,
+not `_version`), so a name allowlist would silently miss the motivating
+`opera-developer` case. Command substitution is rejected (`$`/backtick break the
+`[0-9.]` match). Inline
 fingerprints in `validpgpkeys=(...)` remain caught by
 `_pkgbuild_checksum_array_line` (requires a `*sums=(` array). Indexed
 checksum-array element assignments (`sha512sums[0]=<hex>` / `'SKIP'` — distinct
@@ -265,7 +284,24 @@ index between name and `=` breaks both of those regexes) are boring: the RHS is
 inert data makepkg enforces against the downloaded artifact, and a wrong value
 fails the build before install; the motivating `cursor-bin` shape declares the
 array with a `'SKIP'` placeholder at `[0]`, then overwrites `[0]` in a separate
-statement with the real hash. Literal
+statement with the real hash. **Arch-qualified** `source`/`*sums` lines are
+classified symmetrically with their bare forms in every syntax:
+`.SRCINFO` space-delimited (`source_x86_64 =` / `sha256sums_aarch64 =`),
+PKGBUILD single-line arrays (`source_x86_64=(...)`), and bare assignments —
+the `opencode-bin` / `visual-studio-code-bin` per-arch-tarball shape (a
+version bump renaming each `source_<arch>` URL on the same host is boring).
+This is safe only because the **Finding E homograph guard**
+(`_source_line_nonascii`, run in `classify_diff_rules` before the per-line
+boring loop) forces review on any added line carrying `://` (or a `source`/
+`source_*=` token) with a byte ≥ 0x80: `source_domains()`'s hostname extractor
+is ASCII-only and blind to IDN homograph hosts, so without the guard a
+Cyrillic-prefixed URL would auto-clear as inert metadata (the threat model's
+own example). The `://`-anywhere match catches the multi-line array
+continuation line shape, not just the `source=` token-start line — added
+2026-07-05 after a delegate review flagged that the continuation line
+otherwise falls to the standalone-URL `boring_edge` path, reachable by the LLM
+auto-green verifier (the LLM is no better at spotting an invisible Cyrillic
+byte than the deterministic classifier). Literal
 single-quoted `PKGBUILD optdepends=(...)` entries and standalone quoted/bare
 `SKIP`/hex tokens — the per-line shape inside a PKGBUILD multiline
 `sha256sums=(...)` array, distinct from the `.SRCINFO` `sha256sums = <hex>`
@@ -283,6 +319,20 @@ GIT_CONFIG_SYSTEM=/dev/null` at script load (Finding J): user options like
 empty `added`), and `textconv` (arbitrary code on `git show`) would otherwise
 break the pipeline or execute attacker code; the export overrides any hostile
 caller env (last export wins) and makes diff output deterministic.
+**Review-detail selection** (`_detail_is_build_logic` / `_review_added_line_summary`):
+when a diff has more than one non-boring added line, the reported detail prefers
+a build-logic line (a `prepare`/`build`/`check`/`package`/`install` function
+header, or a build/install statement like `install`/`cp`/`cmake`/`make`/`npm`/
+`cargo`) over an earlier metadata-ish non-boring line (e.g. `backup=`, a new
+PKGBUILD var assignment), so the reviewer's eye lands on the security-relevant
+change. This is editorial only — the gate's classification is unaffected; a
+missed keyword falls through to the generic summary (fail-safe). The
+build-logic check is **content-based**, not git-hunk-annotation-based: PKGBUILD
+has no built-in diff driver, so git never annotates hunks with `package()`/
+`build()` context, making a prior `^PKGBUILD:N in (...)` summary regex
+effectively dead. The keyword list is not a security blacklist (the threat
+model's red line is against attacker-rotated package/installer names, not shell
+keywords).
 Diff/read failures are `audit_unavailable` (exit 2), never LLM auto-green, and
 never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
@@ -424,10 +474,12 @@ remove drift; it should not broaden the trust path casually.
    zero signal and should not be auto-consented by `AUR_SAFE_ALLOW_REVIEW=1`.
    The smallest safe contract change is a separate wrapper result for audit
    unavailable; `AUR_SAFE_ALLOW_REVIEW=1` should apply only to real rule hits.
-2. **Add a review-level homograph check for `source=()` URLs.** Flag newly-added
-   or changed source hostnames containing non-ASCII characters (and show the
-   punycode/ASCII form if available). Start review-only; hard-fail only with
-   real campaign evidence.
+2. ~~**Add a review-level homograph check for `source=()` URLs.**~~ ✅ done
+   2026-07-01 (`_source_line_nonascii`). Flag newly-added or changed source
+   hostnames containing non-ASCII characters (bytes ≥ 0x80) → review, before
+   the per-line boring loop. Covers `.SRCINFO` space-delimited + PKGBUILD array
+   + bare assignment syntaxes. Hard-fail upgrade still open pending real
+   campaign evidence.
 3. **Decide the missing-cache history-rewrite policy.** Baseline recovery is
    precise when the installed version still exists in fetched history, but the
    attacker-controlled repo can erase earlier commits. Consider whether this
@@ -456,7 +508,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: 172/172 (47 rule-engine cases, including flag-bearing JS package
+- `selftest`: 182/182 (47 rule-engine cases, including flag-bearing JS package
   managers, combined `-c` interpreter flags, fetch-file-exec, OpenSSL base64,
   and `xxd -r`; +3 config-policy cases for config-file loading, env override,
   and fail-closed invalid values; +6 `cmd_scan` shared-rule cases; +16
@@ -474,15 +526,27 @@ staged commits.
   cases: diff_added bad-ref / scan_diff_rules / corrupt-anchor review /
   no-stage on audit-unavailable / git-config-isolation-hard-rules-fire
   (Finding J: GIT_CONFIG_GLOBAL=/dev/null defeats hostile noprefix/colorWords);
-  +36 classifier/LLM cases covering boring
+  +46 classifier/LLM cases covering boring
   version/checksum/same-host source passes, `.SRCINFO` leading-whitespace-only
   regeneration, multiline checksum passes, literal `.SRCINFO` advisory metadata
-  (incl. `noextract=`), repo/satisfied/**intra-pkgbase** dependency metadata,
-  and `PKGBUILD` optdepends metadata passes,
+  (incl. `noextract=`), PKGBUILD advisory-array literals (`license`/`arch`/
+  `groups`/`noextract` `=(...)`), repo/satisfied/**intra-pkgbase** dependency
+  metadata, and `PKGBUILD` optdepends metadata passes,
   unknown dependency review, non-literal optdepends shell-expansion review,
-  optdepends-plus-prepare review, source-host drift review, multiline-source
-  boring-edge review, build logic review, hard-pattern block, audit-unavailable
-  no-LLM, disabled verifier no-call, exact OK auto-pass,
+  optdepends-plus-prepare review, source-host drift review, source-non-ASCII
+  homograph review (Finding E, `.SRCINFO` + PKGBUILD single-line array + bare
+  forms AND the multi-line `source=(\n  <url>\n)` continuation-line form a
+  delegate review caught as a residual reaching `boring_edge`),
+  arch-qualified `source_<arch>` boring pass (opencode-bin/vscode-bin shape),
+  multiline-source boring-edge review, build logic review, hard-pattern block,
+  a package-body-changes-with-license-array review (the kilo-bin shape — gate
+  still blocks when license=() is boring but a new install line is not), the
+  first review-detail-selection assertion (the reported detail points at the
+  build-logic line, summary is "package build instructions changed"), a
+  colon-in-text regression (build-logic detection on added text containing
+  `": "` — pins the raw-text path that replaced the broken `${detail##*: }`
+  extraction a delegate review caught),
+  audit-unavailable no-LLM, disabled verifier no-call, exact OK auto-pass,
   NEEDS_HUMAN/malformed/failure/missing-`pi` review, and LLM auto-green staging
   of the gate-time tip; deep-in-multi-hunk-array checksum/optdepends passes
   (hunk-header opener recovery), `_commit=<hex>` build-var passes (unquoted /

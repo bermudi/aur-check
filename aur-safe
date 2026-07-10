@@ -265,6 +265,45 @@ source_domains() {
     | sed 's#^://##' | tr '[:upper:]' '[:lower:]' | sort -u
 }
 
+# Finding E guard — IDN homograph in source=() URLs. A non-ASCII byte
+# (≥ 0x80, e.g. Cyrillic і U+0456 standing in for i) in a source URL is the
+# threat-model's exact example: source_domains()' ASCII-only hostname extractor
+# (above, grep '://[a-zA-Z0-9._-]+') yields zero chars for such a host, so the
+# drift set-diff is silently skipped AND _boring_added_line_class would otherwise
+# auto-clear the line as inert metadata. This echoes any offending line (empty
+# output = clean); the caller sets review_hits — review-level, not block, per
+# the finding doc and the source-domain-new precedent.
+#
+# Two line shapes are matched:
+#   1. `source=` / `source_*=...` token-start lines — covers every source-token
+#      syntax: .SRCINFO space-delimited (source = / source_x86_64 =), PKGBUILD
+#      single-line arrays (source=(...), source_x86_64=(...)), and bare
+#      assignments. These are the makepkg-default single-line forms.
+#   2. ANY `+`-line containing `://` with a byte ≥ 0x80 — catches the multi-line
+#      array *continuation* line shape:
+#         source=(
+#           "https://іnstall.example.com/p.tar"
+#         )
+#      The continuation line is not a `source=` token-start line, so shape 1
+#      misses it; without shape 2 it falls to the standalone-URL boring_edge
+#      path → reachable by the LLM auto-green verifier, which is exactly the
+#      non-deterministic path Finding E is about (the LLM can't reliably spot an
+#      invisible Cyrillic byte either). A delegate review flagged the prior
+#      "already caught" comment here as wrong — it has been removed.
+# `://` is the URL scheme separator; matching any line carrying it (rather than
+# only `source=` lines) is sound because a non-ASCII byte in a URL host is the
+# homograph signal regardless of which array/field introduced it, and the only
+# added lines legitimately carrying `://` are source URLs.
+# LC_ALL=C so [:print:]/[:space:] are the strict ASCII ranges — multibyte chars
+# fall outside both and register as non-printable.
+_source_line_nonascii() {
+  local added="$1"
+  {
+    grep -nE '^[[:space:]]*source(_[[:alnum:]_]*)?[[:space:]]*=' <<<"$added" 2>/dev/null
+    grep -nE '://' <<<"$added" 2>/dev/null
+  } | LC_ALL=C grep -E '[^[:print:][:space:]]' || true
+}
+
 # Files changed with a given status filter (A=added, M=modified), whose basename
 # ends with the given literal suffix. Uses --name-only (handles spaces safely).
 files_with_status() {
@@ -290,7 +329,13 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch)=' <<<"$line" 2>/dev/null; then
     return 0
   fi
-  if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch|source|[[:alnum:]]+sums(_[[:alnum:]_]+)?)[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
+  # .SRCINFO space-delimited metadata (key<sp>=<sp>value). source now carries
+  # an optional _<arch> suffix to match arch-qualified entries (source_x86_64 =,
+  # source_aarch64 =) symmetrically with the *sums_<arch> = alternative — the
+  # opencode-bin / vscode-bin shape. Safe because _source_line_nonascii (Finding
+  # E guard) runs in classify_diff_rules before this per-line loop and rejects
+  # any source line carrying a byte ≥ 0x80.
+  if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch|source(_[[:alnum:]_]+)?|[[:alnum:]]+sums(_[[:alnum:]_]+)?)[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
     return 0
   fi
   # PKGBUILD build-variable assigned a bare git SHA (e.g. _commit=<40hex>,
@@ -314,6 +359,27 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*_(commit|gittag|gitrev|tag|rev)(_[[:alnum:]_]*)?=[[:space:]]*['"'"'"]?[0-9a-f]{7,40}['"'"'"]?[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
+  # PKGBUILD build-variable assigned a dotted-decimal version (e.g.
+  # _nwjs_ffmpeg_version=0.113.0, _electron_version=25.3.0, optional 'v'
+  # prefix + quotes). Same inert-metadata class as _commit above: the RHS of a
+  # string assignment is never executed, and the version only selects a path
+  # inside source=(), whose fetched artifact is verified by the *sums=() array
+  # (and host drift / IDN homograph are caught by source_domains() + the
+  # Finding E _source_line_nonascii guard, both run before this loop).
+  #
+  # Unlike the _commit rule above, the var-name is NOT restricted here: a
+  # dotted decimal CANNOT be a PGP fingerprint (validpgpkeys= takes hex, and
+  # gpg rejects a dotted decimal loudly — build breaks, not silent bypass) and
+  # CANNOT be a checksum (hex/SKIP, wrong length fails the build). The
+  # validpgpkeys-indirection that forced the _commit name-allowlist (delegate-
+  # review Finding 1) has no analogue here, so the RHS FORMAT is the security
+  # boundary, not the var name — any _-prefixed var holding a version is safe.
+  # That also avoids a name allowlist that would silently miss real packages
+  # (the motivating opera-developer var is _nwjs_ffmpeg_version, not _version).
+  # Command substitution is rejected: $ and backtick break the [0-9.] match.
+  if grep -Eq '^[[:space:]]*_[[:alnum:]_]*=[[:space:]]*['"'"'"]?v?[0-9]+(\.[0-9]+)+['"'"'"]?[[:space:]]*$' <<<"$line" 2>/dev/null; then
+    return 0
+  fi
   # .SRCINFO advisory/package metadata. These fields do not affect build or
   # install execution, so plain added/changed entries should not interrupt an
   # upgrade as "non-boring". noextract= is a versioned *filename* pointing at a
@@ -322,10 +388,33 @@ _boring_added_line_class() {
   if grep -Eq '^[[:space:]]*(pkgdesc|url|arch|license|groups|optdepends|noextract)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
     return 0
   fi
-  if grep -Eq '^[[:space:]]*source=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
+  # PKGBUILD single-line array literal for advisory metadata: license=('MIT'
+  # 'LGPL-2.0-or-later'), arch=('x86_64' 'aarch64'), groups=(...), noextract=
+  # (...). Symmetric with the .SRCINFO space-delimited form just above, which
+  # classifies these same fields as inert. makepkg writes them into .PKGINFO
+  # without executing them; they touch no checksum, no source host, no trust
+  # anchor (the kilo-bin case: license=('MIT') → license=('MIT' 'LGPL...') is a
+  # purely cosmetic change that previously fell through to review here while its
+  # .SRCINFO mirror cleared). optdepends is deliberately NOT in this group: it
+  # has its own stricter handler (_pkgbuild_optdepends_added_line, called in
+  # classify_diff_rules) that rejects shell expansion inside the array, and
+  # routing it through this loose literal match would reopen that surface.
+  # pkgdesc/url are scalars, not array literals — a pkgdesc=(...) would be a
+  # makepkg syntax error, worth keeping in review rather than auto-clearing.
+  if grep -Eq '^[[:space:]]*(license|arch|groups|noextract)=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
-  if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
+  # PKGBUILD single-line source=/sums= array literal. The (_[[:alnum:]_]+)?
+  # suffix carries arch-qualified arrays (source_x86_64=(...), sha256sums_aarch64=
+  # (...)) — same inert-metadata class as the bare form. Safe because the Finding
+  # E _source_line_nonascii guard runs first (homograph rejection) and
+  # source_domains() independently set-diffs hosts. A multi-line array whose URL
+  # sits on a continuation line still falls to the standalone-URL boring_edge
+  # path below — by design (the finding-E safety net).
+  if grep -Eq '^[[:space:]]*source(_[[:alnum:]_]+)?=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
+    return 0
+  fi
+  if grep -Eq '^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\(.*\)[[:space:]]*$' <<<"$line" 2>/dev/null; then
     return 0
   fi
   # Indexed checksum-array element assignment: sha512sums[0]=<hex>,
@@ -483,15 +572,37 @@ _srcinfo_repo_dep_added_line() {
   ' <<<"$members"
 }
 
-_describe_added_line() {
-  local dir="$1" base_ref="$2" wanted="$3"
+# Resolve review-detail candidates in a SINGLE git diff pass. The per-line
+# boring loop used to call _describe_added_line once per non-boring line (up to
+# 8× — a perf regression a delegate review flagged), and _detail_is_build_logic
+# parsed the formatted detail with ${detail##*: }, which breaks on added text
+# containing ": " (e.g. msg "step: done" — a common PKGBUILD idiom) — also
+# flagged by the review. This collapses both: one `git diff | awk` walk emits a
+# record for every wanted `+`-line, and the raw text is carried alongside the
+# formatted detail so _detail_is_build_logic needs no string-parsing.
+#
+# Wants the wanted lines (one per record) on a temp-file fd so newline-bearing
+# content can't break awk's `-v` (which mangles embedded newlines) or be
+# injected into the awk program text. Output per match, tab-separated:
+#   <raw added-line text> \t <formatted detail ("file:line[: in ctx]: text")>
+# Records preserve diff order so callers can prefer the first build-logic hit.
+_collect_review_details() {
+  local dir="$1" base_ref="$2" want_file="$3"
   git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
     "${EXCLUDE_PATHS[@]}" 2>/dev/null \
-    | awk -v wanted="$wanted" '
+    | awk -v want_file="$want_file" '
         function trim(s) {
           sub(/^[[:space:]]+/, "", s)
           sub(/[[:space:]]+$/, "", s)
           return s
+        }
+        BEGIN {
+          # Load wanted added-lines into w[] (keyed by line text) + wcount.
+          n=0
+          while ((getline line < want_file) > 0) {
+            if (!(line in w)) { w[line]=1; want[++n]=line }
+          }
+          close(want_file)
         }
         /^diff --git / { file=""; newln=0; where=""; next }
         /^\+\+\+ b\// {
@@ -514,26 +625,60 @@ _describe_added_line() {
         /^[ +]/ {
           marker=substr($0, 1, 1)
           text=substr($0, 2)
-          if (marker == "+" && text == wanted) {
+          if (marker == "+" && (text in w)) {
+            # Carry the raw text (tab-separated) so the build-logic check never
+            # has to parse the formatted detail back apart — fixing the
+            # colon-in-text extraction bug.
             if (where != "") {
-              printf "%s:%d in %s: %s\n", file, newln, where, text
+              printf "%s\t%s:%d in %s: %s\n", text, file, newln, where, text
             } else {
-              printf "%s:%d: %s\n", file, newln, text
+              printf "%s\t%s:%d: %s\n", text, file, newln, text
             }
-            found=1
-            exit
+            # Mark emitted so a duplicate text later in the diff does not replay
+            # (the first occurrence is the most useful location to show).
+            delete w[text]
           }
           if (newln > 0) {
             newln++
           }
         }
-        END { exit found ? 0 : 1 }
       '
 }
 
+# A review detail is "build logic" when its added text is a shell command that
+# runs at build/install time — the security-relevant case (vs inert metadata
+# like backup= or replaces= that survives the per-line boring loop). Content-
+# based, not git-hunk-annotation-based: PKGBUILD has no built-in diff driver,
+# so git never annotates hunks with package()/build() context, making the prior
+# `^PKGBUILD:N in (prepare|build|check|package)` summary regex effectively dead.
+# The function-keyword list is the same surface the summary used to key off,
+# now matched against the added text instead of git's (absent) hunk label. The
+# command list is NOT a security blacklist — these are bash statement keywords
+# / build-tool invocations whose presence on a `+` line marks it as build
+# logic; the threat model's red line is against attacker-rotated package names,
+# not shell keywords. Used only for summary-text selection (UX): the gate's
+# classification is unaffected — a missed keyword falls through to the generic
+# summary (fail-safe). Returns 0=build logic, 1=otherwise.
+#
+# Takes the RAW added-line text directly (not the formatted detail string). An
+# earlier revision parsed ${detail##*: } out of the formatted detail, which
+# silently truncated added text containing ": " (e.g. msg "step: done") — a
+# delegate-review catch. Callers pass the raw text via _collect_review_details'
+# tab-separated record so no parsing is needed here.
+_detail_is_build_logic() {
+  local text="$1"
+  # A build/install function header introduced/changed on its own line.
+  [[ "$text" =~ ^[[:space:]]*(prepare|build|check|package|install)[[:space:]]*\(\)[[:space:]]*\{?[[:space:]]*$ ]] && return 0
+  # A build-function-body statement. Anchored to leading keywords so an
+  # unrelated metadata-ish line can't trip it. install/mkdir/cp/mv/rm/ln cover
+  # the package() body; cmake/make/ninja/cargo/go and the JS/Python package
+  # managers cover build(); `./` covers a directly-executed build artifact.
+  grep -Eq '^[[:space:]]*(install|cp|mv|rm|ln|mkdir|cmake|make|ninja|cargo|go|npm|yarn|pnpm|bun|pip|python|sh |bash |\./)' <<<"$text" 2>/dev/null
+}
+
 _review_added_line_summary() {
-  local detail="$1"
-  if grep -Eq '^PKGBUILD:[0-9]+ in (prepare|build|check|package)' <<<"$detail" 2>/dev/null; then
+  local text="$1"
+  if _detail_is_build_logic "$text"; then
     printf '%s\n' "package build instructions changed"
   else
     printf '%s\n' "build file changed in a way aur-safe cannot auto-clear"
@@ -1029,13 +1174,37 @@ classify_diff_rules() {
     fi
   fi
 
+  # Finding E — non-ASCII byte in any source= / source_*= line (IDN homograph).
+  # Must run BEFORE the per-line boring loop: the classifier treats source lines
+  # as inert metadata and would otherwise auto-clear the homograph (see
+  # _source_line_nonascii). source_domains() is ASCII-only and blind to it.
+  local nonascii_src
+  nonascii_src=$(_source_line_nonascii "$added")
+  if [[ -n "$nonascii_src" ]]; then
+    log "  $(c_yellow "review") [source-non-ascii]"
+    sed 's/^/      /' <<<"$nonascii_src" | head -4 >&2
+    review_hits=1
+  fi
+
   if (( review_hits )); then
     SCAN_DIFF_CLASS="review"
     SCAN_DIFF_REASON="review-rule"
     return 0
   fi
 
-  local line cls boring_edge=0 detail summary
+  # Two-pass selection over the boring classifier: collect the raw text of
+  # every non-boring added line, resolve their locations in a SINGLE git diff
+  # pass (_collect_review_details), then prefer the first whose text is build
+  # logic over an earlier metadata-ish non-boring line (backup=, replaces=, a
+  # new PKGBUILD var assignment, etc.). Previously the loop returned on the
+  # FIRST non-boring line in diff order, which let a low-value metadata line
+  # shadow the real signal (e.g. kilo-bin reported its license=() line, not the
+  # install of a new ./bwrap binary further down), AND it spawned one git diff
+  # per candidate — collapsed here into one pass (delegate-review perf catch).
+  # Capped at 8 candidates — past that the diff is deep in review territory and
+  # the detail is a UX hint, not a signal.
+  local line cls boring_edge=0
+  local -a cand_want=()   # raw added-line text (one per non-boring line)
   while IFS= read -r line; do
     if _srcinfo_leading_ws_only_added_line "$dir" "$base_ref" "$line"; then
       continue
@@ -1054,16 +1223,53 @@ classify_diff_rules() {
       0) ;;
       1) boring_edge=1 ;;
       *)
-        detail=$(_describe_added_line "$dir" "$base_ref" "$line" || printf '%s\n' "$line")
-        summary=$(_review_added_line_summary "$detail")
-        log "  $(c_yellow "review needed") — $summary"
-        printf '      added: %s\n' "$detail" >&2
-        SCAN_DIFF_CLASS="review"
-        SCAN_DIFF_REASON="non-boring-diff"
-        return 0
+        if (( ${#cand_want[@]} < 8 )); then
+          cand_want+=("$line")
+        fi
         ;;
     esac
   done <<<"$added"
+
+  if (( ${#cand_want[@]} > 0 )); then
+    # Resolve all candidates in one git diff pass. Want-list goes to a temp
+    # file: awk -v can't carry newlines, and inlining into the awk program
+    # would be injection-prone on attacker-controlled PKGBUILD text.
+    local want_file i
+    want_file=$(mktemp -t aur-safe-want.XXXXXX)
+    printf '%s\n' "${cand_want[@]}" >"$want_file"
+    # Records are tab-separated "<raw text>\t<formatted detail>" so the
+    # build-logic check can run on the raw text without re-parsing the
+    # formatted detail (which would break on added text containing ": ").
+    local -a cand_text=() cand_fmt=()
+    local d_text d_fmt
+    while IFS=$'\t' read -r d_text d_fmt; do
+      cand_text+=("$d_text"); cand_fmt+=("$d_fmt")
+    done < <(_collect_review_details "$dir" "$base_ref" "$want_file")
+    rm -f "$want_file"
+    # If the single-pass resolver returned nothing (e.g. every candidate is a
+    # multi-line array opener whose +line text doesn't byte-match git's hunk
+    # line), fall back to showing the raw non-boring text — still review, still
+    # blocks, just without a file:line location. Partial misses are fine: a
+    # dropped metadata-ish candidate is unlikely to be the build-logic line we
+    # prefer, and the detail is a UX hint, not a security signal.
+    if (( ${#cand_fmt[@]} == 0 )); then
+      for (( i=0; i<${#cand_want[@]}; i++ )); do
+        cand_text+=("${cand_want[i]}"); cand_fmt+=("${cand_want[i]}")
+      done
+    fi
+    # Prefer the first candidate whose text is build logic; else the first.
+    # Track the chosen index directly so summary + detail stay in sync.
+    local chosen_idx=0 summary
+    for (( i=0; i<${#cand_text[@]}; i++ )); do
+      if _detail_is_build_logic "${cand_text[i]}"; then chosen_idx=i; break; fi
+    done
+    summary=$(_review_added_line_summary "${cand_text[chosen_idx]}")
+    log "  $(c_yellow "review needed") — $summary"
+    printf '      added: %s\n' "${cand_fmt[chosen_idx]}" >&2
+    SCAN_DIFF_CLASS="review"
+    SCAN_DIFF_REASON="non-boring-diff"
+    return 0
+  fi
 
   if (( boring_edge )); then
     SCAN_DIFF_CLASS="boring_edge"
@@ -2667,8 +2873,14 @@ cmd_selftest() {
   # _commit=<hex> build-var fixtures (R3)
   local _commit_old_pkg _commit_old_src _commit_new_src _commit_new_pkg_unq _commit_new_pkg_sq
   local _commit_new_pkg_dq _commit_subst_pkg _commit_evil_pkg
+  # _version=<dotted-decimal> build-var fixtures (R4): the opera-developer shape
+  local _ver_old_pkg _ver_new_pkg_dec _ver_new_pkg_vpref _ver_subst_pkg _ver_evil_old_pkg _ver_evil_pkg
   # noextract= fixtures (R1)
   local _noextract_old_pkg _noextract_new_pkg _noextract_old_src _noextract_new_src
+  # arch-qualified .SRCINFO source_<arch> = fixtures (Finding E + FP fix)
+  local _archsrc_old_pkg _archsrc_new_pkg _archsrc_old_src _archsrc_new_src
+  local _archsrc_homo_pkg _archsrc_homo_src
+  local _pkghomo_old_pkg _pkghomo_new_pkg
   # deep-in-multi-hunk-array fixtures (R2)
   local _deep_pad _deep_cs_old_pkg _deep_cs_new_pkg _deep_cs_old_src _deep_cs_new_src
   local _deep_opt_old_pkg _deep_opt_new_pkg _deep_opt_old_src _deep_opt_new_src
@@ -2797,6 +3009,31 @@ cmd_selftest() {
   tc_class pkgbuild-commit-var-double-quoted boring 0 \
     "$_commit_old_pkg" "$_commit_new_pkg_dq" "$_commit_old_src" "$_commit_new_src"
 
+  # PKGBUILD build-var assigned a dotted-decimal version (the opera-developer
+  # shape: _nwjs_ffmpeg_version=0.113.0). Inert for the same reason _commit=<hex>
+  # is: the RHS of a string assignment never executes, and the version only
+  # selects a path in source=() whose artifact is verified by *sums=(). The
+  # var-name is NOT restricted here (unlike _commit): a dotted decimal cannot be
+  # a PGP fingerprint (hex) or checksum (hex/SKIP), so the RHS format is the
+  # security boundary. Two variants: plain decimal (0.113.0) and 'v'-prefixed
+  # (v25.3.0). The motivating package var is _nwjs_ffmpeg_version, not _version
+  # — a name allowlist would miss it.
+  printf -v _ver_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_nwjs_ffmpeg_version=0.112.0\nsource=("https://example.com/${_nwjs_ffmpeg_version}/ffmpeg.zip")\nsha256sums=(%s)' "$_sum1"
+  printf -v _ver_new_pkg_dec 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_nwjs_ffmpeg_version=0.113.0\nsource=("https://example.com/${_nwjs_ffmpeg_version}/ffmpeg.zip")\nsha256sums=(%s)' "$_sum1"
+  printf -v _ver_new_pkg_vpref 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_electron_version=v25.3.0\nsource=("https://example.com/${_electron_version}/electron.zip")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-version-var-decimal boring 0 \
+    "$_ver_old_pkg" "$_ver_new_pkg_dec" "$_commit_old_src" "$_commit_new_src"
+  tc_class pkgbuild-version-var-vprefixed boring 0 \
+    "$_ver_old_pkg" "$_ver_new_pkg_vpref" "$_commit_old_src" "$_commit_new_src"
+
+  # Regression: a version-looking build-var RHS that is command substitution
+  # must NOT clear — the $ breaks the dotted-decimal match (same rejection path
+  # as the _commit command-subst regression below). Payload-free substitution
+  # isolates the classifier question; a real payload hits hard rules first.
+  printf -v _ver_subst_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_version=$(echo 1.2.3)\nsource=("https://example.com/pkg.tar")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-version-var-command-subst-review review 2 \
+    "$_ver_old_pkg" "$_ver_subst_pkg" "$_commit_old_src" "$_commit_new_src"
+
   # Regression: a build-var RHS that is command substitution (not a bare hex
   # SHA) must NOT clear via the _commit rule — it executes at source time. Use a
   # payload-free substitution so the hard-rule pipeline doesn't fire first; this
@@ -2820,6 +3057,20 @@ cmd_selftest() {
   tc_class pkgbuild-commit-var-arbitrary-name-review review 2 \
     "$_commit_old_pkg" "$_commit_evil_pkg" "$_commit_old_src" "$_commit_new_src"
 
+  # Symmetric positive control for the version-var rule: mirrors the _evil hex
+  # regression above, but with validpgpkeys=($_evil) UNCHANGED across baseline
+  # and new, so the sole diff line is _evil=<value>. (The hex test above adds
+  # validpgpkeys=() itself, so its review result is overdetermined — it can't
+  # isolate the _evil line.) With a dotted-decimal RHS, _evil=1.2.3 cannot be a
+  # PGP fingerprint (gpg rejects it loudly → build breaks, not silent anchor
+  # advance) and cannot be a checksum, so clearing it is safe even with the
+  # validpgpkeys indirection present: the RHS format is the boundary, not the
+  # var name. This documents-by-test the contrast with the hex shape (review).
+  printf -v _ver_evil_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nvalidpgpkeys=($_evil)\n_evil=0.0.0\nsource=("https://example.com/pkg.tar")\nsha256sums=(%s)' "$_sum1"
+  _ver_evil_pkg=$'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nvalidpgpkeys=($_evil)\n_evil=1.2.3\nsource=("https://example.com/pkg.tar")\nsha256sums='"($_sum1)"
+  tc_class pkgbuild-version-var-fingerprint-shape-boring boring 0 \
+    "$_ver_evil_old_pkg" "$_ver_evil_pkg" "$_commit_old_src" "$_commit_new_src"
+
   # noextract= is .SRCINFO metadata (a versioned *filename*, runs no code) —
   # an added/changed line must not force review. Append to an otherwise
   # unchanged .SRCINFO so the only diff is the noextract line.
@@ -2842,6 +3093,75 @@ cmd_selftest() {
     "$_noextract_new_pkgbuild" \
     "$_noextract_old_src" \
     "$_noextract_new_src"
+
+  # Arch-qualified .SRCINFO source_<arch> = lines (the opencode-bin /
+  # visual-studio-code-bin shape): a version bump renames the per-arch source
+  # URL on the SAME host. PKGBUILD carries matching source_<arch>=(...) arrays.
+  # Before the fix, the .SRCINFO source_x86_64 = / source_aarch64 = lines fell
+  # through _boring_added_line_class to review (no matcher for the space-
+  # delimited arch-qualified source form), producing a false-positive review on
+  # an otherwise-identical version bump. Now symmetric with the arch-qualified
+  # sha*sums_<arch> = form that already cleared.
+  printf -v _archsrc_old_pkg 'pkgname=cls-pkg\npkgver=1.126.0\npkgrel=1\nsource_x86_64=("code_1.126.0_amd64.deb::https://update.code.visualstudio.com/1.126.0/linux-deb-x64/stable")\nsource_aarch64=("code_1.126.0_arm64.deb::https://update.code.visualstudio.com/1.126.0/linux-deb-arm64/stable")\nsha256sums_x86_64=(%s)\nsha256sums_aarch64=(%s)' "$_sum1" "$_sum1"
+  printf -v _archsrc_new_pkg 'pkgname=cls-pkg\npkgver=1.127.0\npkgrel=1\nsource_x86_64=("code_1.127.0_amd64.deb::https://update.code.visualstudio.com/1.127.0/linux-deb-x64/stable")\nsource_aarch64=("code_1.127.0_arm64.deb::https://update.code.visualstudio.com/1.127.0/linux-deb-arm64/stable")\nsha256sums_x86_64=(%s)\nsha256sums_aarch64=(%s)' "$_sum2" "$_sum2"
+  _archsrc_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.126.0\n\tpkgrel = 1\n\tsource_x86_64 = code_1.126.0_amd64.deb::https://update.code.visualstudio.com/1.126.0/linux-deb-x64/stable\n\tsource_aarch64 = code_1.126.0_arm64.deb::https://update.code.visualstudio.com/1.126.0/linux-deb-arm64/stable\n\tsha256sums_x86_64 = '"$_sum1"$'\n\tsha256sums_aarch64 = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _archsrc_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.127.0\n\tpkgrel = 1\n\tsource_x86_64 = code_1.127.0_amd64.deb::https://update.code.visualstudio.com/1.127.0/linux-deb-x64/stable\n\tsource_aarch64 = code_1.127.0_arm64.deb::https://update.code.visualstudio.com/1.127.0/linux-deb-arm64/stable\n\tsha256sums_x86_64 = '"$_sum2"$'\n\tsha256sums_aarch64 = '"$_sum2"$'\n\npkgname = cls-pkg'
+
+  tc_class srcinfo-arch-source-boring boring 0 \
+    "$_archsrc_old_pkg" \
+    "$_archsrc_new_pkg" \
+    "$_archsrc_old_src" \
+    "$_archsrc_new_src"
+
+  # Finding E — IDN homograph in an arch-qualified .SRCINFO source_<arch> = line.
+  # A Cyrillic і (U+0456, UTF-8 0xD1 0x96) standing in for 'i' is invisible to
+  # source_domains()' ASCII-only hostname extractor AND would auto-clear as
+  # boring metadata without the _source_line_nonascii guard. The guard must fire
+  # BEFORE the per-line boring loop and force review. Same pkgver bump shape as
+  # above so the only review driver is the homograph byte.
+  printf -v _archsrc_homo_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource_x86_64=("https://\xd1\x96nstall.example.com/p.tar")\nsha256sums_x86_64=(%s)' "$_sum1"
+  _archsrc_homo_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource_x86_64 = https://\xd1\x96nstall.example.com/p.tar\n\tsha256sums_x86_64 = '"$_sum1"$'\n\npkgname = cls-pkg'
+  tc_class srcinfo-arch-source-homograph-review review 2 \
+    "$_archsrc_old_pkg" \
+    "$_archsrc_homo_pkg" \
+    "$_archsrc_old_src" \
+    "$_archsrc_homo_src"
+
+  # Finding E (PKGBUILD array form) — the single-line source=(<homograph>) shape
+  # that the finding doc names as makepkg's default. Without the guard, line 325
+  # (source=\(.*\)) auto-clears it as boring → silent exit 0. The
+  # _source_line_nonascii guard covers PKGBUILD array syntax too.
+  printf -v _pkghomo_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("https://\xd1\x96nstall.example.com/p.tar")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-source-homograph-review review 2 \
+    "$_old_basic" \
+    "$_pkghomo_new_pkg" \
+    "$_old_src" \
+    "$_old_src"
+
+  # Finding E residual — multi-line source=() array with the homograph URL on a
+  # CONTINUATION line (not the source= token-start line). The guard's regex
+  # anchors on `^source...=`, so it misses the continuation; the URL then hits
+  # the standalone-URL boring_edge path → reachable by the LLM auto-green
+  # verifier. A delegate review flagged this as the same threat class as the
+  # finding being closed (the homograph is invisible to the LLM too). Fix:
+  # extend the guard to any +line carrying `://` with a byte ≥ 0x80.
+  printf -v _pkghomo_ml_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=(\n  "https://\xd1\x96nstall.example.com/p.tar"\n)\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-multiline-source-homograph-review review 2 \
+    "$_old_basic" \
+    "$_pkghomo_ml_new_pkg" \
+    "$_old_src" \
+    "$_old_src"
+
+  # Finding E (bare .SRCINFO source = form) — the space-delimited source = line
+  # auto-clears via the line-313 boring match regardless of byte content; before
+  # the guard this was a silent exit 0. Confirms the guard covers the non-arch
+  # .SRCINFO form as well as the arch-qualified and PKGBUILD-array forms above.
+  _srchomo_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://\xd1\x96nstall.example.com/p.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  tc_class srcinfo-source-homograph-review review 2 \
+    "$_old_basic" \
+    "$_old_basic" \
+    "$_old_src" \
+    "$_srchomo_src"
 
   # Intra-pkgbase dep: cls-split-tools depends on cls-split (the pkgbase, also a
   # member), version-pinned to pkgver. Neither is in the test pacman sync db, so
@@ -3017,6 +3337,80 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_basic"$'\nbuild() { npm install payload; }' \
     "$_old_src" "$_old_src"
+
+  # PKGBUILD advisory-metadata array literal: license=('MIT') → license=('MIT'
+  # 'LGPL-2.0-or-later'), the kilo-bin shape. Before Fix 1 this array form had
+  # no boring branch (only the .SRCINFO space-delimited form at line ~348 did)
+  # and fell through to review. Now symmetric with the .SRCINFO form. Everything
+  # else in the diff (pkgver, source, sums) is independently boring.
+  local _adv_old_pkg _adv_new_pkg
+  printf -v _adv_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\narch=(x86_64)\nlicense=(MIT)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _adv_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\narch=(x86_64 aarch64)\nlicense=(MIT LGPL-2.0-or-later)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-license-array-boring boring 0 \
+    "$_adv_old_pkg" "$_adv_new_pkg" "$_old_src" "$_new_src"
+
+  # arch/groups/noextract array-literal forms are the same inert-metadata class
+  # as license (Fix 1's wider advisory-group scope). groups=(cls-virtual) added
+  # and noextract=(pkg-1.tar) added alongside an arch= expansion. optdepends is
+  # deliberately exercised by its own stricter handler, not this loose match.
+  local _adv2_old_pkg _adv2_new_pkg
+  printf -v _adv2_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\narch=(x86_64)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _adv2_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\narch=(x86_64 aarch64)\ngroups=(cls-virtual)\nnoextract=(pkg-1.tar)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  tc_class pkgbuild-advisory-arrays-boring boring 0 \
+    "$_adv2_old_pkg" "$_adv2_new_pkg" "$_old_src" "$_new_src"
+
+  # Regression for the kilo-bin shape WITH the install body: license=() now
+  # boring, but a new install line inside package() is non-boring → review.
+  # This is the case that motivated the fix: the gate MUST still block, and
+  # the reported detail should point at the install, not the license. Fix 1
+  # alone reclassifies the license; the detail-selection (Fix 2) is exercised
+  # by the inline assertion below.
+  local _kilo_old_pkg _kilo_new_pkg
+  printf -v _kilo_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\narch=(x86_64)\nlicense=(MIT)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\npackage() {\n  install -Dm755 ./x "${pkgdir}/usr/bin/x"\n}' "$_sum1"
+  printf -v _kilo_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\narch=(x86_64)\nlicense=(MIT LGPL-2.0-or-later)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\npackage() {\n  install -Dm755 ./x "${pkgdir}/usr/bin/x"\n  install -Dm755 ./bwrap "${pkgdir}/usr/lib/cls/bwrap"\n}' "$_sum1"
+  tc_class pkgbuild-package-body-review review 2 \
+    "$_kilo_old_pkg" "$_kilo_new_pkg" "$_old_src" "$_new_src"
+
+  # Inline assertion: the review detail now points at the build-logic line
+  # (install -Dm755 ./bwrap), not the earlier license=() line, and the summary
+  # is "package build instructions changed". First test to assert on the
+  # review detail/summary stderr; modeled on the _aur_rpc_info capture pattern.
+  # Exercises both Fix 2a (content-based build-logic detection — no git hunk
+  # annotation exists for PKGBUILD) and Fix 2b (two-pass detail selection).
+  _class_bld "$_clx" "cls-kilo-detail" "$_kilo_old_pkg" "$_kilo_new_pkg" "$_old_src" "$_new_src"
+  local _detail_out
+  LLM_AUTO_BORING=0
+  _detail_out=$(classify_diff_rules "cls-kilo-detail" "$_CLASS_DIR" "$_CLASS_BASE" 2>&1 >/dev/null)
+  if printf '%s\n' "$_detail_out" | grep -q 'package build instructions changed' \
+     && printf '%s\n' "$_detail_out" | grep -q 'install -Dm755 ./bwrap' \
+     && ! printf '%s\n' "$_detail_out" | grep -q "added: PKGBUILD.*license="; then
+    log "  $(c_green "PASS") classifier-detail-prefers-build-logic"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") classifier-detail-prefers-build-logic (got: $_detail_out)"
+    fail=$((fail+1))
+  fi
+
+  # Regression for the colon-in-text extraction bug a delegate review caught:
+  # the old _detail_is_build_logic parsed the added text out of the formatted
+  # detail with ${detail##*: }, which truncated at the LAST ": " — so a
+  # build-logic line whose text contains ": " lost its leading keyword and
+  # silently fell through to the generic summary. The fixture's build() body
+  # contains `make "target: release"` (the ": " exercises the extraction path);
+  # the assertion only needs the build-logic SUMMARY to fire, proving the raw-
+  # text path works. (The chosen detail points at `build() {`, which is also
+  # valid build-logic and appears earlier in diff order — also fine.)
+  local _colon_old_pkg _colon_new_pkg _colon_out
+  printf -v _colon_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _colon_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  make "target: release"\n}' "$_sum1"
+  _class_bld "$_clx" "cls-colon-text" "$_colon_old_pkg" "$_colon_new_pkg" "$_old_src" "$_new_src"
+  LLM_AUTO_BORING=0
+  _colon_out=$(classify_diff_rules "cls-colon-text" "$_CLASS_DIR" "$_CLASS_BASE" 2>&1 >/dev/null)
+  if printf '%s\n' "$_colon_out" | grep -q 'package build instructions changed'; then
+    log "  $(c_green "PASS") classifier-detail-build-logic-colon-in-text"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") classifier-detail-build-logic-colon-in-text (got: $_colon_out)"
+    fail=$((fail+1))
+  fi
 
   classify_diff_rules bad-ref "$_edge_dir" "0000000000000000000000000000000000000000" >/dev/null 2>&1
   local _bad_class="$SCAN_DIFF_CLASS" _bad_rc
