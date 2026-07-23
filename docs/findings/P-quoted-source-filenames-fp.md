@@ -1,7 +1,7 @@
 # Finding P — Quoted PKGBUILD `source=()` entries false-positive as review
 
 **Source:** qwen3.7-max red-team review, session `019f0517-d73a-78d5-929f-caae55c267e2`; also flagged by kimi-k2.6 as "new optdepends array" variant  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** medium  
 **Lines:** `_boring_added_line_class()` at aur-safe:293
 
@@ -31,13 +31,10 @@ quoted filenames match neither.
 `AUR_SAFE_LLM_AUTO_BORING=1` see false positives on routine updates. The LLM
 verifier would auto-clear these, but it's opt-in.
 
-## Fix
+## Fix and verification
 
-Extend the boring-edge regex at line 293 to also recognize quoted filenames
-in `source=()` contexts, or add a pattern for `"[-_a-zA-Z0-9.]+"` in the
-boring classification.
-
-## Test gap
-
-Add classifier test for multi-line `source=()` with quoted filename entries
-→ verify boring_edge classification (or boring, at minimum not review).
+Implemented with array-context proof, not a global filename regex. Literal
+quoted filenames are `boring_edge` only when the shared diff state machine
+proves they are inside a multiline `source=()`/`source_<arch>=()` array. This
+avoids treating a quoted top-level shell command as metadata. A classifier
+fixture pins the quoted filename version-bump shape.

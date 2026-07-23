@@ -1,7 +1,7 @@
 # Finding K — `epoch=0` breaks install confirmation and baseline recovery
 
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** high  
 **Lines:** `_installed_matches()` at aur-safe:515-518, `find_baseline_commit()` at aur-safe:567
 
@@ -34,7 +34,8 @@ comparison with `pacman -Q`, since pacman normalizes it away:
 [[ -n "$epoch" && "$epoch" != "0" ]] && want="${epoch}:" ; want+="${ver}-${rel}"
 ```
 
-## Test gap
+## Verification
 
-No selftest fixture uses `epoch=0`. Add fixtures for both `_installed_matches`
-and `find_baseline_commit` with `epoch = 0` in `.SRCINFO`.
+Both `_installed_matches` and `find_baseline_commit` normalize zero epoch to an
+absent prefix. The install-confirmation selftest pins `epoch = 0` against
+pacman's unprefixed version form.

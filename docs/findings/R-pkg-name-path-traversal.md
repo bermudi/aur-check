@@ -1,7 +1,7 @@
 # Finding R — Package name regex allows `.`, `..`, `.git`
 
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** medium  
 **Lines:** `check_pkg()` at aur-safe:985, `cmd_audit()` at aur-safe:1444
 
@@ -26,6 +26,8 @@ flag-file paths; they're regex-validated at entry points."
 Reject names matching `^\.`, `^\.\.$`, `^\.git$` in the validation regex.
 Simplest: add a separate guard `[[ "$pkg" == . || "$pkg" == .. || "$pkg" == .git ]] && return 3`.
 
-## Test gap
+## Verification
 
-No selftest rejects `.`, `..`, `.git` as package names.
+Central `_valid_pkg_name` rejects every dot-prefixed name and is used at user,
+helper, RPC, manifest, and explain boundaries. Selftests reject `..`/`.git`,
+require review for `check ..`, and reject an RPC `PackageBase` traversal value.

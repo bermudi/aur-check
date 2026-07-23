@@ -1,9 +1,9 @@
 # Finding F — Trust-anchor poisoning via attacker-crafted `.SRCINFO`
 
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** critical  
-**Lines:** `_installed_matches()` at aur-safe:505-528, `cmd_accept()` at aur-safe:1286-1290
+**Lines:** `_pacman_local_record()`, `_installed_matches()`, `cmd_accept()`
 
 ## What happens
 
@@ -48,17 +48,19 @@ changes → review exit 2, which users can consent to.
 
 ## Fix
 
-- Parse `pkgname=`/`pkgver=`/`pkgrel=`/`epoch=` from **PKGBUILD** at
-  `staged_sha`, not `.SRCINFO`. PKGBUILD IS what `makepkg` actually sources,
-  so its fields reflect what was actually built+installed.
-- Assert that the confirmed pkgname belongs to THIS pkgbase (cache-dir basename
-  or one of its split sub-package names) — not any unrelated system package.
-- Optionally sanity-check: `.SRCINFO` PkgMetadata must match PKGBUILD within
-  aur-safe's known-set; if mismatch, refuse promotion.
+Implemented without executing or trying to fully parse PKGBUILD shell.
+`.SRCINFO` remains a candidate claim, but confirmation now requires a
+root-owned pacman local-DB record whose `%BASE%` equals the staged trust-anchor
+key, whose version matches, and whose `%BUILDDATE%` and `%INSTALLDATE%` are no
+older than the staged ref. The candidate's column-0 `pkgbase` must also equal
+the staged key and malformed metadata has no pkgname fallback. Thus a claimed
+`glibc` record binds to base `glibc`, not attacker package P, and cannot promote
+P. Freshness also rejects a pre-existing same-version install after a failed
+build. `epoch=0` is normalized to no prefix.
 
-## Test gap
+## Verification
 
-The existing `ta "installed-split-pkgbase-not-pkg"` selftest (aur-safe:1853)
-tests that pkgbase itself doesn't match — but doesn't test that an
-attacker-chosen `.SRCINFO` claiming a foreign pkgname would match. Add a
-"foreign-pkgname-in-malicious-srcinfo must not promote" selftest.
+Selftests cover foreign-pkgname rejection, pkgbase mismatch via the trusted
+local record, stale build/install timestamps, split members, missing/malformed
+metadata, and epoch zero. Production `_pacman_local_record` was checked against
+a real installed AUR package's local DB record.

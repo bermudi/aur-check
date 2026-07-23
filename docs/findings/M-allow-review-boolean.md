@@ -1,7 +1,7 @@
 # Finding M — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed
 
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** medium  
 **Lines:** `review_prompt()` at aur-safe:1156, `_aur_safe_gate()` at aur-safe:1529
 
@@ -17,6 +17,7 @@ it. The gate auto-proceeds on all review hits, including clone failures and
 
 Change to `[[ "${AUR_SAFE_ALLOW_REVIEW:-}" == "1" ]]` in both locations.
 
-## Test gap
+## Verification
 
-No test for `AUR_SAFE_ALLOW_REVIEW=0` behavior. Verify it blocks, not proceeds.
+Both binary and generated wrapper require the exact value `1`. Selftests prove
+`1` enables the override and `0` remains non-interactive review (exit 2).

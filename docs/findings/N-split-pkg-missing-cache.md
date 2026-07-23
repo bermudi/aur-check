@@ -39,17 +39,15 @@ coarse scan. The real risk vector is a machine where *only* the split member is
 installed (no pkgbase-named sibling in the batch): then yay reports only the
 pkgname, the clone 404s, and the user gets a consent prompt with no diff and
 no pkgbase sibling to cover it — a genuine review gap. This arguably pushes
-toward high, but the impact is bounded: clone failure always returns 2 (review,
-never silent exit 0), so a malicious split-member update still requires user
-consent. The degradation is lost *precision* (no diff to review), not a bypass.
+toward high. Current policy is stronger than at discovery: clone failure is
+blocking audit-unavailable (exit 1), so zero signal cannot be consented past.
 
 ## Fix (implemented 2026-06-28)
 
 `_clone_aur` now resolves pkgbase from pkgname via AUR RPC v5 (`_resolve_pkgbase`)
 before constructing the clone URL. If resolution fails (offline, package not
 found), it falls back to `$pkg` — non-split packages (pkgname == pkgbase) still
-clone correctly; split packages degrade to the clone-fail review path (same as
-pre-fix, a safe failure mode).
+clone correctly; split packages fail closed if the mapping cannot be resolved.
 
 `missing_cache_gate` derives `pkgbase` from the clone dir name (`${dir##*/}`,
 mirroring the cached path) and uses it for `_stage_scan_if_gating`, so the trust
@@ -69,17 +67,17 @@ missing-cache path already does a git clone, so this is negligible. Offline, the
 
 2. **Mirror without RPC.** `${AUR_URL}/rpc/v5/info` uses the same base URL as
    the clone. If `AUR_URL` is overridden to a cgit-only mirror lacking the RPC
-   endpoint, all split members degrade to clone-fail review. The failure mode
-   is safe (exit 2, never 0) but the log message says "could not clone (offline?
-   AUR down?)" rather than diagnosing the missing RPC.
+   endpoint, all split members block as audit-unavailable. The failure mode is
+   safe (exit 1) but the log may not diagnose the missing RPC precisely.
 
 ## Test coverage
 
 Five selftests added under `-- split-package missing-cache (Finding N) --`:
 
-- `split-pkg-baseline-recovery-clean` — split member routes through
-  `missing_cache_gate`, pkgbase resolution makes the clone succeed, baseline
-  recovery diffs at full precision → clean (0). Before fix: review (2).
+- `split-pkg-baseline-recovery-review` — split member routes through
+  `missing_cache_gate`, pkgbase resolution makes the clone succeed, and baseline
+  recovery diffs at full precision. Current policy still requires review (2)
+  because retained AUR history cannot earn silent trust.
 - `split-pkg-stages-under-pkgbase` — staging writes `staged/<pkgbase>`, not
   `staged/<pkgname>`.
 - `split-pkg-stages-audited-tip` — staged SHA is the origin/master tip
@@ -87,7 +85,7 @@ Five selftests added under `-- split-package missing-cache (Finding N) --`:
 - `split-pkg-manifest-pkgbase` — manifest entry is pkgbase, so `accept` can
   `find_pkg_dir` it after the build.
 - `split-pkg-no-resolution-clonefail` — without a pkgbase map, clone of
-  `pkgname.git` 404s → review (2), never silent passthrough.
+  `pkgname.git` 404s → block (1), never consentable passthrough.
 
 ## Live confirmation
 

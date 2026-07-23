@@ -1,7 +1,7 @@
 # Finding I — `pip3 install` bypasses `pip` review rule
 
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** high  
 **Lines:** `add_review pip` at aur-safe:151
 
@@ -23,6 +23,8 @@ path is **silent**.
 Broaden to `pip3?[[:space:]]+(install|download|wheel|build)` or
 `(pip|pip3|pip-3|python -m pip)[[:space:]]+(install|download)`.
 
-## Test gap
+## Verification
 
-Add selftest for `pip3 install foo` matching the review rule.
+The review regex covers versioned `pip` executables and `python[version] -m
+pip`, including intervening flags. Tier-2 selftests pin `python3 -m pip install`
+as review.

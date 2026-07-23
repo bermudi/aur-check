@@ -1,7 +1,7 @@
 # Finding G — Missing-cache tier-2 silently passes review-only payloads
 
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** high  
 **Lines:** `_scan_whole_pkg()` at aur-safe:380-388, `missing_cache_gate()` at aur-safe:964-976
 
@@ -39,8 +39,11 @@ attacker-force-push path makes this adversarially reachable.
 - Safest: in `missing_cache_gate` tier-2, never call `_stage_scan_if_gating`
   (denied-signal path should not advance the trust anchor).
 
-## Test gap
+## Implementation and verification
 
-No selftest for tier-2 path with a review-only payload (pip/cargo/gem). A
-fixture with `pip install foo` in PKGBUILD and a force-pushed history that
-collapses to tier-2 should verify exit 2, not 0.
+`_scan_whole_pkg` now runs both rule sets. More importantly, tier 2 always
+stashes the whole scan and returns review (2), even with no known match: without
+a baseline, arbitrary PKGBUILD shell cannot earn a silent clean from regex
+absence. Selftests cover clean baseline-less packages, `pip`, `python -m pip`,
+hard hits, empty/read failure blocking, clone-failure blocking, staging, and
+stash behavior.

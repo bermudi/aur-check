@@ -1,7 +1,7 @@
 # Finding Q — `files_with_status` silently ignores git diff failures
 
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** medium  
 **Lines:** `files_with_status()` at aur-safe:238-246
 
@@ -24,6 +24,8 @@ Follow the `diff_added` pattern: capture output, assert exit code, then process:
 diff_out=$(git -C "$dir" diff ... 2>&1) || return 1
 ```
 
-## Test gap
+## Verification
 
-No test for `git diff --name-only` failure while `diff_added` succeeds.
+`files_with_status` captures `git diff` before awk and propagates failure;
+callers map it to `audit_unavailable`. A bad-ref selftest asserts the helper
+returns nonzero rather than empty success.

@@ -67,10 +67,12 @@ already confined to metadata, checksum, or same-host `source=()` fields.
 ### The trust anchor is decoupled from the helper
 
 `~/.cache/aur-safe/accepted/<pkgbase>` is aur-safe's own trust anchor, not the
-helper's HEAD. It means *the commit we audited, not what got installed* — a
-TOCTOU window between the gate's fetch and the helper's is resolved by staging
-(`staged/`) and promoting only on version-confirmed install (`accept`). Any
-change that lets the anchor advance to an unaudited commit reopens the original
+helper's HEAD. It means *the commit we audited, not what got installed* —
+staging plus install confirmation protects anchor advancement across the
+helper's second fetch. The generated wrapper's makepkg guard additionally
+requires the final helper checkout to equal the staged SHA before PKGBUILD is
+sourced, then forces a clean, fresh package artifact. Any change that lets the anchor
+advance to an unaudited commit reopens the original
 bug this project was built to fix.
 
 ## Rule classification rationale
@@ -81,7 +83,7 @@ bug this project was built to fix.
 | **Boring** | version/pkgrel/pkgver, checksum-only, literal optional dependency metadata, same-host `source=()` updates with no structural signals | Pass (exit 0) |
 | **Boring-edge** | Same narrow field set, but parser-ambiguous array/quoting/continuation shape | Review (exit 2), or optional strict verifier pass |
 | **Review** | pip/gem/cargo/go, single hex/octal escape, maintainer/source drift, python-inline-net | Warn (exit 2) |
-| **Audit unavailable** | Diff/read/clone failure | Warn (exit 2), never LLM auto-clear |
+| **Audit unavailable** | Fetch/diff/read/clone/state failure | Block (exit 1), never consent/LLM auto-clear |
 
 The asymmetry (JS package managers → hard-fail, others → review) is intentional:
 the observed campaign uses JS package managers; Python/Ruby/Rust/Go legitimate
@@ -172,7 +174,7 @@ Pacman hooks run *after* install — by then the malicious `.install` has alread
 executed. Interception must happen before makepkg/pacman, hence the shell
 wrapper around yay/paru. Also discussed in [design-ledger.md](design-ledger.md) §Architecture.
 
-## Homograph attacks (unaddressed vector)
+## Homograph attacks (mitigated at review level)
 
 Tom Hale raised an additional vector on the `aur-general` list (2026-06-17):
 IDN homograph attacks in `source=()` URLs. Example:
@@ -184,11 +186,11 @@ The two URLs are visually indistinguishable in most terminals and diffs, but
 the second resolves to a different server. Browsers display these as punycode
 (`xn--nstall-ovf.xn--example-cl-62i.dev`), but `makepkg` does not.
 
-This vector is **not currently addressed** by aur-safe. A homograph-altered
-source URL would produce different checksums, but `SKIP` sums (common for git
-packages) provide no protection. A future defense could flag source URLs
-containing non-ASCII characters that would punycode-decode to a different
-domain than the ASCII rendering suggests.
+aur-safe now forces review for any added `source`/`source_<arch>` line with a
+non-ASCII byte and for non-ASCII bytes on multiline URL continuation lines.
+The guard runs before boring classification and cannot be auto-cleared by the
+LLM. This is review-level mitigation rather than punycode normalization or a
+hard block; `SKIP` sums still provide no independent integrity check.
 
 ## Related tools (community response)
 

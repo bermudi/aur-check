@@ -11,44 +11,45 @@ existing is to stop malicious AUR updates from reaching pacman.
   model, settled decisions, rejected approaches, verification status)
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   design principles, rule classification
-- [docs/findings/](./docs/findings/) — 18 documented security findings with line
-  numbers and fix assessments (A–D from prior reviews: A/B/C closed, D deferred;
-  E–R from the 2026-06-26 red-team review: all open, 2 critical, 6 high, 6 medium)
+- [docs/findings/](./docs/findings/) — documented findings and implementation
+  assessments from reviews A–S; consult each status rather than stale line numbers
 - [BACKLOG.md](./BACKLOG.md) — prioritized task list with fix order, effort,
   and status tracking (all 23 findings from the 2026-06-26 review)
 
 ## Stack
-Bash 5.3, git, an AUR helper (`yay` or `paru`). `pi` only for the advisory
-`explain` subcommand and the optional boring-edge verifier. No build system, no
-other dependencies. Single-file script (`aur-safe`); runtime state under
+Bash 5.3, git, `flock` (util-linux), an AUR helper (`yay` or `paru`). `pi` only
+for the advisory `explain` subcommand and the optional boring-edge verifier. No
+build system. Single-file script (`aur-safe`); runtime state under
 `~/.cache/aur-safe/`.
 
 ## Architecture
 
 ### Trust model (the central invariant)
 `~/.cache/aur-safe/accepted/<pkgbase>` is the trust anchor — the SHA of the last
-commit that was *audited AND confirmed installed*. Seeded from the helper-cache
-HEAD on first contact, then advanced only by `accept` after a build pacman
-confirms. The accepted ref must mean *the commit we audited, not what got
-installed*: there's a TOCTOU window between the gate's fetch and the helper's,
-resolved by capturing the gate-time tip into `staged/` and promoting only
-confirmed installs. **Any change that lets the anchor advance to an unaudited
-commit reopens the original bug this project was built to fix** — re-check
-staging discipline on every gate-path change.
+commit that was *audited AND confirmed installed*. First contact requires
+whole-candidate review; the anchor is created/advanced only by `accept` after a
+fresh guarded build pacman confirms. The accepted ref must mean *the commit we
+audited, not what got installed*: staging resolves **anchor advancement** across the gate/helper
+fetch window. The generated wrapper also injects the Finding-S makepkg guard,
+which requires helper checkout HEAD to equal the staged SHA and a fresh build
+immediately before PKGBUILD execution. **Any change that lets the anchor advance to an
+unaudited commit reopens the original bug** — re-check staging discipline on
+every gate-path change.
 
 ### Two gate paths (both diff-based)
 - **Cached:** helper has a git clone → `git diff accepted..origin/master` → rules.
 - **Missing-cache (clone gone):** baseline recovery — clone fresh, find the
-  installed version's commit in AUR history, diff that..origin/master. Falls
-  back to a whole-file hard-rule scan only if the installed version isn't found.
+  installed version's commit in retained AUR history, diff that..origin/master,
+  then require review with whole-candidate context even if the reconstructed
+  diff is clean. Falls back to the same mandatory whole-file review if absent.
 
 ### Two rule pipelines (not one)
 - **Diff pipeline** (`scan_diff_rules`): hard + deterministic boring metadata
   allowlist + boring-edge review/optional verifier + structural rules. Shared by
   the cached path and the baseline-recovery tier, so they can't drift.
-- **Whole-file pipeline** (`_scan_whole_pkg`): hard-rules-only. Review rules on
-  a baseline-less scan would fire on every legit pip/cargo package. Shared by
-  `audit` and the missing-cache whole-file fallback tier.
+- **Whole-file pipeline** (`_scan_whole_pkg`): hard + review rules. `audit` is
+  advisory; the baseline-less missing-cache tier always requires review even
+  with no regex hit. Shared implementation, caller-specific policy.
 
 There is also a **third ad-hoc pipeline** in `cmd_scan` (retroactive scan of
 installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adhoc-pipeline.md).
@@ -66,11 +67,13 @@ installed packages) — documented as [Finding B](./docs/findings/B-cmd-scan-adh
 - **Bash, not Go/Rust/Python.** Security tool — every line must be eyeballable.
   Port only if complexity outgrows readable bash.
 - Color funcs (`c_red` etc.) strip escapes on non-TTY; match this in new output.
+- **Security tool** No if or buts, anything that smells like an issue needs to
+  be fixed right away.
 
 ## Workflow
 ```sh
 bash -n aur-safe          # syntax check
-./aur-safe selftest       # the gate — must stay green (172/172)
+./aur-safe selftest       # the gate — every reported case must stay green
 shellcheck -s bash aur-safe  # SC2016/SC2001 excluded via .shellcheckrc
 ```
 Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known
@@ -97,21 +100,13 @@ installed by default.
 
 ## Known vulnerability classes (2026-06-26 red-team review)
 
-Two critical attack paths discovered that escape the gate silently:
-- **IDN homograph `source=()` bypass** (Finding E) — non-ASCII chars in
-  `source=(...)` URLs are invisible to both domain-drift detection and the
-  boring classifier → silent exit 0. Fix: any `source=` line with bytes ≥ 0x80
-  must not classify as boring.
-- **`.SRCINFO` trust-anchor poisoning** (Finding F) — `_installed_matches` parses
-  pkgname/pkgver from attacker-controlled `.SRCINFO`, not PKGBUILD. Attacker
-  claims pkgname=glibc → `pacman -Q` matches → `accept` promotes malicious SHA.
-  Fix: parse PKGBUILD for install-confirmation, assert pkgname ∈ pkgbase's split set.
-
-Also: tier-2 whole-file fallback skips review rules (Finding G — pip/cargo/gem
-payloads can exit 0); `bunx`/`pnpm exec`/`yarn dlx` not matched by JS
-package-manager rules (Finding H); user git config (`diff.colorWords`,
-`diff.noprefix`) can break the entire diff pipeline (Finding J). See
-BACKLOG.md for the full list.
+Findings E–R have implemented fixes/mitigations as recorded in
+[BACKLOG.md](./BACKLOG.md) and [docs/findings/](./docs/findings/). Load-bearing
+regressions to keep pinned: non-ASCII source URLs never become boring; tier-2
+never exits clean; installed confirmation binds to root-owned pacman pkgbase +
+freshness records; git output is config-isolated and failure-checked; and the
+generated wrapper locks the full gate → helper → accept transaction and
+injects exact staged-SHA plus fresh-artifact enforcement at the makepkg seam.
 
 ## Quality Bar
 - **Security tool: code is not done until verified.** `selftest` green + `bash -n`

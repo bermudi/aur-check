@@ -1,7 +1,7 @@
 # Finding H — `bunx`, `pnpm exec`, `yarn dlx` escape JS package-manager hard rules
 
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** high  
 **Lines:** `add_rule pnpm` at aur-safe:135, `add_rule bun` at aur-safe:136, `add_rule yarn` at aur-safe:137
 
@@ -32,7 +32,7 @@ Selftest covers `bun add`, `bun install`, `bun --cwd add` but not `bunx`.
 - Add `exec` to pnpm alt list (line 135)
 - Add `dlx` to yarn alt list (line 137)
 
-## Test gap
+## Verification
 
-Add selftest cases for `bunx evil`, `pnpm exec evil`, and `yarn dlx evil`
-matching hard-fail.
+Hard-rule selftests cover `bunx` with and without flags, `pnpm exec`, `pnpm
+dlx`, `yarn exec`, and `yarn dlx`.

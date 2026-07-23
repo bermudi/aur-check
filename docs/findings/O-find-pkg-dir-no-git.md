@@ -1,7 +1,7 @@
 # Finding O — `find_pkg_dir` slow path doesn't verify `.git` exists
 
 **Source:** qwen3.7-max red-team review, session `019f0517-d73a-78d5-929f-caae55c267e2`; also flagged by glm-5.1  
-**Status:** open  
+**Status:** fixed (2026-07-23)
 **Severity:** medium  
 **Lines:** `find_pkg_dir()` slow path at aur-safe:192
 
@@ -27,7 +27,9 @@ silent audit skip, same structural class as the original missing-cache blindspot
 
 Add `.git` check to slow path: `[[ -d "${d}/.git" && -f "${d}/.SRCINFO" ]]`.
 
-## Test gap
+## Implementation
 
-Add selftest for a `.SRCINFO`-only directory (no `.git`) returned by slow path
-→ verify exit 2 (audit unavailable), not 0 (skip).
+The old directory scan is gone. Split pkgname→pkgbase is resolved through AUR
+RPC and only that exact cache directory is considered, with both `.git` and
+`.SRCINFO` required. This also prevents an unrelated attacker-authored cached
+`.SRCINFO` from claiming the split pkgname and redirecting the gate.
