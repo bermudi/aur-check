@@ -225,8 +225,11 @@ _acquire_state_lock() {
   if [[ "${AUR_SAFE_LOCK_HELD:-}" == 1 ]]; then
     # Do not trust the environment claim alone: the generated wrapper passes
     # the actually locked fd 9 through exec. A spoofed variable without that
-    # inherited lock must fail closed.
-    if { true >&9; } 2>/dev/null && flock -n 9; then
+    # inherited lock must fail closed. Also verify fd 9 is the actual lock
+    # file (same device/inode), not merely any writable descriptor.
+    if { true >&9; } 2>/dev/null \
+       && [[ "$(stat -L -c '%d:%i' /proc/self/fd/9 2>/dev/null)" == "$(stat -L -c '%d:%i' "$STATE_DIR/run.lock" 2>/dev/null)" ]] \
+       && flock -n 9; then
       return 0
     fi
     log "$(c_red "BLOCK") AUR_SAFE_LOCK_HELD set without inherited lock fd"
@@ -906,6 +909,7 @@ stash_flag() {
   local pkg="$1" dir="$2" base="$3" context="${4:-review}"
   local flagfile="$STATE_DIR/flag.${pkg}.diff" tmp
   tmp=$(mktemp "${flagfile}.tmp.XXXXXX") || return 1
+  _register_temp_path "$tmp"
   if ! git -C "$dir" --no-pager diff "${base}..origin/${AUR_REMOTE_BRANCH}" -- \
       "${EXCLUDE_PATHS[@]}" >"$tmp" 2>/dev/null \
       || ! mv -f "$tmp" "$flagfile" \
@@ -2293,7 +2297,7 @@ cmd_makepkg() {
     log "$(c_red "BLOCK") makepkg guard: tracked files changed after audit for $pkgbase"
     return 1
   fi
-  dirty=$(git -C "$top" ls-files --others --exclude-standard -- \
+  dirty=$(git -C "$top" ls-files --others -- \
     PKGBUILD .SRCINFO '*.install' '*.sh' 2>/dev/null) \
     || { log "$(c_red "BLOCK") makepkg guard: cannot inspect untracked scripts for $pkgbase"; return 1; }
   [[ -z "$dirty" ]] \

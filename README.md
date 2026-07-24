@@ -64,7 +64,7 @@ git clone https://github.com/bermudi/aur-safe ~/build/aur-check
 ln -s ~/build/aur-check/aur-safe ~/.local/bin/aur-safe
 ```
 
-Dependencies: `bash` ≥ 4.3, `git`, `flock` (util-linux), and an AUR helper (`yay` or `paru`). `pi` is
+Dependencies: `bash` ≥ 5.3, `git`, `flock` (util-linux), and an AUR helper (`yay` or `paru`). `pi` is
 required only for `explain` and the optional boring-edge verifier.
 
 ## Enable

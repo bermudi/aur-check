@@ -41,9 +41,9 @@ attacker-force-push path makes this adversarially reachable.
 
 ## Implementation and verification
 
-`_scan_whole_pkg` now runs both rule sets. More importantly, tier 2 always
-stashes the whole scan and returns review (2), even with no known match: without
-a baseline, arbitrary PKGBUILD shell cannot earn a silent clean from regex
-absence. Selftests cover clean baseline-less packages, `pip`, `python -m pip`,
-hard hits, empty/read failure blocking, clone-failure blocking, staging, and
-stash behavior.
+`_scan_whole_pkg` now runs both rule sets. On successful scans, tier 2 stashes
+the whole scan and returns review (2), even with no known match; unreadable
+content or stash failures remain blocking. Without a baseline, arbitrary
+PKGBUILD shell cannot earn a silent clean from regex absence. Selftests cover
+clean baseline-less packages, `pip`, `python -m pip`, hard hits, empty/read
+failure blocking, clone-failure blocking, staging, and stash behavior.
