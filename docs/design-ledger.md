@@ -384,6 +384,29 @@ Diff/read failures are `audit_unavailable` (exit 1), never consented or LLM
 auto-green, and never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).
 
+**Review evidence must contain every reviewable text change (Finding T).**
+Deterministic added-line scanning excludes `*.patch`/`*.diff`: nested diff
+markers would turn benign patch payload lines into false hard-rule hits. The
+structural pipeline therefore forces review when either file changes. But
+`stash_flag` uses no suffix exclusions and retains every changed text file, so
+both `view` and advisory `explain` receive the content that caused review; real
+binary changes remain represented by git's marker and blob identities. Suffix
+is attacker-controlled (`payload.png` can be text), so it is only a scan-input
+optimization, never an evidence policy. `_review_diff_to_file` disables
+textconv, rejects empty or NUL-bearing output, and blocks when a changed
+`*.patch`/`*.diff` is opaque because of content or hostile `.gitattributes`.
+Baseline-less/first-contact review renders the entire tracked candidate as an
+empty-tree diff for evidence while applying regex rules only to executable
+package surfaces. Baseline recovery also replaces every consentable delta stash
+with whole-candidate evidence—even when the delta itself fired a review rule—
+because retained history is attacker-controlled. Before 2026-07-25, one shared
+exclusion list hid modified patch content from diff review, and whole-file
+fallback stashed only PKGBUILD/hooks/scripts; `ventoy-bin` exposed the first gap
+when `sanitize.patch` triggered `[non-metadata-file]` but disappeared from its
+stashed diff. Classification was fail-safe, but consent was based on incomplete
+evidence. Dedicated selftests pin cached, baseline-recovery, baseline-less,
+disguised-extension, opaque-patch, and NUL-bearing paths.
+
 **Optional LLM boring-edge verifier.** Config is loaded from
 `~/.config/aur-safe/config` (`KEY=value`, currently only
 `AUR_SAFE_LLM_AUTO_BORING=0|1`), with environment variables taking precedence.
@@ -528,7 +551,7 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: **241/241**. Coverage includes hard/review rule variants; wrapper
+- `selftest`: **249/249**. Coverage includes hard/review rule variants; wrapper
   dispatch, update-query failure, and gate-through-accept locking; atomic
   accepted/staged state; pacman local-DB pkgbase/build/install binding (foreign
   `.SRCINFO` rejection, stale-build rejection, split packages, epoch zero);

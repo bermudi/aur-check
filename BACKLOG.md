@@ -43,6 +43,15 @@ Red-team review backlog — 2026-06-26 session (glm-5.1, kimi-k2.6, qwen3.7-max)
 
 ## 🟠 High
 
+- [x] **T — Changed patch content omitted from `view`/`explain` evidence** (fixed 2026-07-25)
+  [docs/findings/T-patch-review-evidence-omitted.md](docs/findings/T-patch-review-evidence-omitted.md)
+  A shared scan/stash exclusion list correctly kept nested patch syntax out of
+  deterministic regex rules, but also hid modified `*.patch`/`*.diff` content
+  from the human and advisory review surfaces. Classification remained review,
+  yet consent could be based on incomplete evidence. Stashes now exclude only
+  no suffix-based evidence exclusions, and every baseline-recovery/baseline-less
+  review stashes the complete tracked candidate; opaque/NUL evidence blocks.
+
 - [x] **G — Missing-cache tier-2 silently passes review payloads** (fixed 2026-07-23)
   [docs/findings/G-tier2-review-rules-skipped.md](docs/findings/G-tier2-review-rules-skipped.md)
   glm-5.1 (HIGH #3). Attacker force-pushes history → tier-2 → review payload

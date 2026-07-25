@@ -102,8 +102,12 @@ aur-safe explain [pkg]     LLM second-opinion on last flagged diff
 aur-safe accept            promote staged refs (called by the wrapper)
 aur-safe rules             list active rules
 aur-safe wrapper           print the suggested shell wrapper
-aur-safe selftest          run built-in rule tests (241/241)
+aur-safe selftest          run built-in rule tests (249/249)
 ```
+
+When several packages need review, choose `e`; an empty package selection
+explains all flagged packages in gate order. Press Esc at any menu to cancel
+immediately; the main review prompt also accepts `N`.
 
 ## Environment
 
@@ -154,7 +158,7 @@ accepted-ref state, created only after first-contact whole-candidate review and
 advanced only after a gate-audited build that pacman's root-owned local DB binds
 to the expected pkgbase and a fresh build/install. The generated wrapper also
 injects an exact-staged-SHA guard through yay/paru's `--makepkg` seam, forces a
-fresh artifact build, and rejects cache-reuse flags. Selftest: 241/241.
+fresh artifact build, and rejects cache-reuse flags. Selftest: 249/249.
 
 Licensed under the [MIT License](./LICENSE).
 

