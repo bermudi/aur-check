@@ -14,6 +14,16 @@ Red-team review backlog — 2026-06-26 session (glm-5.1, kimi-k2.6, qwen3.7-max)
 
 ## 🔴 Critical
 
+- [x] **U — PKGBUILD source-time execution auto-cleared as metadata** (fixed 2026-07-27)
+  [docs/findings/U-pkgbuild-source-time-execution-autoclear.md](docs/findings/U-pkgbuild-source-time-execution-autoclear.md)
+  A pathless shared allowlist applied inert `.SRCINFO` shapes to executable
+  PKGBUILD, accepted permissive shell assignments/arrays, ignored candidate
+  lexical state, and treated binary/NUL PKGBUILD diffs as empty. Fixed with
+  file-aware streams, NUL blocking, complete-candidate lexical proof, exact
+  positive PKGBUILD grammars, context-only array edges, and 25 classifier
+  regressions (adversarial, positive-control, and NUL cases). Unknown shell
+  syntax is review, never LLM-edge.
+
 - [x] **E — IDN homograph `source=()` bypass → silent exit 0** (mitigated 2026-07-01, review-level)
   [docs/findings/E-homograph-source-bypass.md](docs/findings/E-homograph-source-bypass.md)
   glm-5.1 (CRITICAL #1). Single-line `source=('https://іnstall...')` with
@@ -175,8 +185,8 @@ These don't have individual finding files; details in delegate transcripts.
 |---|---|---|---|
 | 1 | L2 — optional LLM prompt injection | Small | verifier policy/docs |
 
-All deterministic findings through S are closed in the working tree as of
-2026-07-23. L2 remains an explicit opt-in nondeterministic risk.
+All deterministic findings through U are closed in the working tree as of
+2026-07-27. L2 remains an explicit opt-in nondeterministic risk.
 
 ## Reviewer transcripts
 

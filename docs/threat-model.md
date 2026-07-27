@@ -55,6 +55,17 @@ detects *structural patterns* rather than payload names:
 - **Maintainer and `source=()` domain drift** is flagged (review) — this catches
   the impersonation signal without blocking legitimate version bumps.
 
+### Executable PKGBUILD is not metadata
+
+`.SRCINFO` is data; PKGBUILD is Bash executed before source integrity checks.
+Boring classification therefore preserves file identity and accepts PKGBUILD
+lines only after complete-candidate lexical-context proof plus a positive field
+grammar. It never treats the absence of a few known substitution spellings as
+proof that shell cannot execute. Unknown shell/array syntax is review, and
+NUL/unreadable PKGBUILD or `.SRCINFO` is blocking audit-unavailable. This is the
+Finding U boundary; weakening it reopens source-time execution before checksum
+verification.
+
 ### The LLM cannot override deterministic risk
 
 The gate is deterministic classification. Hard-fail, review, and

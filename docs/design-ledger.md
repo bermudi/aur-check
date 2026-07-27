@@ -263,9 +263,31 @@ exit 1 + stash) → review rules + modified-`.install` + added/removed files + n
 binaries + maintainer/source drift (→ `review`, exit 2 + stash) → deterministic
 boring metadata allowlist (→ `boring`, exit 0) → parser-ambiguous known boring
 fields (→ `boring_edge`, exit 2 unless the opt-in strict verifier returns
-exactly `VERDICT: BORING_EDGE_OK`). `.SRCINFO` lines that changed only leading
-whitespace are ignored before metadata classification (makepkg regeneration can
-flip spaces↔tabs without semantic change). Literal `.SRCINFO` advisory/package
+exactly `VERDICT: BORING_EDGE_OK`).
+
+**File-aware executable/data boundary (Finding U).** Broad hard/review regexes
+still inspect every eligible file, but boring classification never consumes a
+pathless mixed line stream. PKGBUILD and `.SRCINFO` are extracted separately:
+`.SRCINFO` is data and may use its generated space-delimited grammar; PKGBUILD
+is executable Bash and must first prove ordinary lexical context in the complete
+candidate, then match an exact positive grammar. One-line arrays are parsed to
+the real unquoted closer; checksum values are literal hex/`SKIP`; source values
+permit only literal data plus simple `$name`/`${name}` expansion. Command,
+process, arithmetic, prompt/indirect expansion, operators, redirections,
+subscripts, mismatched quotes, trailing commands, and unknown array shapes are
+review—not `boring_edge`—so the LLM cannot override executable ambiguity.
+Multiline source/checksum openers, members, and closers reach `boring_edge` only
+through the complete-candidate contextual tracker. Every byte-identical
+occurrence must be safe. The lexical proof intentionally stays fail-closed after
+an earlier quote/heredoc/backslash ambiguity rather than pretending to evaluate
+Bash. Baseline and candidate PKGBUILD/`.SRCINFO` blobs are checked for NUL before
+git output enters a Bash scalar; non-text/unreadable metadata is blocking
+`audit_unavailable`. See
+[Finding U](findings/U-pkgbuild-source-time-execution-autoclear.md).
+
+`.SRCINFO` lines that changed only leading whitespace are ignored before
+metadata classification (makepkg regeneration can flip spaces↔tabs without
+semantic change). Literal `.SRCINFO` advisory/package
 metadata entries (`pkgdesc`, `url`, `arch`, `license`, `groups`, `optdepends`,
 `noextract` — `noextract=` is a versioned *filename* pointing at a `source=()`
 entry, never executed) and `.SRCINFO` dependency entries either already
