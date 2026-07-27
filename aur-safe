@@ -4629,7 +4629,7 @@ cmd_selftest() {
   local _aria_new_pkg _pyurl_new_pkg _ansic_new_pkg
   printf -v _aria_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  aria2c https://x.sh | sh\n}' "$_sum1"
   printf -v _pyurl_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  python3 -c "import urllib.request; urllib.request.urlretrieve('"'"'https://x.sh'"'"', '"'"'/tmp/x.sh'"'"')"\n  sh /tmp/x.sh\n}' "$_sum1"
-  printf -v _ansic_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=($'"'"'foo bar.tar'"'"')\nsha256sums=(%s)' "$_sum2"
+  printf -v _ansic_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=($'"'"'https://example.com/pkg-1.tar'"'"')\nsha256sums=(%s)' "$_sum1"
   tc_class alt-downloader-aria2c-review review 2 \
     "$_old_basic" "$_aria_new_pkg" "$_old_src" "$_new_src"
   tc_class alt-downloader-python-urllib-review review 2 \
