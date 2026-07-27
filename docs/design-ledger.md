@@ -456,6 +456,23 @@ only to exit-2 results after a real candidate was audited. Fetch/clone/diff/read
 or state failures map to exit 1, block the helper, and never stage. This closes
 the old zero-signal auto-proceed/first-contact re-seeding hole.
 
+### No name-list for alternative downloaders / network tools
+`aria2c`, `socat`, `nc`, `tftp`, `rsync`, `python -c "import urllib..."`, and
+the next attacker-chosen fetcher are intentionally **not** hard-coded into the
+rule list. Adding names to a blacklist is against the design red line: the
+attacker rotates names faster than a list can track (`ncat`, `lftp`, `sshpass`,
+`openssl s_client`, `/dev/tcp/...`, custom scripts). `rsync` and similar tools
+are also legitimate in PKGBUILD build functions, so a hard rule would
+false-positive on benign updates. Instead, the diff classifier is fail-closed:
+any added PKGBUILD line that is not a known safe metadata assignment, a proven
+safe array literal, or a same-host source/checksum change lands in `cand_want`
+and exits `review` (2). `python-inline` is a review rule because legitimate
+Python build transforms exist; `pip`/`gem`/`cargo`/`go install` are review for
+the same reason. The only structural hard-fail network patterns are "network
+fetch piped/executed as a shell" (`curl`/`wget`/`fetch` → interpreter), process
+substitution, `eval` of substitution, base64/xxd decode, and escape runs — shapes
+that generalize across fetcher names.
+
 **Review debate (glm-5.1 / kimi-k2.6 / qwen3.7-max):** 6 findings raised.
 Conceded & fixed: (1) HIGH — TOCTOU/anchor-poisoning via unstaged scan-time tip
 [fixed — `_stage_scan_if_gating` + `SCAN_SHA`/`SCAN_URL` capture]; (4) unvalidated
