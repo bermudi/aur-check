@@ -100,13 +100,14 @@ installed by default.
 
 ## Known vulnerability classes (2026-06-26 red-team review)
 
-Findings E–U have implemented fixes/mitigations as recorded in
+Findings E–V have implemented fixes/mitigations as recorded in
 [BACKLOG.md](./BACKLOG.md) and [docs/findings/](./docs/findings/). Load-bearing
 regressions to keep pinned: non-ASCII source URLs never become boring; tier-2
 never exits clean; installed confirmation binds to root-owned pacman pkgbase +
 freshness records; git output is config-isolated and failure-checked; PKGBUILD
 boring classification stays file-aware, positive-grammar-only, candidate-
-contextual, and NUL-blocking (Finding U); and the generated wrapper locks the
+contextual, and NUL-blocking (Finding U); checksum inline-opener support stays
+literal-only and context-bound (Finding V); and the generated wrapper locks the
 full gate → helper → accept transaction and injects exact staged-SHA plus
 fresh-artifact enforcement at the makepkg seam.
 

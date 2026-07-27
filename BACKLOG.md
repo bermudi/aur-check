@@ -100,6 +100,14 @@ Red-team review backlog — 2026-06-26 session (glm-5.1, kimi-k2.6, qwen3.7-max)
 
 ## 🟡 Medium
 
+- [x] **V — Inline checksum-array reflow false-positive** (fixed 2026-07-27)
+  [docs/findings/V-inline-checksum-reflow-fp.md](docs/findings/V-inline-checksum-reflow-fp.md)
+  The real `opera-developer` reflow put the first checksum on the opener and
+  the final checksum beside `)`, while reindentation made unchanged middle
+  hashes appear added. A checksum-specific literal opener/member grammar now
+  clears that exact inert shape; shared openers remain EOL-only and duplicate
+  fingerprints outside checksum context still force review.
+
 - [x] **M — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed** (fixed 2026-07-23)
   [docs/findings/M-allow-review-boolean.md](docs/findings/M-allow-review-boolean.md)
   kimi-k2.6 (MED #4). `[[ -n "0" ]]` is truthy. Fix: `== "1"`.
@@ -185,7 +193,7 @@ These don't have individual finding files; details in delegate transcripts.
 |---|---|---|---|
 | 1 | L2 — optional LLM prompt injection | Small | verifier policy/docs |
 
-All deterministic findings through U are closed in the working tree as of
+All deterministic findings through V are closed in the working tree as of
 2026-07-27. L2 remains an explicit opt-in nondeterministic risk.
 
 ## Reviewer transcripts

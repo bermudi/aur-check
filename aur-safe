@@ -723,17 +723,31 @@ _pkgbuild_optdepends_added_line() {
     '^[[:space:]]*optdepends=\\([[:space:]]*$'
 }
 
-# Verify a bare hex/SKIP added line appears within a checksum array in the
-# PKGBUILD diff (finding E). Without this check, a standalone fingerprint or
-# SKIP in validpgpkeys=() could auto-clear as a checksum.
+# Prove an added literal checksum token belongs to a checksum array. The
+# checksum-specific opener accepts either `sums=(` at EOL or exactly one inline
+# literal first token (`sums=('hex'`). This is deliberately NOT a relaxation of
+# the shared/source/dependency opener: arbitrary inline content would re-open
+# array-state leakage into validpgpkeys. Final members may carry the real `)`;
+# the candidate tracker records membership before closing state on that line.
 _pkgbuild_checksum_array_line() {
-  local dir="$1" base_ref="$2" wanted="$3" member
-  member=$(sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<<"$wanted")
-  # Reuse the complete one-line checksum grammar to require one balanced,
-  # literal hex/SKIP member; wrapping data in a string does not evaluate it.
-  _pkgbuild_checksum_literal_line "sha256sums=(${member})" || return 1
-  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" \
-    '^[[:space:]]*(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?=\\([[:space:]]*$'
+  local dir="$1" base_ref="$2" wanted="$3" value atom name opener
+  value='(SKIP|[A-Fa-f0-9]{16,})'
+  atom="(${value}|'${value}'|\"${value}\")"
+  name='(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?'
+
+  # Eligible added shapes: inline literal opener, standalone member, literal
+  # final member + closer, or a standalone closer proven against the same
+  # checksum-specific opener. Balanced atom alternatives reject substitutions,
+  # mismatched quotes, operators, continuations, and trailing commands.
+  if ! grep -Eq "^[[:space:]]*${name}=\\([[:space:]]*${atom}[[:space:]]*$" <<<"$wanted" 2>/dev/null \
+     && ! grep -Eq "^[[:space:]]*${atom}[[:space:]]*(\\)[[:space:]]*(#.*)?)?$" <<<"$wanted" 2>/dev/null \
+     && ! grep -Eq '^[[:space:]]*\)[[:space:]]*(#.*)?$' <<<"$wanted" 2>/dev/null; then
+    return 1
+  fi
+
+  # Two backslashes are intentional: awk -v consumes one before using the ERE.
+  opener="^[[:space:]]*${name}=\\\\([[:space:]]*(${atom}[[:space:]]*)?$"
+  _pkgbuild_array_member_added_line "$dir" "$base_ref" "$wanted" "$opener"
 }
 
 _pkgbuild_metadata_array_syntax_added_line() {
@@ -3800,6 +3814,9 @@ cmd_selftest() {
   local _old_dep_src _new_repo_dep_src _new_aur_dep_src _new_dup_dep_src
   local _old_vpgp_pkg _new_vpgp_pkg _comment_vpgp_old_pkg _comment_vpgp_new_pkg
   local _inline_vpgp_old_pkg _inline_vpgp_new_pkg _quoted_hash_old_pkg _quoted_hash_new_pkg
+  local _opera_reflow_old_pkg _opera_reflow_new_pkg _opera_reflow_old_src _opera_reflow_new_src
+  local _checksum_standalone_close_pkg
+  local _inline_open_vpgp_old_pkg _inline_open_vpgp_new_pkg
   local _quoted_gadget_old_pkg _quoted_gadget_new_pkg
   local _old_vpgp_src _new_vpgp_src _old_src_move_src _new_src_move_src
   # split-pkgbase intra-pkgbase-dep fixtures (R1)
@@ -3880,6 +3897,8 @@ cmd_selftest() {
   printf -v _quoted_hash_new_pkg "pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsha256sums=(\n  '%s # literal') # checksums\nvalidpgpkeys=(\n  '0123456789ABCDEF0123456789ABCDEF01234567'\n  'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n)" "$_sum1"
   _quoted_gadget_old_pkg=$'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\n_dummy=\'\nsha256sums=(\n\'\nvalidpgpkeys=(\n  \'0123456789ABCDEF0123456789ABCDEF01234567\'\n)'
   _quoted_gadget_new_pkg=$'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\n_dummy=\'\nsha256sums=(\n\'\nvalidpgpkeys=(\n  \'0123456789ABCDEF0123456789ABCDEF01234567\'\n  \'FEDCBA9876543210FEDCBA9876543210FEDCBA98\'\n)'
+  printf -v _inline_open_vpgp_old_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha256sums=('%s'\n            'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n            '%s')\nvalidpgpkeys=(\n            '0123456789ABCDEF0123456789ABCDEF01234567'\n)" "$_sum1" "$_sum1"
+  printf -v _inline_open_vpgp_new_pkg "pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsha256sums=('%s'\n            'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n            '%s')\nvalidpgpkeys=(\n            '0123456789ABCDEF0123456789ABCDEF01234567'\n            'FEDCBA9876543210FEDCBA9876543210FEDCBA98'\n)" "$_sum1" "$_sum1"
   _old_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\npkgname = cls-pkg'
   _new_vpgp_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\tvalidpgpkeys = FEDCBA9876543210FEDCBA9876543210FEDCBA98\n\npkgname = cls-pkg'
   # Test fixture for .SRCINFO section-move (finding CR-major): depends=foo
@@ -3917,6 +3936,23 @@ cmd_selftest() {
     "$_new_multi_sum_pkg" \
     "$_old_src" \
     "$_sum2_src"
+
+  # Real opera-developer reflow: the first checksum moves onto the opener,
+  # middle checksums are reindented (and therefore appear removed+added), and
+  # the final changed checksum carries the inline closer. Every accepted token
+  # is literal hex in a checksum-specific candidate context; this must clear
+  # without relaxing the shared opener or bare-hex validpgpkeys guard.
+  _opera_reflow_old_pkg=$'pkgname=cls-pkg\npkgver=134.0.5952.0\npkgrel=2\n_nwjs_ffmpeg_version=0.113.0\nsource=("https://example.com/${pkgver}/pkg.deb" "opera" "default" "https://github.com/example/${_nwjs_ffmpeg_version}/ffmpeg.zip")\nsha256sums=(\n    \'1c5179ce9aacafcba867db33d7861d1e9a2e7890e7d481ee036b3b6f4e1fe0ea\'\n    \'508512464e24126fddfb2c41a1e2e86624bdb0c0748084b6a922573b6cf6b9c5\'\n    \'99fc0d2822edd14e234d451995db47148125e4580221a292598959421d131231\'\n    \'eccac785a61f552d7ce75a1aba990486d977d74cd6ac78091c21b3c807cf1b01\'\n)'
+  _opera_reflow_new_pkg=$'pkgname=cls-pkg\npkgver=135.0.5966.0\npkgrel=2\n_nwjs_ffmpeg_version=0.114.0\nsource=("https://example.com/${pkgver}/pkg.deb" "opera" "default" "https://github.com/example/${_nwjs_ffmpeg_version}/ffmpeg.zip")\nsha256sums=(\'b059a4241852cf013297c559881be9af2334f1651406641dd8d93e641872d690\'\n            \'508512464e24126fddfb2c41a1e2e86624bdb0c0748084b6a922573b6cf6b9c5\'\n            \'99fc0d2822edd14e234d451995db47148125e4580221a292598959421d131231\'\n            \'521e3e9c59fba536c5316cc3a9eb5ab6ac2f3cdce1051fda1a7446a4c3147bcd\')'
+  _opera_reflow_old_src=$'pkgbase = cls-pkg\n\tpkgver = 134.0.5952.0\n\tpkgrel = 2\n\tsource = https://example.com/134.0.5952.0/pkg.deb\n\tsource = opera\n\tsource = default\n\tsource = https://github.com/example/0.113.0/ffmpeg.zip\n\tsha256sums = 1c5179ce9aacafcba867db33d7861d1e9a2e7890e7d481ee036b3b6f4e1fe0ea\n\tsha256sums = 508512464e24126fddfb2c41a1e2e86624bdb0c0748084b6a922573b6cf6b9c5\n\tsha256sums = 99fc0d2822edd14e234d451995db47148125e4580221a292598959421d131231\n\tsha256sums = eccac785a61f552d7ce75a1aba990486d977d74cd6ac78091c21b3c807cf1b01\n\npkgname = cls-pkg'
+  _opera_reflow_new_src=$'pkgbase = cls-pkg\n\tpkgver = 135.0.5966.0\n\tpkgrel = 2\n\tsource = https://example.com/135.0.5966.0/pkg.deb\n\tsource = opera\n\tsource = default\n\tsource = https://github.com/example/0.114.0/ffmpeg.zip\n\tsha256sums = b059a4241852cf013297c559881be9af2334f1651406641dd8d93e641872d690\n\tsha256sums = 508512464e24126fddfb2c41a1e2e86624bdb0c0748084b6a922573b6cf6b9c5\n\tsha256sums = 99fc0d2822edd14e234d451995db47148125e4580221a292598959421d131231\n\tsha256sums = 521e3e9c59fba536c5316cc3a9eb5ab6ac2f3cdce1051fda1a7446a4c3147bcd\n\npkgname = cls-pkg'
+  tc_class opera-inline-checksum-reflow-boring boring 0 \
+    "$_opera_reflow_old_pkg" "$_opera_reflow_new_pkg" \
+    "$_opera_reflow_old_src" "$_opera_reflow_new_src"
+  _checksum_standalone_close_pkg=$'pkgname=cls-pkg\npkgver=135.0.5966.0\npkgrel=2\n_nwjs_ffmpeg_version=0.114.0\nsource=("https://example.com/${pkgver}/pkg.deb" "opera" "default" "https://github.com/example/${_nwjs_ffmpeg_version}/ffmpeg.zip")\nsha256sums=(\'b059a4241852cf013297c559881be9af2334f1651406641dd8d93e641872d690\'\n            \'508512464e24126fddfb2c41a1e2e86624bdb0c0748084b6a922573b6cf6b9c5\'\n            \'99fc0d2822edd14e234d451995db47148125e4580221a292598959421d131231\'\n            \'521e3e9c59fba536c5316cc3a9eb5ab6ac2f3cdce1051fda1a7446a4c3147bcd\'\n)'
+  tc_class checksum-inline-opener-standalone-closer-boring boring 0 \
+    "$_opera_reflow_old_pkg" "$_checksum_standalone_close_pkg" \
+    "$_opera_reflow_old_src" "$_opera_reflow_new_src"
 
   tc_class same-host-source boring 0 \
     "$_old_basic" \
@@ -4331,6 +4367,8 @@ cmd_selftest() {
     "$_quoted_hash_old_pkg" "$_quoted_hash_new_pkg" "$_old_src" "$_new_src"
   tc_class quoted-fake-opener-cannot-grant-context review 2 \
     "$_quoted_gadget_old_pkg" "$_quoted_gadget_new_pkg" "$_old_src" "$_new_src"
+  tc_class checksum-inline-opener-duplicate-cannot-mask-validpgp review 2 \
+    "$_inline_open_vpgp_old_pkg" "$_inline_open_vpgp_new_pkg" "$_old_src" "$_old_src"
 
   # Regression: a checksum element changed deep enough that its diff hunk omits
   # the array opener (the nvidia-580xx-utils shape). Complete-candidate parsing

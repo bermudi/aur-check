@@ -101,5 +101,5 @@ Selftests pin:
   boring-edge/LLM, and trust-anchor suites.
 
 Verification at implementation time: `bash -n`, shellcheck, and 274 selftests
-passed. The separate opera-developer inline-opener/final-checksum false positive
-remains fail-closed and is not part of this security fix.
+passed. The separate opera-developer formatting false positive was subsequently
+fixed without widening this execution boundary; see [Finding V](V-inline-checksum-reflow-fp.md).

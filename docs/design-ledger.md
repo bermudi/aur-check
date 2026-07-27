@@ -372,9 +372,14 @@ optdepends/checksum/dependency/source trackers share one
 `_pkgbuild_array_member_added_line` state machine over the complete candidate
 PKGBUILD. Parsing the candidate avoids old/new hunk ambiguity: a `@@` label can
 name a removed multiline opener after the new file changed to `depends=()`.
-Openers require `(` at end-of-line; closers cover bare, comment-suffixed, and
-inline-final `)` forms so checksum state cannot leak into `validpgpkeys`. Because
-candidates are keyed by raw text, every candidate-file occurrence must be inside
+Shared source/dependency/metadata openers require `(` at end-of-line. The sole
+exception is checksum-specific (Finding V): `*sums=(` may carry exactly one
+balanced literal hex/`SKIP` first member at EOL, allowing the real
+`opera-developer` reflow without accepting arbitrary inline shell. Checksum
+members may carry the inline-final `)`; the tracker records membership before
+closing state on that line. Bare/comment closers remain supported so checksum
+state cannot leak into `validpgpkeys`. Because candidates are keyed by raw text,
+every candidate-file occurrence must be inside
 the target array; a safe duplicate cannot mask an executable twin. This is not
 a full Bash parser, so any multiline quote/backtick, heredoc, or backslash-line
 continuation disables contextual auto-clear—preventing fake openers hidden in
