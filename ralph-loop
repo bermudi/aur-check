@@ -6,7 +6,7 @@ readonly SCRIPT_NAME=${0##*/}
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
 readonly ROOT
 readonly MAIN_BRANCH=${RALPH_MAIN_BRANCH:-main}
-readonly IMPLEMENT_MODEL=${RALPH_IMPLEMENT_MODEL:-swe-1.7}
+readonly IMPLEMENT_MODEL=${RALPH_IMPLEMENT_MODEL:-swe-1.6}
 readonly REVIEW_MODEL=${RALPH_REVIEW_MODEL:-glm-5.2}
 readonly MAX_REVIEWS=${RALPH_MAX_REVIEWS:-4}
 readonly MAX_FIX_PASSES=${RALPH_MAX_FIX_PASSES:-6}
@@ -48,7 +48,7 @@ Ranking is deterministic: critical > high > medium > low, then oldest issue
 severity label enter the queue.
 
 Environment:
-  RALPH_IMPLEMENT_MODEL   default: swe-1.7
+  RALPH_IMPLEMENT_MODEL   default: swe-1.6
   RALPH_REVIEW_MODEL      default: glm-5.2
   RALPH_MAX_REVIEWS       default: 4 per issue
   RALPH_MAX_FIX_PASSES    default: 6 per issue, including the initial pass

@@ -152,9 +152,9 @@ Fetch/clone/diff/state failures are exit 1 and cannot be auto-consented.
 
 `./ralph-loop` is a bounded, sequential GitHub-issue relay for this repository.
 It snapshots open `security` issues in severity order (`critical` → `high` →
-`medium` → `low`, then issue number), gives one issue to SWE-1.7, runs the full
+`medium` → `low`, then issue number), gives one issue to SWE-1.6, runs the full
 deterministic gate, and asks a fresh GLM-5.2 session to review the complete
-branch diff. Substantive review findings return to a fresh SWE-1.7 session; an
+branch diff. Substantive review findings return to a fresh SWE-1.6 session; an
 exact approval plus green checks fast-forwards `main`, pushes, writes the durable
 finding pointer, and closes the issue.
 
