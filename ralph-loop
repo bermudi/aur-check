@@ -517,7 +517,7 @@ review_issue() {
         none "$implement_log" "$verify_log" || return 1
 
     before_status=$(git status --porcelain=v1 --untracked-files=all) || return 1
-    run_devin "$REVIEW_MODEL" smart review ro "$review_log"
+    run_devin "$REVIEW_MODEL" normal review ro "$review_log"
     assert_branch "$branch"
     after_status=$(git status --porcelain=v1 --untracked-files=all) || return 1
     [[ $(git rev-parse HEAD) == "$expected_sha" && $after_status == "$before_status" ]] || \
