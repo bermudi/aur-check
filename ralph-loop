@@ -557,7 +557,7 @@ validate_closure_docs() {
     content=$(git show "$sha:$finding") || fail "could not read $finding from approved commit"
     catalog=$(git show "$sha:docs/findings/README.md") || fail 'could not read findings catalog'
 
-    grep -Eq "GitHub( issue)? \[#?$issue\]|GitHub #$issue" <<<"$content" || \
+    grep -Eq "GitHub( issue)?[[:space:]]+(\[#?$issue\]|#$issue)([^[:digit:]]|$)" <<<"$content" || \
         fail "$finding does not identify GitHub #$issue as its source"
     grep -Eqi '^\*\*Status:\*\*[[:space:]]*fixed|^Status:[[:space:]]*fixed' <<<"$content" || \
         fail "$finding is not marked fixed"
