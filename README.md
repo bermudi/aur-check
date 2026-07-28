@@ -171,9 +171,15 @@ in a bubblewrap mount namespace with the maintainer's home, SSH agent, desktop
 keyring, and GitHub credentials hidden; the reviewer sees the worktree
 read-only. Candidate-controlled verification runs separately with a read-only
 worktree, empty environment, and no network. Runtime context and transcripts
-live in ignored `.ralph-loop/`.
-Review/fix passes are capped; configure the caps and models with the `RALPH_*`
-variables shown by `./ralph-loop --help`.
+live in ignored `.ralph-loop/`. While Devin is in non-interactive print mode,
+the harness emits a progress heartbeat every 60
+seconds with elapsed time, age of the latest internal Devin activity, and
+worktree state. Five minutes without recorded activity is called out explicitly;
+this is a stall signal, not proof that the process is dead. Set
+`RALPH_HEARTBEAT_SECONDS=0` to disable heartbeats or choose another positive
+interval.
+Review/fix passes are capped; configure the caps, models, and heartbeat with the
+`RALPH_*` variables shown by `./ralph-loop --help`.
 
 This command directly pushes approved commits and closes issues. `run` is the
 explicit publication boundary; use `list` when you only want to inspect order.

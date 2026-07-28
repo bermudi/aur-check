@@ -10,6 +10,8 @@ readonly IMPLEMENT_MODEL=${RALPH_IMPLEMENT_MODEL:-swe-1.7}
 readonly REVIEW_MODEL=${RALPH_REVIEW_MODEL:-glm-5.2}
 readonly MAX_REVIEWS=${RALPH_MAX_REVIEWS:-4}
 readonly MAX_FIX_PASSES=${RALPH_MAX_FIX_PASSES:-6}
+readonly HEARTBEAT_SECONDS=${RALPH_HEARTBEAT_SECONDS:-60}
+readonly STALL_WARN_SECONDS=300
 readonly RUNTIME_REL=.ralph-loop
 
 export GIT_CONFIG_GLOBAL=/dev/null
@@ -26,6 +28,8 @@ REPO_NAME=
 DEVIN_BIN=
 CURRENT_ISSUE=
 CURRENT_BRANCH=
+ACTIVE_HEARTBEAT_PID=
+ACTIVE_HEARTBEAT_MARKER=
 declare -a QUEUE=()
 
 usage() {
@@ -48,6 +52,7 @@ Environment:
   RALPH_REVIEW_MODEL      default: glm-5.2
   RALPH_MAX_REVIEWS       default: 4 per issue
   RALPH_MAX_FIX_PASSES    default: 6 per issue, including the initial pass
+  RALPH_HEARTBEAT_SECONDS default: 60; 0 disables progress heartbeats
   RALPH_MAIN_BRANCH       default: main
 
 'run' is intentionally consequential: after deterministic checks and an exact
@@ -66,8 +71,40 @@ fail() {
     exit 1
 }
 
+stop_devin_heartbeat() {
+    local pid=${1:-$ACTIVE_HEARTBEAT_PID} marker=${2:-$ACTIVE_HEARTBEAT_MARKER}
+    local wait_rc=0 marker_dir
+    [[ -n $pid ]] || return 0
+
+    # The marker is created before the observer starts. Removing an existing
+    # file needs no new filesystem allocation; if it fails, do not hang in wait.
+    if [[ -n $marker && -e $marker ]] && ! unlink "$marker"; then
+        printf 'ralph-loop: ERROR: could not stop heartbeat observer via %s\n' "$marker" >&2
+        return 1
+    fi
+    if wait "$pid"; then
+        wait_rc=0
+    else
+        wait_rc=$?
+        printf 'ralph-loop: ERROR: heartbeat observer process %s ended with status %s\n' \
+            "$pid" "$wait_rc" >&2
+    fi
+    if [[ -n $marker ]]; then
+        marker_dir=${marker%/*}
+        if [[ -d $marker_dir ]] && ! rmdir "$marker_dir"; then
+            printf 'ralph-loop: warning: could not remove heartbeat directory %s\n' "$marker_dir" >&2
+        fi
+    fi
+    if [[ $ACTIVE_HEARTBEAT_PID == "$pid" ]]; then
+        ACTIVE_HEARTBEAT_PID=
+        ACTIVE_HEARTBEAT_MARKER=
+    fi
+    return "$wait_rc"
+}
+
 on_exit() {
     local rc=$?
+    stop_devin_heartbeat
     if [[ -n $POLICY_DIR && -d $POLICY_DIR ]] && command -v trash >/dev/null 2>&1; then
         trash "$POLICY_DIR" >/dev/null 2>&1 || true
     fi
@@ -87,6 +124,11 @@ trap on_exit EXIT
 require_uint() {
     local name=$1 value=$2
     [[ $value =~ ^[1-9][0-9]*$ ]] || fail "$name must be a positive integer (got: $value)"
+}
+
+require_nonnegative_uint() {
+    local name=$1 value=$2
+    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "$name must be a non-negative integer (got: $value)"
 }
 
 require_command() {
@@ -219,6 +261,7 @@ preflight() {
 
     require_uint RALPH_MAX_REVIEWS "$MAX_REVIEWS"
     require_uint RALPH_MAX_FIX_PASSES "$MAX_FIX_PASSES"
+    require_nonnegative_uint RALPH_HEARTBEAT_SECONDS "$HEARTBEAT_SECONDS"
 
     RUNTIME_DIR=$ROOT/$RUNTIME_REL
     mkdir -p "$RUNTIME_DIR/logs" "$RUNTIME_DIR/reviews"
@@ -333,10 +376,108 @@ assert_protected_paths() {
         fail 'issue branch modified the loop policy or AGENTS.md; these are harness-protected'
 }
 
+format_duration() {
+    local seconds=$1
+    printf '%02d:%02d:%02d' \
+        "$((seconds / 3600))" "$(((seconds % 3600) / 60))" "$((seconds % 60))"
+}
+
+latest_devin_log() {
+    local invocation_home=$1 candidate mtime latest_mtime=0 latest_path=
+    local log_dir=$invocation_home/.local/share/devin/cli/logs
+    local nullglob_was_set=0
+    local -a candidates=()
+
+    [[ -d $log_dir ]] || return 1
+    shopt -q nullglob && nullglob_was_set=1
+    shopt -s nullglob
+    candidates=("$log_dir"/devin_*.log)
+    (( nullglob_was_set )) || shopt -u nullglob
+    for candidate in "${candidates[@]}"; do
+        mtime=$(stat -c %Y "$candidate" 2>/dev/null) || continue
+        if (( mtime > latest_mtime )); then
+            latest_mtime=$mtime
+            latest_path=$candidate
+        fi
+    done
+    [[ -n $latest_path ]] || return 1
+    printf '%s\n' "$latest_path"
+}
+
+devin_worktree_state() {
+    local workspace_mode=$1 status count
+    if [[ $workspace_mode == ro ]]; then
+        printf 'workspace read-only'
+        return 0
+    fi
+    # This probe must remain observational while Devin may be adding/committing.
+    if ! status=$(git --no-optional-locks -C "$ROOT" status \
+        --porcelain=v1 --untracked-files=all 2>/dev/null); then
+        printf 'worktree observation unavailable'
+        return 0
+    fi
+    if [[ -z $status ]]; then
+        printf 'worktree observed clean'
+        return 0
+    fi
+    count=$(awk 'NF { count += 1 } END { print count + 0 }' <<<"$status")
+    printf 'worktree observed changed (%s status entries)' "$count"
+}
+
+devin_heartbeat() {
+    local role=$1 model=$2 workspace_mode=$3 invocation_home=$4 start_epoch=$5 marker=$6
+    local now elapsed internal_log latest_epoch activity_age activity worktree_state
+    local tick=0 rc
+
+    # This observer is a harness child, not another Ralph invocation. Keep its
+    # failures visible. EXIT runs after function locals leave scope, so persist
+    # its label in this dedicated subprocess rather than referencing role/model
+    # from the trap. The parent uses a stop marker instead of signaling a PID.
+    HEARTBEAT_OBSERVER_LABEL=$role/$model
+    trap - EXIT
+    trap 'rc=$?; if (( rc != 0 )); then printf "ralph-loop: ERROR: %s heartbeat observer exited %s; progress visibility is lost\n" "$HEARTBEAT_OBSERVER_LABEL" "$rc" >&2; fi' EXIT
+    trap 'exit 0' HUP INT TERM
+    set +e
+    while :; do
+        sleep 1
+        rc=$?
+        (( rc == 0 )) || return "$rc"
+        [[ -e $marker ]] || return 0
+        ((tick += 1))
+        (( tick < HEARTBEAT_SECONDS )) && continue
+        tick=0
+
+        if ! now=$(date +%s); then
+            printf 'ralph-loop: ERROR: %s/%s heartbeat could not read the clock\n' "$role" "$model" >&2
+            return 1
+        fi
+        elapsed=$((now - start_epoch))
+        if internal_log=$(latest_devin_log "$invocation_home") && \
+            latest_epoch=$(stat -c %Y "$internal_log" 2>/dev/null); then
+            activity_age=$((now - latest_epoch))
+            (( activity_age < 0 )) && activity_age=0
+            if (( activity_age >= STALL_WARN_SECONDS )); then
+                activity="WARNING: no recorded Devin activity for $(format_duration "$activity_age")"
+            else
+                activity="Devin activity $(format_duration "$activity_age") ago"
+            fi
+        elif (( elapsed >= STALL_WARN_SECONDS )); then
+            activity="WARNING: no Devin activity log after $(format_duration "$elapsed")"
+        else
+            activity='no Devin activity log yet'
+        fi
+        worktree_state=$(devin_worktree_state "$workspace_mode")
+        if ! printf 'ralph-loop: %s/%s active — elapsed %s; %s; %s\n' \
+            "$role" "$model" "$(format_duration "$elapsed")" "$activity" "$worktree_state" >&2; then
+            return 1
+        fi
+    done
+}
+
 run_devin() {
     local model=$1 permission_mode=$2 role=$3 workspace_mode=$4 log_file=$5
-    local stderr_file=$log_file.stderr parent_dir invocation_home
-    local producer_rc tee_rc
+    local stderr_file=$log_file.stderr parent_dir invocation_home internal_log
+    local heartbeat_dir heartbeat_marker heartbeat_stop_rc=0 producer_rc tee_rc start_epoch elapsed
     local -a workspace_mount statuses
 
     [[ $(cat "$POLICY_DIR/implement.md" "$POLICY_DIR/review.md" | sha256sum) == "$POLICY_DIGEST" ]] || \
@@ -355,6 +496,20 @@ run_devin() {
         workspace_mount=(--ro-bind "$ROOT" "$ROOT")
     else
         workspace_mount=(--bind "$ROOT" "$ROOT")
+    fi
+
+    start_epoch=$(date +%s)
+    printf 'ralph-loop: %s/%s started; transcript: %s; internal activity: %s\n' \
+        "$role" "$model" "$log_file" "$invocation_home/.local/share/devin/cli/logs/" >&2
+    if (( HEARTBEAT_SECONDS > 0 )); then
+        mkdir -p "$RUNTIME_DIR/heartbeats"
+        heartbeat_dir=$(mktemp -d "$RUNTIME_DIR/heartbeats/${role}.XXXXXX")
+        heartbeat_marker=$heartbeat_dir/running
+        : >"$heartbeat_marker"
+        devin_heartbeat "$role" "$model" "$workspace_mode" "$invocation_home" \
+            "$start_epoch" "$heartbeat_marker" &
+        ACTIVE_HEARTBEAT_PID=$!
+        ACTIVE_HEARTBEAT_MARKER=$heartbeat_marker
     fi
 
     set +e
@@ -404,9 +559,23 @@ run_devin() {
                 -p 2>"$stderr_file"
     ) | tee "$log_file"
     statuses=("${PIPESTATUS[@]}")
-    set -e
     producer_rc=${statuses[0]}
     tee_rc=${statuses[1]}
+    stop_devin_heartbeat || heartbeat_stop_rc=$?
+    set -e
+    (( heartbeat_stop_rc == 0 )) || fail 'heartbeat observer could not be stopped cleanly'
+
+    elapsed=$(($(date +%s) - start_epoch))
+    if (( producer_rc == 0 )); then
+        printf 'ralph-loop: %s/%s finished after %s\n' \
+            "$role" "$model" "$(format_duration "$elapsed")" >&2
+    else
+        printf 'ralph-loop: %s/%s exited %s after %s\n' \
+            "$role" "$model" "$producer_rc" "$(format_duration "$elapsed")" >&2
+        if internal_log=$(latest_devin_log "$invocation_home"); then
+            printf 'ralph-loop: Devin internal log: %s\n' "$internal_log" >&2
+        fi
+    fi
 
     if [[ -s $stderr_file ]]; then
         cat "$stderr_file" >&2
