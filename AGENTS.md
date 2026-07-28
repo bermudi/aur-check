@@ -80,6 +80,23 @@ Live path to exercise: `./aur-safe check <pkg>` (e.g. `ventoy-bin`, a known
 missing-cache baseline-recovery case). The wrapper (`aur-safe wrapper`) is not
 installed by default.
 
+## Findings & issue tracking
+Two layers, kept distinct:
+- **GitHub issues** — the live tracker (open work, status, workflow).
+- **`docs/findings/`** — the durable record. One markdown file per finding,
+  cited by code comments and this file; catalog at
+  [README.md](./docs/findings/README.md). Closed GitHub issues recede from
+  view; the finding doc is what survives.
+
+**When a GitHub issue is closed**, write its durable doc — the step that gets
+skipped under load; do not skip it, the lesson is lost when the issue recedes:
+- File: `docs/findings/gh<NN>-<slug>.md`, keyed by issue number (`ghNN`).
+  Legacy findings A–Y predate the tracker and keep their letters.
+- Frontmatter: `Source: GitHub #NN`, `Status: fixed`, `Severity:`. Sections:
+  Summary (mechanism), Fix (what changed), Verification (selftest/`bash -n`),
+  Lesson (what it teaches — worth pinning).
+- Add a one-line entry to the README catalog; thin the issue body to a pointer.
+
 ## Constraints & Red Lines
 - **Never let the LLM override deterministic risk.** `explain` is advisory; the
   optional verifier can only auto-clear deterministic `boring_edge` diffs, never
