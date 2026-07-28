@@ -43,10 +43,11 @@ of the impersonation / source-drift signals and the advisory `accept` path
 
 ### GitHub Cohort 2 — 2026-07-27 (#2–#22)
 A second review filed directly as GitHub issues under a C/H/M/L scheme
-(C1–C3 critical, H1–H5 high, M1–M8 medium, L1–L5 low). These do **not** yet have
-`docs/findings/` writeups — under the findings/-canonical model they are pending.
-They partially overlap Cohort 1 (e.g. GH H1 ≈ local J/L7 git-config isolation,
-fixed) and add new gaps (C1 `++` line-drop, C2 fail-open URI, …). See
+(C1–C3 critical, H1–H5 high, M1–M8 medium, L1–L5 low). Under the findings/-
+canonical model each gets a `ghNN` doc when its issue closes (legacy A–Y predate
+the tracker). They partially overlap Cohort 1 (e.g. GH H1 ≈ local J/L7 git-config
+isolation, fixed) and add new gaps (C2 fail-open URI, …). **gh2 (C1, #2) is
+resolved** — the `++` added-line-drop; #3–#22 remain pending. See
 <https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
@@ -54,6 +55,7 @@ fixed) and add new gaps (C1 `++` line-drop, C2 fail-open URI, …). See
 Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to their issue.
 
 ### Critical
+- ✓ **gh2** — Added-line extractor drops lines beginning with `++` (C1, #2) → [doc](gh2-added-line-extractor-drops-plusplus-lines.md) · [#2](https://github.com/bermudi/aur-check/issues/2)
 - ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
 - △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
 - ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
@@ -117,7 +119,7 @@ the delegate transcripts (sessions above). All **fixed** except **L2**.
 ## Pending reconciliation
 
 - **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
-  pending under the findings/-canonical model. Where they overlap Cohort 1
-  (already fixed), they should be cross-linked to the existing doc rather than
-  duplicated.
+  filed per-finding as each issue closes (see AGENTS.md "Findings & issue
+  tracking"). **#2 (C1) is done** → gh2; the rest are pending. Where they overlap
+  Cohort 1 (already fixed), cross-link to the existing doc rather than duplicate.
 - **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).
