@@ -1,0 +1,123 @@
+# Findings
+
+Durable record of aur-safe's security findings — the mechanisms, fixes, and
+lessons learned. This directory is the canonical long-form reference, cited by
+code comments and `AGENTS.md`.
+
+## How findings are tracked
+
+Two artefacts, two roles:
+
+- **GitHub issues** — the *live tracker*. Open work, workflow state, who/when.
+  Open findings carry their issue number in the catalog below.
+- **`docs/findings/`** (this directory) — the *durable record*. One markdown file
+  per substantive finding: mechanism, threat-model relevance, fix, verification,
+  lesson. Each file's `Status` field records open/fixed.
+
+GitHub issues are poor long-term reference (closed issues recede from view);
+this directory is what you read to understand what the tool defends against and
+why. When a finding is resolved, update the doc's `Status` **and** close its issue.
+
+## Provenance
+
+Findings arrived in waves; each doc's `Source` field has the precise attribution.
+
+### Founding pass (A–D)
+Earliest findings from initial hardening. All closed. No severity classification
+(predates the scheme).
+
+### 2026-06-26 red-team review (E–R)
+Three delegate reviewers against the full codebase + docs — 14 finding files.
+Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-check--/`:
+
+| Reviewer | Role | Session |
+|---|---|---|
+| glm-5.1 | adversarial auditor | `019f0517-d737-732f-b8d6-6ae4c3208309` |
+| kimi-k2.6 | edge-case hunter | `019f0517-d73a-78d5-929f-c514eed1880d` |
+| qwen3.7-max | bug spotter | `019f0517-d73a-785f-929f-caae55c267e2` |
+
+### Follow-up findings (S–Y)
+Gaps surfaced in later implementation reviews (S–V) and the 2026-07-27 follow-up
+of the impersonation / source-drift signals and the advisory `accept` path
+(W–Y — the three currently open).
+
+### GitHub Cohort 2 — 2026-07-27 (#2–#22)
+A second review filed directly as GitHub issues under a C/H/M/L scheme
+(C1–C3 critical, H1–H5 high, M1–M8 medium, L1–L5 low). These do **not** yet have
+`docs/findings/` writeups — under the findings/-canonical model they are pending.
+They partially overlap Cohort 1 (e.g. GH H1 ≈ local J/L7 git-config isolation,
+fixed) and add new gaps (C1 `++` line-drop, C2 fail-open URI, …). See
+<https://github.com/bermudi/aur-check/issues>.
+
+## Catalog
+
+Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to their issue.
+
+### Critical
+- ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
+- △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
+- ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
+- ✓ **U** — PKGBUILD source-time execution auto-cleared as metadata → [doc](U-pkgbuild-source-time-execution-autoclear.md)
+
+### High
+- ✓ **G** — Missing-cache tier-2 silently passes review-only payloads → [doc](G-tier2-review-rules-skipped.md)
+- ✓ **H** — `bunx`, `pnpm exec`, `yarn dlx` escape JS package-manager hard rules → [doc](H-bunx-pnpm-exec-yarn-dlx-missing.md)
+- ✓ **I** — `pip3 install` bypasses `pip` review rule → [doc](I-pip3-bypass.md)
+- ✓ **J** — User git config breaks diff parsing → [doc](J-git-config-breaks-diff.md)
+- ✓ **K** — `epoch=0` breaks install confirmation and baseline recovery → [doc](K-epoch-zero.md)
+- ✓ **L** — Concurrent gate runs corrupt the per-run manifest → [doc](L-manifest-race.md)
+- ✓ **T** — Changed patch content omitted from review evidence → [doc](T-patch-review-evidence-omitted.md)
+- ◷ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
+
+### Medium
+- ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
+- ✓ **N** — Split-package missing-cache clone failure (no scan, wrong staging key) → [doc](N-split-pkg-missing-cache.md)
+- ✓ **O** — `find_pkg_dir` slow path doesn't verify `.git` exists → [doc](O-find-pkg-dir-no-git.md)
+- ✓ **P** — Quoted PKGBUILD `source=()` entries false-positive as review → [doc](P-quoted-source-filenames-fp.md)
+- ✓ **Q** — `files_with_status` silently ignores git diff failures → [doc](Q-files-with-status-swallows-rc.md)
+- ✓ **R** — Package name regex allows `.`, `..`, `.git` → [doc](R-pkg-name-path-traversal.md)
+- ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
+- ◷ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
+
+### Low
+- ◷ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
+- L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
+
+### Founding pass (A–D, closed)
+- **A** — Empty PKGBUILD in tier 2 treated as clean → [doc](A-empty-pkgbuild-silent-clean.md)
+- **B** — `cmd_scan` is an ad-hoc third rule pipeline → [doc](B-cmd-scan-adhoc-pipeline.md)
+- **C** — `diff_added` suppresses stderr — corrupted diff silently returns clean → [doc](C-diff-added-stderr-suppression.md)
+- **D** — Version-vs-SHA mismatch in `accept` (working as designed) → [doc](D-accept-version-vs-sha.md)
+
+## Low-severity findings (Cohort 1, L1–L9)
+
+Too minor for individual files; recorded here for completeness. Detail lives in
+the delegate transcripts (sessions above). All **fixed** except **L2**.
+
+- **L1** (fixed) — `audit` path trust anchor autoseeds without install-confirmation.
+  New installs now run under the transaction lock: `audit` stages the scanned
+  SHA/pkgbase, the helper installs, and `accept` confirms via pacman before the
+  first anchor is created.
+- **L2** (◷ open) — LLM boring-edge verifier prompt injection. Opt-in
+  `AUR_SAFE_LLM_AUTO_BORING=1` sends attacker-controlled diff text unfiltered to
+  the LLM. Off by default. **No GitHub issue yet** — needs one, or confirmation
+  that it is covered by [#10 (M1)](https://github.com/bermudi/aur-check/issues/10)
+  (source-authority anomalies reaching the verifier).
+- **L3** (fixed) — `classify_diff_rules` printed entire `$name_status` instead of
+  `$path`. Cosmetic.
+- **L4** (fixed) — `write_ref` didn't validate `git rev-parse` success.
+- **L5** (fixed) — `source_domains` awk overmatched `source_dir=` variables
+  (tightened to `source(_[[:alnum:]_]+)?=\(`). The inverse gap — `source+=()` —
+  is the open finding **X**.
+- **L6** (fixed) — `python-inline-net` missed aliased imports and raw sockets.
+- **L7** (fixed, with J) — No `GIT_CONFIG_GLOBAL` isolation.
+- **L8** (fixed) — Temp directories leaked on SIGINT (trap handler added).
+- **L9** (fixed) — `git diff --name-status` without `-z` broke on tab-in-filename.
+
+## Pending reconciliation
+
+- **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
+  pending under the findings/-canonical model. Where they overlap Cohort 1
+  (already fixed), they should be cross-linked to the existing doc rather than
+  duplicated.
+- **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).

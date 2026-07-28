@@ -12,9 +12,9 @@ existing is to stop malicious AUR updates from reaching pacman.
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   design principles, rule classification
 - [docs/findings/](./docs/findings/) — documented findings and implementation
-  assessments from reviews A–S; consult each status rather than stale line numbers
-- [BACKLOG.md](./BACKLOG.md) — prioritized task list with fix order, effort,
-  and status tracking (all 23 findings from the 2026-06-26 review)
+  assessments (catalog: [docs/findings/README.md](./docs/findings/README.md));
+  consult each doc's status rather than stale line numbers. Open work is tracked
+  as GitHub issues (see the catalog's "Tracking" notes), not in a local backlog.
 
 ## Stack
 Bash 5.3, git, `flock` (util-linux), an AUR helper (`yay` or `paru`). `pi` only
@@ -100,8 +100,10 @@ installed by default.
 
 ## Known vulnerability classes (2026-06-26 red-team review)
 
-Findings E–V have implemented fixes/mitigations as recorded in
-[BACKLOG.md](./BACKLOG.md) and [docs/findings/](./docs/findings/). Load-bearing
+Findings A–V have implemented fixes/mitigations as recorded in
+[docs/findings/](./docs/findings/) (catalog:
+[README](./docs/findings/README.md)); W/X/Y remain open (GitHub #24–#26).
+Load-bearing
 regressions to keep pinned: non-ASCII source URLs never become boring; tier-2
 never exits clean; installed confirmation binds to root-owned pacman pkgbase +
 freshness records; git output is config-isolated and failure-checked; PKGBUILD

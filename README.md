@@ -152,8 +152,9 @@ Fetch/clone/diff/state failures are exit 1 and cannot be auto-consented.
 
 Single-user, single-machine. Hardened through multiple independent reviews (see
 commit history and `docs/findings/`). A 2026-06-26 red-team review by three
-delegate models found 23 findings — see [BACKLOG.md](./BACKLOG.md) for the
-prioritized task list. The trust anchor is aur-safe's own
+delegate models found 23 findings — see [docs/findings/](./docs/findings/) for
+the writeups and [docs/findings/README.md](./docs/findings/README.md) for the
+catalog (open work tracked on GitHub issues). The trust anchor is aur-safe's own
 accepted-ref state, created only after first-contact whole-candidate review and
 advanced only after a gate-audited build that pacman's root-owned local DB binds
 to the expected pkgbase and a fresh build/install. The generated wrapper also
@@ -169,5 +170,4 @@ Licensed under the [MIT License](./LICENSE).
 - [docs/threat-model.md](./docs/threat-model.md) — attacker profile, defensive
   principles, rule classification
 - [docs/findings/](./docs/findings/) — documented security findings and fixes
-  from reviews A–S
-- [BACKLOG.md](./BACKLOG.md) — prioritized task list from 2026-06-26 review
+  (catalog: [README](./docs/findings/README.md)); open work tracked on GitHub issues

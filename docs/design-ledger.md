@@ -646,5 +646,5 @@ staged commits.
   codebase + docs — 23 findings across 14 new finding files (E–R) + 9 low-severity
   items. The two critical and six high findings now have implemented mitigations
   or fixes; remaining low-priority work is tracked separately. See
-  [BACKLOG.md](../BACKLOG.md) for current status
-  and [findings/](findings/) for individual write-ups.
+  [findings/README.md](findings/README.md) for the finding catalog (open work is
+  tracked on GitHub issues) and [findings/](findings/) for individual write-ups.
