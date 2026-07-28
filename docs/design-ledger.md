@@ -103,8 +103,11 @@ prints clean while a malicious update lands.
   `aur-safe accept`. `accept` promotes `staged → accepted` **only for manifest
   entries pacman confirms installed at the staged version**.
 - Deliberate new AUR installs use the same lifecycle: under the transaction
-  lock, `audit` stages its fresh-clone SHA/pkgbase, the helper installs, and
-  `accept` creates the first confirmed anchor. Repository packages are skipped.
+  lock, `audit` clones and scans the whole candidate, hard-blocks (exit 1) or
+  demands consent for review hits (exit 2, or exit 0 when consented), then stages
+  the fresh-clone SHA/pkgbase; the helper installs, and `accept` creates the first
+  confirmed anchor only after pacman confirms the install. Repository packages
+  are skipped.
 
 **Why staging (not deferred acceptance or post-build bump):** the accepted ref
 must mean *the commit we audited*, not *what got installed*. There's a TOCTOU
@@ -200,8 +203,9 @@ corruption, new machine) has no `origin/master` to diff and no accepted ref to
 diff against. The entire gate is a `git diff accepted..origin/master`, so v1
 `return 0`'d with a dim "skip" — a malicious update sailed through **ungated**
 while the gate still printed `✓ all clear`. This is strictly weaker than the
-new-install path (`audit`), which at least runs the absolute rules. `check_pkg`
-now routes this case to `missing_cache_gate`, a **two-tier** gate:
+explicit new-install audit (`cmd_audit`), which runs the absolute rules and can
+hard-block or demand consent before staging. `check_pkg` now routes this case to
+`missing_cache_gate`, a **two-tier** gate:
 
 **Tier 1 — baseline recovery (preferred).** Fresh-clone the AUR repo, then walk
 `origin/<branch>` history to find the commit whose `.SRCINFO` matches the
@@ -238,29 +242,30 @@ re-commit at the same version. Whitespace-tolerant version extraction mirrors
 `_installed_matches` (some packages ship space-indented `.SRCINFO`, e.g.
 opera-developer).
 
-**Why every missing-cache success is review (2), not hard-fail (1):** a whole-file scan has no
+**Why every missing-cache success is review (2), not hard-fail (1) and never advisory (0):** a whole-file scan has no
 baseline, so the `install-hook-*` rules fire on any pre-existing legit `.install`
 (ventoy-bin, vscode-bin, …). Hard-failing would block routine updates of common
 packages. Tier 1's recovered diff can still hard-fail newly added payloads, but
 its clean result cannot auto-pass: an attacker can rewrite retained history and
-place a payload inside the reconstructed baseline. Why not advisory (0) like
-`audit`: `audit` gates a deliberate *new* install the
-user just typed; an uncached *update* is an unsolicited delta the user expected
-the gate to have already vouched for. Silent auto-proceed on that path is the
-bug we're fixing.
+place a payload inside the reconstructed baseline. The explicit new-install audit
+(`cmd_audit`) is the parallel case: it hard-blocks on dangerous patterns and
+only proceeds to stage after a clean scan or explicit consent for review hits,
+because a first-contact install is the moment the user chooses to trust the
+package. An uncached *update* is an unsolicited delta the user expected the
+gate to have already vouched for; silent auto-proceed on either path is the bug
+we're fixing.
 
 **Staging preserves the finding-1.2 TOCTOU guarantee on both tiers.** `_clone_aur`
 captures the gate-time tip (`origin/<branch>` SHA + origin URL) into `SCAN_SHA`
-before any cleanup. On a clean or review-hit scan (NOT hard-fail, NOT
-clone-failure), `_stage_scan_if_gating` writes `staged/<pkgbase>` + manifest
-entry, exactly as the cached path's `_stage_if_gating` does. So `accept` promotes
-the **audited** commit X (the origin tip at clone time), not whatever the helper
-later builds — and NOT the baseline commit (which is only the diff base, never a
-trust anchor). The makepkg guard additionally rejects a helper checkout X′ that
-does not equal staged X. Without staging, no reviewed commit identity could be
-bound to the installed package or used to create the first anchor. Hard-fail
-exits do NOT stage: a blocked update never reaches the helper, so there's nothing
-to accept. Staging keys by **pkgbase**, derived from the clone dir name
+before any cleanup. Callers stage only on a clean scan or, for `cmd_audit`, after
+the user explicitly consents to a review hit; hard-fail and clone-failure paths
+never stage. `_stage_scan_if_gating` writes `staged/<pkgbase>` + manifest entry,
+exactly as the cached path's `_stage_if_gating` does. So `accept` promotes the
+**audited** commit X (the origin tip at clone time), not whatever the helper later
+builds — and NOT the baseline commit (which is only the diff base, never a trust
+anchor). The makepkg guard additionally rejects a helper checkout X′ that does not
+equal staged X. Without staging, no reviewed commit identity could be bound to the
+installed package or used to create the first anchor. Staging keys by **pkgbase**, derived from the clone dir name
 (`${dir##*/}`, mirroring the cached path). `_clone_aur` resolves pkgname→pkgbase
 via AUR RPC before cloning (Finding N fix), so split packages stage and anchor
 correctly. Flag files stay keyed by pkgname for display (`explain <pkgname>`).
@@ -548,10 +553,10 @@ These are the real pressure points where future work should stay focused:
    terminal scripts). 3+ would reduce FPs but miss short obfuscated strings.
    Is 2 right?
 
-3. **New-install findings remain advisory.** No baseline exists, so blocking on
-   every absolute npm/build-tool match would reject legitimate packages. The
-   wrapper now stages the audited SHA and confirms the first anchor after
-   install, but findings still print and proceed. Should policy become blocking?
+3. ~~**New-install findings remain advisory.**~~ Resolved by Finding gh4:
+   explicit new installs now hard-block on absolute hard-rule hits, require
+   consent for review-rule hits, and stage only clean or consented candidates.
+   Whole-candidate evidence is retained for both blocked and review outcomes.
 
 4. **Wrapper defines both `yay()` and `paru()`.** Resolved cross-shell. Dispatch
    classification is in selftest; the full lock/audit-or-gate/helper/accept
@@ -584,11 +589,11 @@ remove drift; it should not broaden the trust path casually.
 4. ~~**Decide the missing-cache history-rewrite policy.**~~ ✅ mandatory review
    implemented 2026-07-23. Retained history improves delta precision but never
    earns exit 0; the whole candidate is stashed for consent.
-5. **Measure before changing new-install gating or thresholds.** Keep `audit`
-   advisory until real AUR samples quantify false positives. Any move toward
-   blocking new installs, changing the hex/octal threshold, or reclassifying
-   package managers needs fixtures that prove the false-positive cost is worth
-   the added protection.
+5. ~~**Make explicit new-install audit a real gate.**~~ ✅ done by Finding gh4:
+   hard hits block, review hits require consent, and neither path stages before
+   its gate condition is satisfied. Future changes to the hard/review boundary,
+   hex/octal threshold, or package-manager classification still need fixtures
+   that prove the false-positive cost is worth the added protection.
 
 Definition of done for trust-path changes: update this ledger, link code
 comments to the relevant section/finding, run `bash -n aur-safe`,

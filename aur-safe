@@ -1416,10 +1416,10 @@ _clone_aur() {
 # surfaces (PKGBUILD+*.install+*.sh): nested patch syntax would false-positive.
 # The evidence is wider by design and includes textual patches/diffs (Finding T).
 # Returns 1 if package surfaces or whole-candidate evidence cannot be read, else
-# 0. `audit` remains advisory regardless of either result; the missing-cache
-# tier-2 caller uses both rule sets as review-level signals. Skipping
-# REVIEW_PATTERNS there made a force-pushed/baseline-less `pip install`
-# candidate silently clean (Finding G).
+# 0. `cmd_audit` treats hard hits as blockers and review hits as consentable;
+# the missing-cache tier-2 caller uses both rule sets as review-level signals
+# because it has no diff baseline. Skipping REVIEW_PATTERNS there made a
+# force-pushed/baseline-less `pip install` candidate silently clean (Finding G).
 _scan_whole_pkg() {
   local dir="$1" content candidate empty_tree review_content
   local -a files
@@ -1465,8 +1465,8 @@ _scan_whole_pkg() {
   return 0
 }
 
-# Clone + whole-file rule scan + cleanup. Thin wrapper for `audit`
-# (advisory new installs) and the missing-cache FALLBACK tier (no baseline
+# Clone + whole-file rule scan + cleanup. Thin wrapper for `cmd_audit`
+# (explicit new-install gate) and the missing-cache FALLBACK tier (no baseline
 # commit found). Sets SCAN_HITS/SCAN_CONTENT (from _scan_whole_pkg) and
 # SCAN_SHA/SCAN_URL (from _clone_aur). Returns 0 on success regardless of hits;
 # non-zero if clone/read failed (caller decides exit-code policy).
@@ -2454,6 +2454,12 @@ cmd_explain() {
     baseline-recovery-whole-review)
       context_note="The missing-cache gate reconstructed an attacker-retained history baseline; this is the whole candidate, required for human review."
       ;;
+    audit-hard)
+      context_note="The explicit-install audit hard-blocked this whole candidate before staging."
+      ;;
+    audit-review)
+      context_note="The explicit-install audit scanned the whole candidate and stashed it for human review before staging."
+      ;;
     *)
       context_note="The deterministic gate stashed this context for review."
       ;;
@@ -2625,19 +2631,45 @@ cmd_makepkg() {
 }
 
 cmd_audit() {
-  # Advisory scan of a package not yet in the cache (new install candidate).
-  # Applies absolute rules to PKGBUILD + .install + .sh (the sourced-script
-  # surface). Does not block (exit 0); prints findings for human review.
+  # Gate for an explicit new install (no cached baseline). Clones fresh,
+  # scans PKGBUILD + .install + .sh against hard + review rules, stashes
+  # whole-candidate evidence for `explain`, and requires interactive consent
+  # for review hits. Returns: 0 clean/consented, 1 hard-block or clone/read
+  # failure, 2 review needed (non-interactive without AUR_SAFE_ALLOW_REVIEW=1).
+  # Stages only on clean or consented review so the trust anchor can advance
+  # only for an audited install. See design-ledger "Missing-cache path".
   [[ $# -lt 1 ]] && die "usage: aur-safe audit <pkg>"
-  local pkg="$1"
+  local pkg="$1" review_rc
   _valid_pkg_name "$pkg" || die "invalid package name: $pkg"
-  log "$(c_bold "findings for $pkg (advisory, non-blocking)")"
+  log "$(c_bold "findings for $pkg")"
   if ! scan_clone "$pkg"; then
-    die "could not clone or read $pkg (does it exist on AUR?)"
+    log "  $(c_red "BLOCK") $pkg — could not clone or read package"
+    return 1
   fi
   if [[ -n "${AUR_SAFE_STAGING:-}" ]]; then
     _valid_pkg_name "${SCAN_PKGBASE:-}" \
       || { log "$(c_red "BLOCK") audit could not resolve a safe pkgbase"; return 1; }
+  fi
+  if [[ -n "${SCAN_CONTENT:-}" ]] && (( SCAN_HITS || SCAN_REVIEW_HITS )); then
+    local audit_context=audit-review
+    (( SCAN_HITS )) && audit_context=audit-hard
+    if ! _stash_content "$pkg" "$audit_context" "$SCAN_CONTENT"; then
+      log "  $(c_red "BLOCK") $pkg — could not persist review evidence"
+      return 1
+    fi
+  fi
+  if (( SCAN_HITS )); then
+    log "  $(c_red "BLOCK") $pkg — hard-rule hit(s); install aborted"
+    return 1
+  fi
+  if (( SCAN_REVIEW_HITS )); then
+    log "  $(c_yellow "review") $pkg — review-rule hit(s); consent required"
+    review_prompt "$pkg"; review_rc=$?
+    if (( review_rc != 0 )); then
+      return $review_rc
+    fi
+  fi
+  if [[ -n "${AUR_SAFE_STAGING:-}" ]]; then
     if ! _stage_scan_if_gating "$SCAN_PKGBASE"; then
       log "$(c_red "BLOCK") audit could not persist staged state"
       return 1
@@ -2649,8 +2681,8 @@ cmd_audit() {
 cmd_wrapper() {
   cat <<'EOF'
 # --- aur-safe wrapper (cross-shell: bash + zsh) ----------------------------
-# Gates `yay -Syu` / `paru -Syu` before they reach pacman, and advisory-audits
-# new installs (`-S <pkg>`). Everything else (-Q, -R, repo -S) passes through.
+# Gates `yay -Syu` / `paru -Syu` before they reach pacman, and gates new installs
+# (`-S <pkg>`). Everything else (-Q, -R, repo -S) passes through.
 # Written POSIX-ish so it loads under both bash and zsh (no bash-only array
 # slicing). Place in a file sourced by both shells, e.g. ~/.shrc.
 #
@@ -3417,6 +3449,47 @@ cmd_selftest() {
   fi
   rm -f "$STAGED_DIR/clean-pkg"
   : >"$MANIFEST_FILE"
+
+  # cmd_audit is a gate, not an advisory scan, for explicit new installs.
+  ta "audit-hard-blocks" 1 cmd_audit evil-pkg
+  if [ ! -f "$STAGED_DIR/evil-pkg" ] && ! grep -qx evil-pkg "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") audit-hard-no-stage"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-hard-no-stage"; fail=$((fail+1))
+  fi
+  if [ "$(cat "$STATE_DIR/flag.evil-pkg.context" 2>/dev/null)" = audit-hard ] \
+      && grep -Fq 'npm install payload' "$STATE_DIR/flag.evil-pkg.diff"; then
+    log "  $(c_green "PASS") audit-hard-stashes-evidence"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-hard-stashes-evidence"; fail=$((fail+1))
+  fi
+  : >"$MANIFEST_FILE"
+  rm -f "$STAGED_DIR/evil-pkg"
+
+  ta "audit-review-returns-2" 2 cmd_audit review-pkg
+  if [ ! -f "$STAGED_DIR/review-pkg" ] && ! grep -qx review-pkg "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") audit-review-no-stage-without-consent"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-review-no-stage-without-consent"; fail=$((fail+1))
+  fi
+  if [ "$(cat "$STATE_DIR/flag.review-pkg.context" 2>/dev/null)" = audit-review ] \
+      && grep -Fq 'pip install requests' "$STATE_DIR/flag.review-pkg.diff"; then
+    log "  $(c_green "PASS") audit-review-stashes-evidence"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-review-stashes-evidence"; fail=$((fail+1))
+  fi
+  : >"$MANIFEST_FILE"
+  rm -f "$STAGED_DIR/review-pkg"
+
+  AUR_SAFE_ALLOW_REVIEW=1 ta "audit-review-allow-stages" 0 cmd_audit review-pkg
+  if [ -f "$STAGED_DIR/review-pkg" ] && grep -qx review-pkg "$MANIFEST_FILE"; then
+    log "  $(c_green "PASS") audit-review-allow-stages-pkgbase"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") audit-review-allow-stages-pkgbase"; fail=$((fail+1))
+  fi
+  : >"$MANIFEST_FILE"
+  rm -f "$STAGED_DIR/review-pkg"
+  unset AUR_SAFE_ALLOW_REVIEW
 
   ta "uncached-clean-requires-review"  2 check_pkg clean-pkg
   ta "uncached-evil-returns-review"    2 check_pkg evil-pkg
@@ -5029,7 +5102,7 @@ aur-safe — deterministic gate for AUR updates
 usage:
   aur-safe gate                gate all pending AUR updates
   aur-safe check <pkg> ...     gate specific cached package(s)
-  aur-safe audit <pkg>         advisory scan of an uncached/new package
+  aur-safe audit <pkg>         gate an uncached/new package (0=clean/consented, 1=block, 2=review)
   aur-safe scan                scan installed pkgs for payload patterns
   aur-safe explain [pkg]       LLM second-opinion on last flagged diff
   aur-safe accept              promote staged refs (called by the wrapper)
