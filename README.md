@@ -148,6 +148,36 @@ Wrapper-level (set in your shell rc):
 `AUR_SAFE_ALLOW_REVIEW=1` applies only after a real candidate was audited.
 Fetch/clone/diff/state failures are exit 1 and cannot be auto-consented.
 
+## Maintainer issue loop
+
+`./ralph-loop` is a bounded, sequential GitHub-issue relay for this repository.
+It snapshots open `security` issues in severity order (`critical` → `high` →
+`medium` → `low`, then issue number), gives one issue to SWE-1.7, runs the full
+deterministic gate, and asks a fresh GLM-5.2 session to review the complete
+branch diff. Substantive review findings return to a fresh SWE-1.7 session; an
+exact approval plus green checks fast-forwards `main`, pushes, writes the durable
+finding pointer, and closes the issue.
+
+```sh
+./ralph-loop list       # inspect the ranked queue; no mutation
+./ralph-loop run 1      # process one issue
+./ralph-loop run        # process the captured, finite queue
+```
+
+The loop requires `devin`, `gh`, `git`, `jq`, `bwrap`, `flock`, and
+`shellcheck`, starts only from a clean `main` equal to `origin/main`, and never
+rebases, force-pushes, resets, or discards interrupted work. Agent processes run
+in a bubblewrap mount namespace with the maintainer's home, SSH agent, desktop
+keyring, and GitHub credentials hidden; the reviewer sees the worktree
+read-only. Candidate-controlled verification runs separately with a read-only
+worktree, empty environment, and no network. Runtime context and transcripts
+live in ignored `.ralph-loop/`.
+Review/fix passes are capped; configure the caps and models with the `RALPH_*`
+variables shown by `./ralph-loop --help`.
+
+This command directly pushes approved commits and closes issues. `run` is the
+explicit publication boundary; use `list` when you only want to inspect order.
+
 ## Status
 
 Single-user, single-machine. Hardened through multiple independent reviews (see

