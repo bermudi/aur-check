@@ -426,7 +426,11 @@ maintainer_domains() {
     | sed 's/.*@//' | tr '[:upper:]' '[:lower:]' | sort -u
 }
 
-# Hostnames in source=() / source_*() arrays at a given ref (lowercased, unique).
+# Hosts/authorities in source=() / source_*() arrays at a given ref
+# (lowercased, unique). This is the host-drift signal, not the full source
+# policy. It now strips userinfo and handles bracketed IPv6 literals so that
+# an https://example.com@evil.example/ URL is treated as evil.example, not
+# example.com (Finding gh3).
 source_domains() {
   local ref="$1" dir="$2"
   # Track multi-line source=() / source_x86_64=() array blocks: set flag on the
@@ -434,8 +438,8 @@ source_domains() {
   # grep misses URLs on continuation lines (the host-swap attack surface).
   git -C "$dir" show "${ref}:PKGBUILD" 2>/dev/null \
     | awk '/^[[:space:]]*source(_[[:alnum:]_]+)?=\(/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
-    | grep -aoE '://[a-zA-Z0-9._-]+' \
-    | sed 's#^://##' | tr '[:upper:]' '[:lower:]' | sort -u
+    | grep -aoE '://([^@]+@)?(\[[0-9A-Fa-f:]+\]|[a-zA-Z0-9._-]+)' \
+    | sed -E 's#^://([^@]+@)?##' | tr '[:upper:]' '[:lower:]' | sort -u
 }
 
 # Finding E guard — IDN homograph in source=() URLs. A non-ASCII byte
@@ -513,6 +517,83 @@ _pkgbuild_line_has_plain_context() {
 # process substitution, redirections, operators, array subscripts, escapes, and
 # text after the real unquoted closer are all rejected. Never source PKGBUILD to
 # answer this question.
+# Fail-closed source URI check for a single source line or source array
+# member. A source value is safe only if it is an https:// URL (or a
+# filename::https:// alias) with a dotted, non-IPv4 host, no userinfo (@),
+# no port, no IPv6 literal, no query/fragment (# or ?), and no VCS/alt
+# scheme prefix. This is the fail-closed enforcement for the source policy
+# described in the design ledger and Finding gh3.
+_source_line_values_are_safe() {
+  local line="$1"
+  awk '
+    BEGIN { SQ=sprintf("%c",39) }
+    function safe(v,    p, before, q, i, url, h, host) {
+      # Strip surrounding matching quotes (single or double).
+      if ((substr(v,1,1)=="\"" && substr(v,length(v),1)=="\"") ||
+          (substr(v,1,1)==SQ   && substr(v,length(v),1)==SQ)) {
+        v=substr(v,2,length(v)-2)
+      }
+      if (v == "") return 1
+      # Extract the URL from a filename::URL alias. The alias is the last
+      # "::" that appears before the first "://" in the token.
+      p = index(v, "://")
+      if (p > 1) {
+        before = substr(v, 1, p - 1)
+        q = 0
+        for (i=1; i<=length(before)-1; i++) {
+          if (substr(before, i, 2) == "::") q = i
+        }
+        if (q > 0) url = substr(v, q + 2)
+        else url = v
+      } else {
+        url = v
+      }
+      # Fail-closed: authority/transport anomalies are not safe.
+      if (url ~ /[\[\]@?#]/) return 0
+      # Only https is trusted. http, ftp, file, data, git+https, scp, etc.
+      # are all review (and many are local or VCS transport changes).
+      if (url !~ /^https:\/\//) return 0
+      # Require a dotted hostname (at least one dot, no leading/trailing
+      # hyphen in a label), followed by a path or end-of-string. A colon
+      # before the path is a port and fails; a variable before the host
+      # (e.g. https://${_evil}/...) also fails.
+      if (url !~ /^https:\/\/([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\/|$)/) return 0
+      # Reject all-numeric dotted hosts (IPv4 literals like 127.0.0.1).
+      h = substr(url, 9)
+      p = index(h, "/")
+      if (p > 0) host = substr(h, 1, p - 1)
+      else host = h
+      if (host ~ /^[0-9.]+$/) return 0
+      return 1
+    }
+    {
+      s = $0
+      sub(/^[[:space:]]*source(_[[:alnum:]_]+)?[[:space:]]*=[[:space:]]*(\()?/, "", s)
+      sub(/\)[[:space:]]*(#.*)?$/, "", s)
+      state = 0; token = ""
+      for (i=1; i<=length(s); i++) {
+        c = substr(s, i, 1)
+        if (state == 0) {
+          if (c == " " || c == "\t") {
+            if (token != "" && token != ")") { if (!safe(token)) exit 1 }
+            token = ""
+          } else if (c == SQ) { state = 1; token = token c }
+          else if (c == "\"") { state = 2; token = token c }
+          else { token = token c }
+        } else if (state == 1) {
+          token = token c
+          if (c == SQ) { if (!safe(token)) exit 1; state = 0; token = "" }
+        } else {
+          token = token c
+          if (c == "\"") { if (!safe(token)) exit 1; state = 0; token = "" }
+        }
+      }
+      if (token != "" && token != ")") { if (!safe(token)) exit 1 }
+      exit 0
+    }
+  ' <<<"$line"
+}
+
 _pkgbuild_safe_array_literal_line() {
   local line="$1" kind="$2" rhs
   case "$kind" in
@@ -525,7 +606,7 @@ _pkgbuild_safe_array_literal_line() {
     *) return 1 ;;
   esac
   rhs="${line#*=}"
-  awk -v kind="$kind" '
+  if ! awk -v kind="$kind" '
     function simple_expansion(s, pos,    tail) {
       if (kind != "source") return 0
       tail=substr(s,pos)
@@ -570,7 +651,15 @@ _pkgbuild_safe_array_literal_line() {
       exit 1
     }
     BEGIN { SQ=sprintf("%c",39) }
-  ' <<<"$rhs"
+  ' <<<"$rhs"; then
+    return 1
+  fi
+  # For source arrays, the lexical proof is necessary but not sufficient:
+  # the source values themselves must pass the fail-closed URI check.
+  if [[ "$kind" == "source" ]] && ! _source_line_values_are_safe "$line"; then
+    return 1
+  fi
+  return 0
 }
 
 _pkgbuild_checksum_literal_line() {
@@ -588,6 +677,11 @@ _boring_srcinfo_added_line_class() {
   [[ "$line" =~ ^[[:space:]]*$ ]] && return 0
   grep -Eq '^[[:space:]]*#' <<<"$line" 2>/dev/null && return 0
   if grep -Eq '^[[:space:]]*(pkgver|pkgrel|epoch|source(_[[:alnum:]_]+)?|[[:alnum:]]+sums(_[[:alnum:]_]+)?)[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
+    # Source values in .SRCINFO are attacker-authored and must pass the same
+    # fail-closed URI policy as PKGBUILD source=() members (Finding gh3).
+    if grep -Eq '^[[:space:]]*source(_[[:alnum:]_]+)?[[:space:]]+=[[:space:]]+' <<<"$line" 2>/dev/null; then
+      _source_line_values_are_safe "$line" || return 2
+    fi
     return 0
   fi
   if grep -Eq '^[[:space:]]*(pkgdesc|url|arch|license|groups|optdepends|noextract)[[:space:]]+=[[:space:]]+.+' <<<"$line" 2>/dev/null; then
@@ -3862,6 +3956,11 @@ cmd_selftest() {
   local _sum1 _sum2 _old_src _new_src _old_basic _new_basic _old_multi_sum_pkg _new_multi_sum_pkg _old_space_src _new_tab_src
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
   local _quoted_source_old_pkg _quoted_source_new_pkg _quoted_source_old_src _quoted_source_new_src
+  local _src_userinfo_new_pkg _src_userinfo_new_src _src_http_new_pkg _src_http_new_src
+  local _src_local_new_pkg _src_local_new_src _src_scp_new_pkg _src_scp_new_src
+  local _src_ipv6_new_pkg _src_ipv6_new_src _src_vcs_new_pkg _src_vcs_new_src
+  local _src_port_new_pkg _src_port_new_src _src_varhost_new_pkg _src_varhost_new_src
+  local _src_alias_old_pkg _src_alias_new_pkg _src_alias_old_src _src_alias_new_src
   local _old_opt_pkg _new_opt_pkg _new_opt_expansion_pkg _new_opt_sed_pkg _old_opt_src _new_opt_src
   local _old_dep_pkg _old_stray_dep_pkg _new_repo_dep_pkg _new_aur_dep_pkg _new_expansion_dep_pkg _new_stray_dep_pkg
   local _old_dup_dep_pkg _new_dup_dep_pkg _new_inline_stray_dep_pkg
@@ -3912,6 +4011,33 @@ cmd_selftest() {
   printf -v _quoted_source_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=(\n  "foo-1.1.tar.gz"\n)\nsha256sums=(%s)' "$_sum2"
   _quoted_source_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = foo-1.0.tar.gz\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
   _quoted_source_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.1\n\tpkgrel = 1\n\tsource = foo-1.1.tar.gz\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+
+  # Finding gh3 regression fixtures: source authority/transport failures.
+  # Each of these would have auto-cleared (boring) before the fix.
+  printf -v _src_userinfo_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("https://example.com@evil.example/foo.tar")\nsha256sums=(%s)' "$_sum2"
+  _src_userinfo_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com@evil.example/foo.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+  printf -v _src_http_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("http://example.com/foo.tar")\nsha256sums=(%s)' "$_sum2"
+  _src_http_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = http://example.com/foo.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+  printf -v _src_local_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=(/dev/null)\nsha256sums=(e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855)'
+  _src_local_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = /dev/null\n\tsha256sums = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\npkgname = cls-pkg'
+  printf -v _src_scp_new_pkg "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=('git@evil.example:repo.git')\nsha256sums=(SKIP)"
+  _src_scp_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = git@evil.example:repo.git\n\tsha256sums = SKIP\n\npkgname = cls-pkg'
+  printf -v _src_ipv6_new_pkg "pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=('https://[::1]/payload.tar.gz')\nsha256sums=(%s)" "$_sum2"
+  _src_ipv6_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://[::1]/payload.tar.gz\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+  printf -v _src_vcs_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("git+https://example.com/foo.git#commit=deadbeef")\nsha256sums=(SKIP)'
+  _src_vcs_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = git+https://example.com/foo.git#commit=deadbeef\n\tsha256sums = SKIP\n\npkgname = cls-pkg'
+  printf -v _src_port_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("https://example.com:8443/foo.tar")\nsha256sums=(%s)' "$_sum2"
+  _src_port_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com:8443/foo.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+  # Variable in the host position (not the path) is not a proven safe source.
+  printf -v _src_varhost_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\n_evil=1.2.3.4\nsource=("https://${_evil}/foo.tar")\nsha256sums=(%s)' "$_sum2"
+  _src_varhost_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://1.2.3.4/foo.tar\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+
+  # Negative/control: filename::https alias and path-only version bumps stay safe.
+  printf -v _src_alias_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("foo-1.0.tar.gz::https://example.com/foo-1.0.tar.gz")\nsha256sums=(%s)' "$_sum1"
+  printf -v _src_alias_new_pkg 'pkgname=cls-pkg\npkgver=2.0\npkgrel=1\nsource=("foo-1.1.tar.gz::https://example.com/foo-1.1.tar.gz")\nsha256sums=(%s)' "$_sum2"
+  _src_alias_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = foo-1.0.tar.gz::https://example.com/foo-1.0.tar.gz\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _src_alias_new_src=$'pkgbase = cls-pkg\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = foo-1.1.tar.gz::https://example.com/foo-1.1.tar.gz\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+
   printf -v _old_opt_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfs-3g: NTFS partition support'\n)" "$_sum1"
   printf -v _new_opt_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(%s)\noptdepends=(\n  'ntfsprogs: NTFS partition support'\n)" "$_sum1"
   printf -v _new_opt_expansion_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\noptdepends=(\n  "$(printf ntfsprogs): NTFS partition support"\n)' "$_sum1"
@@ -4530,9 +4656,44 @@ cmd_selftest() {
     "$_host_src"
   local _edge_dir="$_CLASS_DIR" _edge_base="$_CLASS_BASE" _edge_tip="$_CLASS_TIP" _edge_pkg="cls-multiline-source"
 
-  tc_class quoted-source-filename boring_edge 2 \
+  # A quoted relative filename that is not a filename::URL alias is a local
+  # source path; Finding gh3 makes this review, not boring_edge.
+  tc_class quoted-source-filename review 2 \
     "$_quoted_source_old_pkg" "$_quoted_source_new_pkg" \
     "$_quoted_source_old_src" "$_quoted_source_new_src"
+
+  # Finding gh3 regression coverage: the six PoC classes plus port and
+  # host-position variables. All must come back as review.
+  tc_class source-userinfo-bypass review 2 \
+    "$_old_basic" "$_src_userinfo_new_pkg" \
+    "$_old_src" "$_src_userinfo_new_src"
+  tc_class source-scheme-downgrade review 2 \
+    "$_old_basic" "$_src_http_new_pkg" \
+    "$_old_src" "$_src_http_new_src"
+  tc_class source-local-file review 2 \
+    "$_old_basic" "$_src_local_new_pkg" \
+    "$_old_src" "$_src_local_new_src"
+  tc_class source-scp-like review 2 \
+    "$_old_basic" "$_src_scp_new_pkg" \
+    "$_old_src" "$_src_scp_new_src"
+  tc_class source-ipv6-literal review 2 \
+    "$_old_basic" "$_src_ipv6_new_pkg" \
+    "$_old_src" "$_src_ipv6_new_src"
+  tc_class source-vcs-plus-skip review 2 \
+    "$_old_basic" "$_src_vcs_new_pkg" \
+    "$_old_src" "$_src_vcs_new_src"
+  tc_class source-https-port review 2 \
+    "$_old_basic" "$_src_port_new_pkg" \
+    "$_old_src" "$_src_port_new_src"
+  tc_class source-variable-in-host review 2 \
+    "$_old_basic" "$_src_varhost_new_pkg" \
+    "$_old_src" "$_src_varhost_new_src"
+
+  # Negative/control coverage: filename::https aliases and path-only version
+  # bumps must remain safe so the fix does not create an availability regression.
+  tc_class source-filename-alias-boring boring 0 \
+    "$_src_alias_old_pkg" "$_src_alias_new_pkg" \
+    "$_src_alias_old_src" "$_src_alias_new_src"
 
   tc_class build-logic review 2 \
     "$_old_basic" \

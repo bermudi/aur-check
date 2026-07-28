@@ -182,6 +182,14 @@ A version bump on the *same* domain (kernel.org → kernel.org) must NOT fire.
 Only NEW domains should. A regex can't express "set membership" cleanly;
 `comm -13` does. Same logic for `source=()` host drift.
 
+The host-drift signal `source_domains()` now strips `user@` authority and
+handles bracketed IPv6 literals, but it remains only a *domain* signal. The
+fail-closed source policy is enforced per added source line by
+`_source_line_values_are_safe`: a `source=()` or `.SRCINFO` `source = ...`
+value must be an `https://` URL (or `filename::https://` alias) with a dotted,
+non-IPv4 host, no userinfo, no port, no query/fragment, and no VCS or other
+scheme prefix (Finding gh3).
+
 ### `.patch` / `.diff` excluded from diff scanning
 Legitimate C/C++ patches contain hex/octal escapes and `eval`-like patterns.
 Including them would false-positive on most C/C++ AUR packages.
@@ -325,9 +333,12 @@ AUR package needs it — every added name re-opens the surface. **Dotted-decimal
 version build-vars** (`_nwjs_ffmpeg_version=0.113.0`, `_electron_version=v25.3.0`
 — optional `v` prefix + quotes, any `_-prefixed var name`) are the same
 inert-metadata class and are boring: the RHS never executes, and the version only
-selects a path in `source=()` whose artifact is verified by `*sums=()` (host drift
-/ IDN homograph are caught by `source_domains()` + the Finding E guard, run before
-the per-line loop). Unlike `_commit`, the var-name is NOT restricted here — a
+selects a path in a safe `source=()` URL: the scheme, host, port, and authority
+must be unchanged, and only the path may vary. `_source_line_values_are_safe`
+enforces that the source value is `https://` (or a `filename::https://` alias)
+with a dotted, non-IPv4 host, no userinfo, no port, no query/fragment, and no
+VCS/other scheme prefix. Host drift and IDN homograph are additionally caught by
+`source_domains()` + the Finding E guard, run before the per-line loop. Unlike `_commit`, the var-name is NOT restricted here — a
 dotted decimal cannot be a PGP fingerprint (hex) or a checksum (hex/`SKIP`), so
 the RHS **format** is the security boundary, not the name; the validpgpkeys-
 indirection that forced the `_commit` allowlist has no analogue. This matters
@@ -365,9 +376,11 @@ single-quoted `PKGBUILD optdepends=(...)` entries and standalone quoted/bare
 `SKIP`/hex tokens — the per-line shape inside a PKGBUILD multiline
 `sha256sums=(...)` array, distinct from the `.SRCINFO` `sha256sums = <hex>`
 form already handled above — are boring metadata; non-literal PKGBUILD shell
-expansion inside optdepends stays review. Literal quoted local filenames inside
-a proven multiline `source=()` array are `boring_edge`; a global filename regex
-would be unsafe because a quoted top-level token is executable shell. The
+expansion inside optdepends stays review. Local filenames inside a `source=()`
+array are not proven safe sources: they are `review` unless the line is a
+`filename::https://` alias or is unchanged from an already-accepted baseline. A
+global filename regex would be unsafe because a quoted top-level token is
+executable shell. The
 optdepends/checksum/dependency/source trackers share one
 `_pkgbuild_array_member_added_line` state machine over the complete candidate
 PKGBUILD. Parsing the candidate avoids old/new hunk ambiguity: a `@@` label can
@@ -595,15 +608,18 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: **249/249**. Coverage includes hard/review rule variants; wrapper
+- `selftest`: **292/292**. Coverage includes hard/review rule variants; wrapper
   dispatch, update-query failure, and gate-through-accept locking; atomic
   accepted/staged state; pacman local-DB pkgbase/build/install binding (foreign
   `.SRCINFO` rejection, stale-build rejection, split packages, epoch zero);
   missing-cache baseline recovery and always-review tier 2; git/diff failure
   propagation; package-name/RPC path validation; shared multiline-array context
   (including the `depends=()` latch regression); quoted source filenames;
-  homographs; classifier/LLM boundaries; and gate-time SHA staging. Fixtures use
-  local `file://` repos and isolated state. Run with `aur-safe selftest`.
+  homographs; classifier/LLM boundaries; gate-time SHA staging; and
+  source-authority/transport regression fixtures (userinfo, http downgrade,
+  local paths, scp-like, IPv6, VCS+SKIP, ports, host-position variables,
+  filename::https aliases). Fixtures use local `file://` repos and isolated state.
+  Run with `aur-safe selftest`.
 - Accepted-ref lifecycle is covered end-to-end: no implicit HEAD seed, atomic
   stage/accept, manifest,
   expected-pkgbase/version/build/install confirmation, and promotion. Malformed

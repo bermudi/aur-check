@@ -56,6 +56,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 
 ### Critical
 - ✓ **gh2** — Added-line extractor drops lines beginning with `++` (C1, #2) → [doc](gh2-added-line-extractor-drops-plusplus-lines.md) · [#2](https://github.com/bermudi/aur-check/issues/2)
+- ✓ **gh3** — Source URI validation fail-open (userinfo, scheme downgrade, local paths, VCS/IPv6/port) → [doc](gh3-source-uri-fail-open.md) · [#3](https://github.com/bermudi/aur-check/issues/3)
 - ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
 - △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
 - ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
@@ -75,7 +76,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
 - ✓ **N** — Split-package missing-cache clone failure (no scan, wrong staging key) → [doc](N-split-pkg-missing-cache.md)
 - ✓ **O** — `find_pkg_dir` slow path doesn't verify `.git` exists → [doc](O-find-pkg-dir-no-git.md)
-- ✓ **P** — Quoted PKGBUILD `source=()` entries false-positive as review → [doc](P-quoted-source-filenames-fp.md)
+- △ **P** — Quoted PKGBUILD `source=()` entries reclassified as true-positive under gh3 → [doc](P-quoted-source-filenames-fp.md)
 - ✓ **Q** — `files_with_status` silently ignores git diff failures → [doc](Q-files-with-status-swallows-rc.md)
 - ✓ **R** — Package name regex allows `.`, `..`, `.git` → [doc](R-pkg-name-path-traversal.md)
 - ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
