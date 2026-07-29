@@ -2,10 +2,11 @@
 
 **Source:** follow-up red-team review (post A–V, 2026-07-27)
 **Tracking:** [#26 (L6)](https://github.com/bermudi/aur-check/issues/26)
-**Status:** open
+**Status:** fixed
 **Severity:** low
-**Lines:** `source_domains()` awk anchor at aur-safe:422. Same pattern family at
-aur-safe:509, 758, 760, 770, 785 (contextual array helpers).
+**Lines:** `source_domains()` awk anchor at aur-safe:608. Same pattern family at
+aur-safe:772, 1034, 1036, 1046, 1061 (contextual array helpers); only the
+drift extractor was required for closure.
 
 ## What happens
 
@@ -16,7 +17,7 @@ aur-safe:509, 758, 760, 770, 785 (contextual array helpers).
 ```bash
 git -C "$dir" show "${ref}:PKGBUILD" 2>/dev/null \
   | awk '/^[[:space:]]*source(_[[:alnum:]_]+)?=\(/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
-  | grep -aoE '://[a-zA-Z0-9._-]+' | ...
+  | grep -aoE '://([^@]+@)?(\[[0-9A-Fa-f:]+\]|[a-zA-Z0-9._-]+)' | ...
 ```
 
 An appended `source+=("https://evil-new-host.xyz/x")` with a brand-new host is
@@ -37,7 +38,7 @@ Two independent safety nets hold, so no payload reaches pacman through this:
 1. The added `source+=(...)` line fails the boring source grammar and routes to
    `review` via the general non-boring fallthrough — the reviewer still sees the
    line, host included.
-2. `_source_line_nonascii()` shape-2 (aur-safe:462) matches **any** added line
+2. `_source_line_nonascii()` shape-2 (aur-safe:648) matches **any** added line
    containing `://` with a byte ≥ 0x80, so IDN homographs on an appended source
    URL are still forced to review regardless of the `+=` syntax.
 
@@ -50,20 +51,29 @@ the reviewer consents to; it just isn't singled out.
 Add the optional `+` to the drift anchor (the load-bearing one for this finding):
 
 ```awk
-/^[[:space:]]*source(_[[:alnum:]_]+)?\+?=\(/ { in_src=1 }
+/^[[:space:]]*source(_[[:alnum:]_]+)?[+]?=\(/ { in_src=1 }
 ```
 
-The same `+?` can be applied to the contextual array helpers at aur-safe:509,
-758, 760, 770, 785 for consistency and to enable boring-edge classification of
-appended-array members, but those are not required to close this finding — they
-currently (and correctly) leave `source+=(...)` as review.
+The bracket-expression form `[+]?` is portable across awk, `grep -E`, and Bash
+`[[ =~ ]]`. The contextual array helpers (aur-safe:772, 1034, 1036, 1046, 1061)
+still match only the non-append `source=(` form; that is sufficient because the
+added `source+=(...)` line is already caught as non-boring and the drift signal
+now fires before the per-line classifier runs.
 
 ## Verification
 
-- Selftest fixture (proposed name from the review): `h2-source-append-new-host`
-  — a `source+=("https://evil-new-host.xyz/x")` append must list
-  `evil-new-host.xyz` in `source_domains` on the tip (currently omitted).
-- Confirm no false positive: a `source+=` append reusing an already-present host
-  must not fire `[source-domain-new]` (version bump on the same host must stay
-  clean — the whole point of the set-diff).
-- `bash -n aur-safe` clean; `./aur-safe selftest` all green.
+- `source-append-new-host-visible` — a `source+=("https://evil-new-host.xyz/pkg-2.tar")`
+  append in a fresh git fixture is listed by `source_domains` as `evil-new-host.xyz`.
+- `source-append-same-host-no-drift` — a `source+=("https://example.com/pkg-2.tar")`
+  append reusing the baseline host produces an empty `comm -13` set-diff, so
+  `[source-domain-new]` does not fire.
+- `bash -n aur-safe` clean; `shellcheck -s bash aur-safe` clean.
+- `./aur-safe selftest </dev/null` → 307 passed, 0 failed (was 305 before the
+  two new regression fixtures).
+
+## Lesson
+
+A single regex anchor in a parser can silently drop an entire syntax family.
+When tightening patterns to stop *overmatching* (Finding L5), audit the same
+anchor for *undermatching* of legitimate variants — especially array-append
+syntax, which PKGBUILD uses for arch-conditional and version-bump additions.

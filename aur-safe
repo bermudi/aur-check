@@ -605,7 +605,7 @@ source_domains() {
   # opening line, clear it after a line containing ')'. A naive line-anchored
   # grep misses URLs on continuation lines (the host-swap attack surface).
   git -C "$dir" show "${ref}:PKGBUILD" 2>/dev/null \
-    | awk '/^[[:space:]]*source(_[[:alnum:]_]+)?=\(/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
+    | awk '/^[[:space:]]*source(_[[:alnum:]_]+)?[+]?=\(/ { in_src=1 } in_src { print; if (/\)/) in_src=0 }' \
     | grep -aoE '://([^@]+@)?(\[[0-9A-Fa-f:]+\]|[a-zA-Z0-9._-]+)' \
     | sed -E 's#^://([^@]+@)?##' | tr '[:upper:]' '[:lower:]' | sort -u
 }
@@ -5016,6 +5016,33 @@ EOF
     "$_evil_pkg" \
     "$_old_src" \
     "$_evil_src"
+
+  # Finding X regression: source+=() append must be visible to source_domains().
+  local _srcappend_new_pkg _srcappend_new_src _srcappend_new
+  printf -v _srcappend_new_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsource+=("https://evil-new-host.xyz/pkg-2.tar")\nsha256sums=(%s)' "$_sum1"
+  _srcappend_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsource = https://evil-new-host.xyz/pkg-2.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+  _class_bld "$_clx" "cls-source-append-new-host" "$_old_basic" "$_srcappend_new_pkg" "$_old_src" "$_srcappend_new_src"
+  _srcappend_new=$(source_domains "origin/master" "$_CLASS_DIR")
+  if printf '%s\n' "$_srcappend_new" | grep -qx 'evil-new-host.xyz'; then
+    log "  $(c_green "PASS") source-append-new-host-visible"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") source-append-new-host-visible (got: $_srcappend_new)"; fail=$((fail+1))
+  fi
+
+  # Negative control: source+=() reusing an existing host must not create a
+  # source-domain-new signal.
+  local _srcappend_same_pkg _srcappend_same_src _srcappend_same_old _srcappend_same_new _srcappend_drift
+  printf -v _srcappend_same_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsource+=("https://example.com/pkg-2.tar")\nsha256sums=(%s %s)' "$_sum1" "$_sum2"
+  _srcappend_same_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsource = https://example.com/pkg-2.tar\n\tsha256sums = '"$_sum1"$'\n\tsha256sums = '"$_sum2"$'\n\npkgname = cls-pkg'
+  _class_bld "$_clx" "cls-source-append-same-host" "$_old_basic" "$_srcappend_same_pkg" "$_old_src" "$_srcappend_same_src"
+  _srcappend_same_old=$(source_domains "$_CLASS_BASE" "$_CLASS_DIR")
+  _srcappend_same_new=$(source_domains "origin/master" "$_CLASS_DIR")
+  _srcappend_drift=$(comm -13 <(printf '%s\n' "$_srcappend_same_old") <(printf '%s\n' "$_srcappend_same_new") | grep . || true)
+  if [[ -z "$_srcappend_drift" ]]; then
+    log "  $(c_green "PASS") source-append-same-host-no-drift"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") source-append-same-host-no-drift (drift: $_srcappend_drift)"; fail=$((fail+1))
+  fi
 
   tc_class multiline-source boring_edge 2 \
     "$_old_basic" \

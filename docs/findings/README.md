@@ -39,7 +39,7 @@ Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-check--/
 ### Follow-up findings (S–Y)
 Gaps surfaced in later implementation reviews (S–V) and the 2026-07-27 follow-up
 of the impersonation / source-drift signals and the advisory `accept` path
-(W–Y — the three currently open).
+(W–Y; W and Y remain open, X is fixed).
 
 ### GitHub Cohort 2 — 2026-07-27 (#2–#22)
 A second review filed directly as GitHub issues under a C/H/M/L scheme
@@ -86,7 +86,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ◷ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
 
 ### Low
-- ◷ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
+- ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
 - ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-check/issues/22)
 - L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
 
