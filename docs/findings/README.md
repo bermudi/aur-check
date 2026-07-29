@@ -85,6 +85,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **R** — Package name regex allows `.`, `..`, `.git` → [doc](R-pkg-name-path-traversal.md)
 - ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
 - ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
+- ✓ **gh11** — Force C locale for deterministic regex and byte processing (Cohort 2 M2, #11) → [doc](gh11-force-c-locale.md) · [#11](https://github.com/bermudi/aur-check/issues/11)
 
 ### Low
 - ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
@@ -127,7 +128,7 @@ the delegate transcripts (sessions above). All **fixed** except **L2**.
 
 - **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
   filed per-finding as each issue closes (see AGENTS.md "Findings & issue
-  tracking"). **#2 (C1), #18 (L1), and #22 (L5) are done** → gh2, gh18, gh22; the rest are pending.
+  tracking"). **#2 (C1), #11 (M2), #18 (L1), and #22 (L5) are done** → gh2, gh11, gh18, gh22; the rest are pending.
   Where they overlap
   Cohort 1 (already fixed), cross-link to the existing doc rather than duplicate.
 - **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).

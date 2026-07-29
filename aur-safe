@@ -35,6 +35,15 @@
 
 set -uo pipefail
 
+# M2 (issue #11): force C locale so ASCII-oriented regexes, bracket character
+# classes ([[:alnum:]], [[:space:]], [[:print:]]), and byte-oriented text tools
+# (tr, grep, awk, sort) behave deterministically across caller locales.
+# Non-ASCII source lines remain an automatic review trigger via
+# _source_line_nonascii() and the non-ASCII source hardening in the diff/full
+# pipeline; C locale makes those checks byte-exact.
+export LC_ALL=C
+export LANG=C
+
 # Finding J + H1 (issue #5): isolate ALL git invocations from user/system AND
 # repo-local config and environment. Options like diff.colorWords / diff.wordDiff
 # (word-oriented output, no + prefixes → empty `added` → hard rules find nothing),
