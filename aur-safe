@@ -5442,6 +5442,12 @@ env:
   AUR_SAFE_AUR_URL            AUR base URL      (default: https://aur.archlinux.org)
   AUR_SAFE_CONFIG             config file       (default: ~/.config/aur-safe/config)
   AUR_SAFE_LLM_AUTO_BORING    1 enables strict LLM verifier for boring-edge diffs
+
+notes:
+  The generated wrapper (aur-safe wrapper) is required for the full build-time
+  TOCTOU guarantee. Direct "gate"/"check" + manual helper usage only provides
+  version-based accept confirmation; a same-version/different-commit helper fetch
+  can execute build-time payload before the next gate surfaces the delta.
 EOF
 }
 

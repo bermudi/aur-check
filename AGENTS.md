@@ -119,7 +119,7 @@ skipped under load; do not skip it, the lesson is lost when the issue recedes:
 
 Findings A–V have implemented fixes/mitigations as recorded in
 [docs/findings/](./docs/findings/) (catalog:
-[README](./docs/findings/README.md)); W/X/Y remain open (GitHub #24–#26).
+[README](./docs/findings/README.md)); W remains open (#24); X (#26) and Y (#25) are fixed.
 Load-bearing
 regressions to keep pinned: non-ASCII source URLs never become boring; tier-2
 never exits clean; installed confirmation binds to root-owned pacman pkgbase +

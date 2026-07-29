@@ -39,7 +39,7 @@ Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-check--/
 ### Follow-up findings (S–Y)
 Gaps surfaced in later implementation reviews (S–V) and the 2026-07-27 follow-up
 of the impersonation / source-drift signals and the advisory `accept` path
-(W–Y; W and Y remain open, X is fixed).
+(W–Y; W remains open, X and Y are fixed).
 
 ### GitHub Cohort 2 — 2026-07-27 (#2–#22)
 A second review filed directly as GitHub issues under a C/H/M/L scheme
@@ -83,7 +83,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **Q** — `files_with_status` silently ignores git diff failures → [doc](Q-files-with-status-swallows-rc.md)
 - ✓ **R** — Package name regex allows `.`, `..`, `.git` → [doc](R-pkg-name-path-traversal.md)
 - ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
-- ◷ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
+- ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
 
 ### Low
 - ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)

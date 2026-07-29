@@ -122,6 +122,15 @@ a fixed safe set, rejects caller-supplied rebuild/custom makepkg flags and makep
 artifact/integrity/context-switch modes, then adds `--cleanbuild --force` so
 stale source/build/package state cannot bypass the guarded build. A window commit X′ therefore blocks
 and must be audited on a rerun rather than executing first.
+
+`accept` itself only confirms that pacman reports an installed package whose version and freshness
+match the staged `.SRCINFO`; it does **not** require the installed commit's SHA to equal the staged
+SHA. The build-time `HEAD == staged SHA` guard is injected **only** by the generated wrapper through
+the helper's `--makepkg` seam. Running `gate`/`check` directly and then invoking `yay`/`paru`
+manually leaves a same-version/different-commit helper fetch free to execute build-time payload; the
+next `gate` surfaces the delta, but that is post-hoc. The **full build-time TOCTOU guarantee requires
+the wrapper**.
+
 Deferred acceptance (match installed pkgver vs `.SRCINFO`) was rejected: needs a
 new parser and pkgver can stay identical across a malicious push.
 
