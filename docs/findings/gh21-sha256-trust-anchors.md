@@ -51,9 +51,14 @@ git object name, so only the input-shape validation needed widening.
 - `bash -n aur-safe` — clean.
 - `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via
   `.shellcheckrc`).
-- `./aur-safe selftest </dev/null` — 309 passed, 0 failed; existing SHA-1-only
+- `./aur-safe selftest </dev/null` — 312 passed, 0 failed. Existing SHA-1-only
   fixtures still resolve and promote correctly, and the baseline-recovery
-  `cat-file --batch` parser stays in sync.
+  `cat-file --batch` parser stays in sync. A positive SHA-256 block
+  (`-- gh21 SHA-256 trust anchors --`) builds a real `git init
+  --object-format=sha256` repo and asserts `accepted_ref` resolves a 64-hex
+  anchor, `write_ref` records a 64-hex tip, and `find_baseline_commit` parses
+  64-hex `cat-file --batch` headers — pinning the capability the fix adds. The
+  block SKIPs cleanly on git builds without sha256 object-format support.
 
 ## Lesson
 

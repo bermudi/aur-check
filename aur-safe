@@ -3570,6 +3570,47 @@ cmd_selftest() {
     log "  $(c_green "PASS") accept-leaves-orphan"; pass=$((pass+1))
   else log "  $(c_red "FAIL") accept-leaves-orphan"; fail=$((fail+1)); fi
 
+  # --- gh21: SHA-256 object-format repos (positive coverage) ----------------
+  # The trust-anchor regex was widened from {40} to {40}([0-9a-f]{24})? so a
+  # SHA-256 git repo (64-hex object IDs) can advance the anchor and feed the
+  # baseline-recovery cat-file --batch parser. AUR is SHA-1 today; this pins
+  # the future-proofing so a later regression is caught. Skip cleanly if the
+  # installed git lacks sha256 object-format support.
+  log ""
+  log "  $(c_dim "-- gh21 SHA-256 trust anchors --")"
+  local _s256 _s256sha
+  _s256=$(mktemp -d)
+  if git -C "$_s256" init -q --object-format=sha256 2>/dev/null \
+      && [ "$(git -C "$_s256" rev-parse --show-object-format 2>/dev/null)" = sha256 ]; then
+    git -C "$_s256" remote add origin "file://$_s256" 2>/dev/null || true
+    printf 'pkgbase = test-s256\n\tpkgver = 1\n\tpkgrel = 1\n\npkgname = test-s256\n' >"$_s256/.SRCINFO"
+    git -C "$_s256" add -A && git -C "$_s256" -c user.email=t@t -c user.name=t commit -qm base
+    git -C "$_s256" branch -qM master
+    git -C "$_s256" update-ref refs/remotes/origin/master HEAD
+    _s256sha=$(git -C "$_s256" rev-parse HEAD)
+    # object ID must be 64 hex — guards against a misconfigured fixture.
+    if [[ "$_s256sha" =~ ^[0-9a-f]{64}$ ]]; then
+      _atomic_write_record "$ACCEPTED_DIR/test-s256" \
+        "$_s256sha"$'\t'"1970-01-01T00:00:00Z"$'\t'"file://$_s256"
+      if [ "$(accepted_ref "$_s256" test-s256)" = "$_s256sha" ]; then
+        log "  $(c_green "PASS") sha256-accepted-ref-resolves"; pass=$((pass+1))
+      else log "  $(c_red "FAIL") sha256-accepted-ref-resolves"; fail=$((fail+1)); fi
+      write_ref "$_s256" "$STAGED_DIR/test-s256"
+      if [[ "$(awk -F'\t' '{print $1; exit}' "$STAGED_DIR/test-s256")" =~ ^[0-9a-f]{64}$ ]]; then
+        log "  $(c_green "PASS") sha256-write-ref-records-64hex"; pass=$((pass+1))
+      else log "  $(c_red "FAIL") sha256-write-ref-records-64hex"; fail=$((fail+1)); fi
+      # baseline-recovery parser must handle 64-hex cat-file --batch headers.
+      if [ "$(find_baseline_commit "$_s256" 1-1)" = "$_s256sha" ]; then
+        log "  $(c_green "PASS") sha256-baseline-commit-resolves"; pass=$((pass+1))
+      else log "  $(c_red "FAIL") sha256-baseline-commit-resolves"; fail=$((fail+1)); fi
+    else
+      log "  $(c_yellow "SKIP") sha256-block (fixture not 64-hex)"
+    fi
+  else
+    log "  $(c_yellow "SKIP") sha256-block (git lacks object-format=sha256)"
+  fi
+  rm -rf "$_s256"
+
   # restore real state dirs and clean up the temp repo
   STATE_DIR="$_osd"; ACCEPTED_DIR="$_oad"; STAGED_DIR="$_ost"; MANIFEST_FILE="$_omf"
   rm -rf "$_tmp"
