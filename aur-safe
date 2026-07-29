@@ -55,10 +55,14 @@ export GIT_CONFIG_SYSTEM=/dev/null
 # too. GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE can redirect to a different repo.
 # GIT_ASKPASS/GIT_TERMINAL_PROMPT are reset per git() call so makepkg's own
 # VCS clones are not forced to use our no-prompt policy.
+# GIT_PROXY_COMMAND/GIT_EDITOR are also cleared at load; the wrapper sets
+# GIT_PROXY_COMMAND= (empty) per git() call to neutralize any repo-local
+# core.gitProxy/remote.*.proxy or inherited proxy command.
 unset GIT_EXTERNAL_DIFF GIT_PAGER PAGER GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_SOURCE \
       GIT_CONFIG GIT_CONFIG_COUNT GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND \
-      GIT_TERMINAL_PROMPT 2>/dev/null || true
+      GIT_PROXY_COMMAND GIT_TERMINAL_PROMPT GIT_EDITOR VISUAL EDITOR \
+      2>/dev/null || true
 for _h1_v in ${!GIT_CONFIG_KEY_*} ${!GIT_CONFIG_VALUE_*} ; do
   [[ -n "$_h1_v" ]] && unset -v "$_h1_v"
 done
@@ -293,6 +297,7 @@ git() {
     -c diff.mnemonicPrefix=false
     -c diff.noprefix=false
     -c diff.colorMoved=false
+    -c http.sslVerify=true
   )
 
   # Defeat external diff drivers, textconv filters, and word-diff output for
@@ -325,7 +330,7 @@ git() {
     fi
   fi
 
-  GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 command git \
+  GIT_PROXY_COMMAND='' GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 command git \
       "${pre[@]}" "${safe_pre[@]}" "$cmd" "${safe_mid[@]}" "${post[@]}"
 }
 
@@ -337,7 +342,7 @@ _git_local_config_is_safe() {
 
   # Use command git, not the wrapper, to avoid recursion. The --no-pager and
   # -c core.pager=cat keep a malicious core.pager from being honored.
-  if ! names=$(GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 \
+  if ! names=$(GIT_PROXY_COMMAND='' GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 \
       command git -C "$dir" --no-pager -c core.pager=cat \
       config --local --list --name-only 2>/dev/null); then
     return 1
@@ -346,8 +351,11 @@ _git_local_config_is_safe() {
   # Normalize to lower case; git config keys are case-insensitive.
   names=$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"$names")
 
-  # Dangerous sections/keys. url.* covers insteadOf/pushInsteadOf redirection.
-  bad=$(LC_ALL=C grep -E '^(diff|url|filter|alias|include)\.|^core\.(attributesfile|hookspath|pager|sshcommand|askpass|editor|excludesfile|worktree|fsmonitor)' <<<"$names" 2>/dev/null || true)
+  # Dangerous sections/keys. url.* covers insteadOf/pushInsteadOf redirection;
+  # core.gitproxy and remote.*.proxy can execute arbitrary commands during git://
+  # fetches. credential.* and submodule.* are additional arbitrary-code / redirect
+  # vectors and are not expected in AUR package clones.
+  bad=$(LC_ALL=C grep -E '^(diff|url|filter|alias|include|credential|submodule)\.|^core\.(attributesfile|hookspath|pager|sshcommand|askpass|editor|excludesfile|worktree|fsmonitor|gitproxy)|^remote\..*\.proxy' <<<"$names" 2>/dev/null || true)
   if [[ -n "$bad" ]]; then
     log "$(c_yellow "audit") unsafe .git/config keys in $dir: $(tr '\n' ' ' <<<"$bad")" >&2
     return 1
@@ -4119,9 +4127,9 @@ cmd_selftest() {
   fi
 
   # H1 (issue #5): a repo whose local .git/config has been poisoned with diff
-  # output games, color, textconv, or url.insteadOf must fail closed (rc=1).
-  # The git() wrapper below rejects the unsafe local config before it can alter
-  # the diff or redirect a fetch.
+  # output games, color, textconv, url.insteadOf, core.gitProxy, remote.*.proxy,
+  # credential.*, or submodule.* must fail closed (rc=1). The git() wrapper
+  # rejects the unsafe local config before it can alter the diff or fetch.
   local _h1x _h1pkg _h1base _h1rc
   _h1x=$(mktemp -d)
   _h1pkg="$_h1x/h1-pkg"; mkdir -p "$_h1pkg"
@@ -4152,8 +4160,16 @@ cmd_selftest() {
     attributesFile = /dev/null
     hooksPath = /dev/null
     worktree = /tmp
+    gitProxy = /tmp/evil-proxy
 [url "https://evil.example/"]
     insteadOf = https://aur.archlinux.org/
+[remote "origin"]
+    proxy = /tmp/evil-proxy
+    proxyAuthMethod = basic
+[credential]
+    helper = /tmp/evil-credential
+[submodule "foo"]
+    url = https://evil.example/foo.git
 EOF
   _h1rc=99
   if [[ -n "$_h1base" ]]; then
@@ -4204,6 +4220,33 @@ EOF
     log "  $(c_red "FAIL") git-config-local-override-hard-rules-fire (expected rc 1, got $_h1orc)"; fail=$((fail+1))
   fi
   rm -rf "$_h1ox" "$_h1opkg"
+
+  # H1 follow-up: an inherited GIT_PROXY_COMMAND env var must not be honored.
+  # The wrapper explicitly sets GIT_PROXY_COMMAND= (empty) for every git() call
+  # so a repo-local or inherited core.gitProxy/remote.*.proxy cannot execute an
+  # attacker-supplied command during a git:// fetch.
+  local _h1px _h1prepo _h1pclone _h1pm _h1pmarker
+  _h1px=$(mktemp -d)
+  _h1prepo="$_h1px/bare"; mkdir -p "$_h1prepo"
+  ( cd "$_h1prepo" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'x\n' >f; git add f; git commit -qm base
+  )
+  _h1pclone="$_h1px/clone"
+  git clone -q -- "file://$_h1prepo" "$_h1pclone" 2>/dev/null
+  git -C "$_h1pclone" remote set-url origin git://127.0.0.1:1/test.git 2>/dev/null
+  _h1pm="$_h1px/evil-proxy-ran"; rm -f "$_h1pm"
+  printf '#!/bin/sh\ntouch %s\n' "$_h1pm" >"$_h1px/evil-proxy"
+  chmod +x "$_h1px/evil-proxy"
+  # If the wrapper honored this env var, the proxy would run and touch _h1pm.
+  GIT_PROXY_COMMAND="$_h1px/evil-proxy" git -C "$_h1pclone" fetch -q origin >/dev/null 2>&1 || true
+  if [[ ! -e "$_h1pm" ]]; then
+    log "  $(c_green "PASS") git-proxy-command-env-neutralized"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") git-proxy-command-env-neutralized (evil proxy ran)"; fail=$((fail+1))
+  fi
+  rm -rf "$_h1px"
 
   # --- diff classifier + LLM boring-edge seam ------------------------------
   log ""
