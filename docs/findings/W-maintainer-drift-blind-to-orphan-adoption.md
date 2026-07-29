@@ -7,7 +7,7 @@
 **Lines:** `classify_diff_rules()` drift guard at aur-safe:1827-1838; comment
 short-circuit in `_boring_pkgbuild_added_line_class()` at aur-safe:866;
 `maintainer_domains()` at aur-safe:589-595. Asymmetry vs. source-side guard at
-aur-safe:1842-1852.
+aur-safe:1840-1852.
 
 ## What happens
 
