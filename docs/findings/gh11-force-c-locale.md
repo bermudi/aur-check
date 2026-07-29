@@ -4,7 +4,7 @@
 (Cohort 2, medium M2)
 **Status:** fixed
 **Severity:** medium
-**Lines:** locale hardening at `aur-safe:38-45`; existing local `LC_ALL=C` usage at `aur-safe:352`, `aur-safe:358`, `aur-safe:649`
+**Lines:** locale hardening at `aur-safe:38-45`; existing local `LC_ALL=C` usage at `aur-safe:361`, `aur-safe:367`, `aur-safe:658`
 
 ## Summary
 
