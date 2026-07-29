@@ -39,7 +39,7 @@ text, which predates several Cohort 1 fixes).
 | #19  | L2 | `_collect_review_details` tab-separated records | OPEN (cosmetic)   | **new (minor)** — needs doc |
 | #20  | L3 | `EXPLAIN_MAXLINES` truncation hides payload  | OPEN (advisory)       | **new (minor)** — needs doc |
 | #21  | L4 | SHA-1-only trust anchors (no SHA-256 git)    | OPEN (future-proofing) | **new (minor)** — needs doc |
-| #22  | L5 | `_valid_pkg_name` rejects uppercase          | OPEN (cosmetic)       | **new (minor)** — needs doc |
+| #22  | L5 | `_valid_pkg_name` rejects uppercase          | **FIXED** → gh22     | done — [gh22](gh22-uppercase-pkg-name-rejected.md) |
 
 **Tally:** 1 duplicate (#18↔B), 1 extension (#5↔J/L7), 1 partial-overlap (#3↔E,
 #10↔L2), 18 genuinely new. So ~18 new finding docs are owed under the

@@ -49,7 +49,7 @@ the tracker). They partially overlap Cohort 1 (e.g. GH H1 ≈ local J/L7 git-con
 isolation, fixed) and add new gaps (C2 fail-open URI, …). **gh2–gh5 (critical
 C1–C3 + H1, #2–#5) are resolved** — the `++` added-line-drop, fail-open source URI
 validation, advisory-only `cmd_audit`, and repo-local git-config / git-invocation
-hardening; #6–#22 remain pending. See <https://github.com/bermudi/aur-check/issues>.
+hardening; #6–#21 and #24–#26 remain pending. See <https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
 
@@ -87,6 +87,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 
 ### Low
 - ◷ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
+- ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-check/issues/22)
 - L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
 
 ### Founding pass (A–D, closed)
@@ -124,6 +125,7 @@ the delegate transcripts (sessions above). All **fixed** except **L2**.
 
 - **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
   filed per-finding as each issue closes (see AGENTS.md "Findings & issue
-  tracking"). **#2 (C1) is done** → gh2; the rest are pending. Where they overlap
+  tracking"). **#2 (C1) and #22 (L5) are done** → gh2, gh22; the rest are pending.
+  Where they overlap
   Cohort 1 (already fixed), cross-link to the existing doc rather than duplicate.
 - **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).

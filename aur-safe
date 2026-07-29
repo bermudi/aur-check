@@ -367,8 +367,10 @@ _git_local_config_is_safe() {
 # AUR package-name grammar, tightened for use as a path component. AUR names do
 # not begin with '.', so reject '.', '..', '.git', and every hidden/traversal
 # shape even though the broader character set permits dots (Finding R).
+# Uppercase is allowed because it is a valid pkgname character and does not
+# affect path safety (Finding gh22).
 _valid_pkg_name() {
-  [[ "$1" =~ ^[a-z0-9@._+-]+$ && "$1" != .* ]]
+  [[ "$1" =~ ^[A-Za-z0-9@._+-]+$ && "$1" != .* ]]
 }
 
 # Replace a one-line state record atomically in its destination directory.
@@ -1444,7 +1446,7 @@ _installed_matches() {
   names=$(awk -F' = ' '/^pkgname =/ {print $2}' <<<"$srcinfo")
   [[ -n "$names" ]] || return 1
   while IFS= read -r pkgname; do
-    [[ "$pkgname" =~ ^[a-z0-9@._+-]+$ && "$pkgname" != .* ]] || continue
+    _valid_pkg_name "$pkgname" || continue
     record=$(_pacman_local_record "$pkgname") || continue
     IFS=$'\t' read -r installed_name iver installed_base built_at installed_at <<<"$record"
     # Four-field test adapters predate the build-date field; treating their
@@ -4027,6 +4029,11 @@ cmd_selftest() {
     log "  $(c_red "FAIL") hidden-package-names-rejected"; fail=$((fail+1))
   else
     log "  $(c_green "PASS") hidden-package-names-rejected"; pass=$((pass+1))
+  fi
+  if _valid_pkg_name 'UpperCase-Pkg'; then
+    log "  $(c_green "PASS") uppercase-package-name-accepted"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") uppercase-package-name-accepted"; fail=$((fail+1))
   fi
   ta "invalid-dot-pkg-blocks" 1 check_pkg ..
   local _sdrc
