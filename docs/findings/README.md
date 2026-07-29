@@ -46,10 +46,10 @@ A second review filed directly as GitHub issues under a C/H/M/L scheme
 (C1–C3 critical, H1–H5 high, M1–M8 medium, L1–L5 low). Under the findings/-
 canonical model each gets a `ghNN` doc when its issue closes (legacy A–Y predate
 the tracker). They partially overlap Cohort 1 (e.g. GH H1 ≈ local J/L7 git-config
-isolation, fixed) and add new gaps (C2 fail-open URI, …). **gh2–gh4 (critical
-C1–C3, #2–#4) are resolved** — the `++` added-line-drop, fail-open source URI
-validation, and advisory-only `cmd_audit`; #5–#22 remain pending. See
-<https://github.com/bermudi/aur-check/issues>.
+isolation, fixed) and add new gaps (C2 fail-open URI, …). **gh2–gh5 (critical
+C1–C3 + H1, #2–#5) are resolved** — the `++` added-line-drop, fail-open source URI
+validation, advisory-only `cmd_audit`, and repo-local git-config / git-invocation
+hardening; #6–#22 remain pending. See <https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
 
@@ -59,6 +59,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **gh2** — Added-line extractor drops lines beginning with `++` (C1, #2) → [doc](gh2-added-line-extractor-drops-plusplus-lines.md) · [#2](https://github.com/bermudi/aur-check/issues/2)
 - ✓ **gh3** — Source URI validation fail-open (userinfo, scheme downgrade, local paths, VCS/IPv6/port) → [doc](gh3-source-uri-fail-open.md) · [#3](https://github.com/bermudi/aur-check/issues/3)
 - ✓ **gh4** — Explicit new installs through `cmd_audit` were advisory-only (C3, #4) → [doc](gh4-cmd-audit-advisory-only.md) · [#4](https://github.com/bermudi/aur-check/issues/4)
+- ✓ **gh5** — Repo-local git config trusted; git invocation hardening incomplete (H1, #5) → [doc](gh5-git-invocation-hardening.md) · [#5](https://github.com/bermudi/aur-check/issues/5)
 - ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
 - △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
 - ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
