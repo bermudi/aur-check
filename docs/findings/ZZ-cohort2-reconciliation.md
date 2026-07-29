@@ -22,7 +22,7 @@ text, which predates several Cohort 1 fixes).
 | #2   | C1 | `+++`-prefix added lines dropped by sed     | **FIXED** → gh2        | done — [gh2](gh2-added-line-extractor-drops-plusplus-lines.md) |
 | #3   | C2 | `source_domains` fail-open (userinfo/scheme/IPv6/…) | **PARTIAL** (E covers homographs only) | **new** — needs doc, cross-link E |
 | #4   | C3 | `audit` (explicit installs) not blocking    | OPEN                  | **new** — needs doc |
-| #5   | H1 | Repo-local git config + ext-diff not isolated | **OPEN** (verified) | **extension of J/L7** — note on J |
+| #5   | H1 | Repo-local git config + ext-diff not isolated | **FIXED (closed)** → [gh5](gh5-git-invocation-hardening.md) | **extension of J/L7** — see [gh5](gh5-git-invocation-hardening.md) |
 | #6   | H2 | Hard rules evadable via quoting/paths       | OPEN (by design)      | **new (architectural)** — needs doc |
 | #7   | H3 | `.gitattributes` binary marking blunts scan | OPEN                  | **new** — needs doc |
 | #8   | H4 | Deletion-only changes classified boring     | OPEN                  | **new** — needs doc; related to W |
@@ -51,12 +51,12 @@ findings/-canonical model.
   `_diff_added_metadata_file`; an added PKGBUILD line beginning with `++` was
   dropped. Replaced by the hunk-aware `_diff_added_lines()` (aur-safe:313);
   see [gh2](gh2-added-line-extractor-drops-plusplus-lines.md).
-- **#5 (H1) is OPEN.** `grep -c 'no-ext-diff'` → 0; `grep -c 'word-diff=none'`
-  → 0, across 27 git diff invocations. J/L7 only export
-  `GIT_CONFIG_GLOBAL/SYSTEM=/dev/null` (script load) — they do **not** isolate
-  repo-local `.git/config` (reachable by a prior malicious build) nor pass
-  `--no-ext-diff` (so `diff.external` in `.git/config` can execute). So #5 is a
-  true extension of J, not a duplicate.
+- **#5 (H1) is FIXED (closed).** The `git()` wrapper (`aur-safe:~226-365`)
+  forces `--no-ext-diff`, `--no-textconv`, `--word-diff=none`, and a short
+  list of `-c` overrides on every call; the environment is sanitized at load;
+  and `_git_local_config_is_safe()` fail-closes on repo-local `.git/config`
+  keys that can alter output, redirect fetches, or execute code. Details and
+  verification are in [gh5](gh5-git-invocation-hardening.md).
 - **#3 (C2) is PARTIALLY open.** The homograph axis is covered by Finding E
   (`_source_line_nonascii` forces review on non-ASCII bytes in source lines).
   The other eight axes (userinfo `@`, scheme downgrade, local paths, scp-like,
