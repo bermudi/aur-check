@@ -36,7 +36,7 @@ text, which predates several Cohort 1 fixes).
 | #16  | M7 | Wrapper portability (zsh `read -k`, `--opt=val`) | OPEN            | **new** — needs doc |
 | #17  | M8 | DoS via large repos/diffs                    | OPEN                  | **new** — needs doc |
 | #18  | L1 | `cmd_scan` coverage partial                  | OPEN (advisory by design) | **duplicate of B** — cross-link |
-| #19  | L2 | `_collect_review_details` tab-separated records | OPEN (cosmetic)   | **new (minor)** — needs doc |
+| #19  | L2 | `_collect_review_details` tab-separated records | **FIXED** → gh19    | done — [gh19](gh19-collect-review-details-tab-separated.md) |
 | #20  | L3 | `EXPLAIN_MAXLINES` truncation hides payload  | OPEN (advisory)       | **new (minor)** — needs doc |
 | #21  | L4 | SHA-1-only trust anchors (no SHA-256 git)    | OPEN (future-proofing) | **new (minor)** — needs doc |
 | #22  | L5 | `_valid_pkg_name` rejects uppercase          | **FIXED** → gh22     | done — [gh22](gh22-uppercase-pkg-name-rejected.md) |
@@ -66,6 +66,11 @@ findings/-canonical model.
 - **#18 (L1) duplicates B.** Both flag `cmd_scan` as an ad-hoc third pipeline
   with incomplete coverage. B is the canonical writeup; #18 should close as a
   duplicate pointing at `docs/findings/B-cmd-scan-adhoc-pipeline.md`.
+- **#19 (L2) is FIXED.** `_collect_review_details()` now emits NUL-separated
+  records (`raw text\0formatted detail`) instead of tab-separated; the caller
+  reads `d_text` with `read -d ''` and `d_fmt` with a normal `read`. This
+  preserves literal tabs in added PKGBUILD lines. Details are in
+  [gh19](gh19-collect-review-details-tab-separated.md).
 
 ## Notable relationships
 

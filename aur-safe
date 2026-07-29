@@ -1125,8 +1125,8 @@ _pkgbuild_repo_dep_added_line() {
 #
 # Wants the wanted lines (one per record) on a temp-file fd so newline-bearing
 # content can't break awk's `-v` (which mangles embedded newlines) or be
-# injected into the awk program text. Output per match, tab-separated:
-#   <raw added-line text> \t <formatted detail ("file:line[: in ctx]: text")>
+# injected into the awk program text. Output per match, NUL-separated (0x00):
+#   <raw added-line text> \0 <formatted detail ("file:line[: in ctx]: text")>
 # Records preserve diff order so callers can prefer the first build-logic hit.
 _collect_review_details() {
   local dir="$1" base_ref="$2" want_file="$3"
@@ -1168,13 +1168,13 @@ _collect_review_details() {
           marker=substr($0, 1, 1)
           text=substr($0, 2)
           if (marker == "+" && (text in w)) {
-            # Carry the raw text (tab-separated) so the build-logic check never
+            # Carry the raw text (NUL-separated) so the build-logic check never
             # has to parse the formatted detail back apart — fixing the
             # colon-in-text extraction bug.
             if (where != "") {
-              printf "%s\t%s:%d in %s: %s\n", text, file, newln, where, text
+              printf "%s\0%s:%d in %s: %s\n", text, file, newln, where, text
             } else {
-              printf "%s\t%s:%d: %s\n", text, file, newln, text
+              printf "%s\0%s:%d: %s\n", text, file, newln, text
             }
             # Mark emitted so a duplicate text later in the diff does not replay
             # (the first occurrence is the most useful location to show).
@@ -1206,7 +1206,7 @@ _collect_review_details() {
 # earlier revision parsed ${detail##*: } out of the formatted detail, which
 # silently truncated added text containing ": " (e.g. msg "step: done") — a
 # delegate-review catch. Callers pass the raw text via _collect_review_details'
-# tab-separated record so no parsing is needed here.
+# NUL-separated record so no parsing is needed here.
 _detail_is_build_logic() {
   local text="$1"
   # A build/install function header introduced/changed on its own line.
@@ -1953,12 +1953,12 @@ classify_diff_rules() {
       SCAN_DIFF_REASON="detail-state-unavailable"
       return 0
     fi
-    # Records are tab-separated "<raw text>\t<formatted detail>" so the
+    # Records are NUL-separated "<raw text>\0<formatted detail>" so the
     # build-logic check can run on the raw text without re-parsing the
     # formatted detail (which would break on added text containing ": ").
     local -a cand_text=() cand_fmt=()
     local d_text d_fmt
-    while IFS=$'\t' read -r d_text d_fmt; do
+    while IFS= read -r -d '' d_text && IFS= read -r d_fmt; do
       cand_text+=("$d_text"); cand_fmt+=("$d_fmt")
     done < <(_collect_review_details "$dir" "$base_ref" "$want_file")
     rm -f "$want_file"
