@@ -39,7 +39,7 @@ Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-check--/
 ### Follow-up findings (S–Y)
 Gaps surfaced in later implementation reviews (S–V) and the 2026-07-27 follow-up
 of the impersonation / source-drift signals and the advisory `accept` path
-(W–Y; W remains open, X and Y are fixed).
+(W–Y; all fixed).
 
 ### GitHub Cohort 2 — 2026-07-27 (#2–#22)
 A second review filed directly as GitHub issues under a C/H/M/L scheme
@@ -50,7 +50,7 @@ isolation, fixed) and add new gaps (C2 fail-open URI, …). **gh2–gh5 (critica
 C1–C3 + H1, #2–#5) and gh18 (L1, #18) are resolved** — the `++` added-line-drop,
 fail-open source URI validation, advisory-only `cmd_audit`, repo-local git-config
 / git-invocation hardening, and `cmd_scan` partial-coverage documentation;
-#6–#17, #19–#21, and #24–#26 remain pending. See <https://github.com/bermudi/aur-check/issues>.
+#6–#17, #19–#21 remain pending; #24–#26 are fixed. See <https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
 
@@ -74,7 +74,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **K** — `epoch=0` breaks install confirmation and baseline recovery → [doc](K-epoch-zero.md)
 - ✓ **L** — Concurrent gate runs corrupt the per-run manifest → [doc](L-manifest-race.md)
 - ✓ **T** — Changed patch content omitted from review evidence → [doc](T-patch-review-evidence-omitted.md)
-- ◷ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
+- ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
 
 ### Medium
 - ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)

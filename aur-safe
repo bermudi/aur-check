@@ -1828,7 +1828,7 @@ classify_diff_rules() {
   local old_d new_d drift
   old_d=$(maintainer_domains "$base_ref" "$dir")
   new_d=$(maintainer_domains "origin/${AUR_REMOTE_BRANCH}" "$dir")
-  if [[ -n "$old_d" && -n "$new_d" ]]; then
+  if [[ -n "$new_d" ]]; then
     drift=$(comm -13 <(printf '%s\n' "$old_d") <(printf '%s\n' "$new_d"))
     if [[ -n "$drift" ]]; then
       log "  $(c_yellow "review") [maintainer-domain-new]"
@@ -4322,6 +4322,8 @@ EOF
   }
 
   local _sum1 _sum2 _old_src _new_src _old_basic _new_basic _old_multi_sum_pkg _new_multi_sum_pkg _old_space_src _new_tab_src
+  local _orphan_adopt_old_pkg _orphan_adopt_new_pkg _orphan_adopt_old_src _orphan_adopt_new_src
+  local _same_maintainer_old_pkg _same_maintainer_new_pkg _same_maintainer_old_src _same_maintainer_new_src
   local _sum2_pkg _sum2_src _host_pkg _host_src _evil_pkg _evil_src _edge_pkgbuild
   local _quoted_source_old_pkg _quoted_source_new_pkg _quoted_source_old_src _quoted_source_new_src
   local _src_userinfo_new_pkg _src_userinfo_new_src _src_http_new_pkg _src_http_new_src
@@ -4366,6 +4368,14 @@ EOF
   _new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.1\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
   printf -v _old_basic 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
   printf -v _new_basic 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _orphan_adopt_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _orphan_adopt_new_pkg '# Maintainer: Attacker <x@evil-cdn.xyz>\npkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  _orphan_adopt_old_src="$_old_src"
+  _orphan_adopt_new_src="$_old_src"
+  printf -v _same_maintainer_old_pkg '# Maintainer: Daniel <daniel@example.com>\npkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  printf -v _same_maintainer_new_pkg '# Maintainer: Daniel <daniel@example.com>\npkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  _same_maintainer_old_src="$_old_src"
+  _same_maintainer_new_src="$_new_src"
   printf -v _old_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum1"
   printf -v _new_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum2"
   printf -v _sum2_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum2"
@@ -4472,6 +4482,16 @@ EOF
   _split_member_new_src=$'pkgbase = cls-split\n\tpkgver = 2.0\n\tpkgrel = 1\n\tsource = https://example.com/split.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-split\n\tdepends = cls-split-tools=2.0\n\npkgname = cls-split-tools'
 
   tc_class version-bump boring 0 "$_old_basic" "$_new_basic" "$_old_src" "$_new_src"
+
+  # Finding W (#24) — orphan adoption must not auto-clear a new maintainer domain.
+  tc_class orphan-adopt-maintainer-drift review 2 \
+    "$_orphan_adopt_old_pkg" "$_orphan_adopt_new_pkg" \
+    "$_orphan_adopt_old_src" "$_orphan_adopt_new_src"
+
+  # Positive control: same maintainer on a version bump stays clean.
+  tc_class same-maintainer-version-bump boring 0 \
+    "$_same_maintainer_old_pkg" "$_same_maintainer_new_pkg" \
+    "$_same_maintainer_old_src" "$_same_maintainer_new_src"
 
   tc_class checksum-only boring 0 \
     "$_old_basic" \

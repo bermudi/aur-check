@@ -2,12 +2,12 @@
 
 **Source:** follow-up red-team review (post A–V, 2026-07-27)
 **Tracking:** [#24 (H6)](https://github.com/bermudi/aur-check/issues/24)
-**Status:** open
+**Status:** fixed
 **Severity:** high
-**Lines:** `classify_diff_rules()` drift guard at aur-safe:1551-1561; comment
-short-circuit in `_boring_pkgbuild_added_line_class()` at aur-safe:591;
-`maintainer_domains()` at aur-safe:407. Asymmetry vs. source-side guard at
-aur-safe:1566-1567.
+**Lines:** `classify_diff_rules()` drift guard at aur-safe:1827-1838; comment
+short-circuit in `_boring_pkgbuild_added_line_class()` at aur-safe:866;
+`maintainer_domains()` at aur-safe:589-595. Asymmetry vs. source-side guard at
+aur-safe:1842-1852.
 
 ## What happens
 
@@ -86,12 +86,15 @@ is hardening, not a closure requirement.
 
 ## Verification
 
-- New selftest fixtures (proposed names from the review):
-  - `orphan-adopt-no-prior-maintainer` — baseline PKGBUILD with no maintainer
-    line, tip adds `# Maintainer: x <x@evil-cdn.xyz>` → must classify `review`
-    (currently `boring`).
-  - `maintainer-launder-remove-then-add` — two-commit sequence (delete then add
-    impersonated) → commit B must classify `review`.
-- Positive control: a routine version bump on a package whose maintainer line is
-  unchanged must still exit clean (no false positive from the loosened guard).
-- `bash -n aur-safe` clean; `./aur-safe selftest` all green.
+- `bash -n aur-safe` clean; `shellcheck -s bash aur-safe` clean.
+- `./aur-safe selftest </dev/null` → 309 passed, 0 failed.
+- New selftest fixtures pin both directions:
+  - `orphan-adopt-maintainer-drift` — baseline PKGBUILD has no maintainer line;
+    tip adds `# Maintainer: Attacker <x@evil-cdn.xyz>` → now classifies `review`
+    (was `boring`).
+  - `same-maintainer-version-bump` — same `# Maintainer:` on both sides with a
+    routine `pkgver` bump → still classifies `boring` (no false positive from the
+    loosened guard).
+- The remove-then-add launder (Finding H4, #8) is defeated because commit B, once
+  the baseline is maintainer-less, now raises `review` for the new maintainer
+  domain.
