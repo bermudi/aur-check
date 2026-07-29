@@ -5,7 +5,7 @@
 **Status:** fixed
 **Severity:** low
 **Lines:** `_valid_pkg_name()` at `aur-safe:373`; `_installed_matches()` at
-`aur-safe:1449`.
+`aur-safe:1449`; `_aur_safe_classify()` at `aur-safe:2900`.
 
 ## Summary
 
@@ -25,6 +25,12 @@ The same lowercase-only regex had also been copied into `_installed_matches()`
 uppercase pkgname would be silently skipped during install confirmation, so
 `accept` could fail to promote the anchor for a valid build.
 
+A third copy existed in the generated wrapper's `_aur_safe_classify()` (the
+`case` pattern used to decide whether a `yay -S <arg>` target is an AUR package
+or a helper option). With that pattern still lowercase-only, `yay -S UpperCase-Pkg`
+would be classified as `INVALID_TARGET` and the wrapper would abort before the
+gate could ever run — a false-deny that pushes users to bypass the wrapper.
+
 ## Fix
 
 - Central `_valid_pkg_name()` now allows uppercase:
@@ -43,9 +49,13 @@ uppercase pkgname would be silently skipped during install confirmation, so
   `_valid_pkg_name "$pkgname" || continue`, so install-confirmation benefits
   from the same canonical grammar and cannot drift again.
 
-- New selftest `uppercase-package-name-accepted` asserts `_valid_pkg_name`
-  returns success for `UpperCase-Pkg` while the existing
-  `hidden-package-names-rejected` test continues to reject `..`/`.git`.
+- `_aur_safe_classify()` (the emitted wrapper) now uses the same character set
+  in its POSIX `case` pattern: `*[!a-zA-Z0-9@._+-]*` plus the `.*` dot-prefix
+  guard. Uppercase package names are now accepted as AUR install targets.
+
+- New selftests assert uppercase acceptance at both layers:
+  - `uppercase-package-name-accepted` for `_valid_pkg_name`
+  - `-S UpperCase-Pkg` for the wrapper `_aur_safe_classify`
 
 ## Verification
 

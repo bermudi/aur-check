@@ -2897,7 +2897,7 @@ if command -v aur-safe >/dev/null 2>&1; then
         *)
           if [ "$_expect_pkg" = 1 ]; then
             case "$_a" in
-              .*|*[!a-z0-9@._+-]*) echo INVALID_TARGET ;;
+              .*|*[!a-zA-Z0-9@._+-]*) echo INVALID_TARGET ;;
               *) printf 'PKG:%s\n' "$_a" ;;
             esac
           fi
@@ -3263,6 +3263,7 @@ cmd_selftest() {
   tw "-Syu explicit"     "new-aur,gate"          -Syu new-aur
   tw "-Sua --noconfirm"  "gate"                 -Sua --noconfirm
   tw "-S foo"            "foo"                  -S foo
+  tw "-S UpperCase-Pkg"  "UpperCase-Pkg"        -S UpperCase-Pkg
   if [ "$(_aur_safe_classify -S gate)" = "PKG:gate" ]; then
     log "  $(c_green "PASS") wrapper-gate-package-not-sentinel"; pass=$((pass+1))
   else log "  $(c_red "FAIL") wrapper-gate-package-not-sentinel"; fail=$((fail+1)); fi
