@@ -90,6 +90,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 ### Low
 - ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
 - ✓ **gh18** — `cmd_scan` coverage is partial (Cohort 2 L1, #18) → [doc](gh18-cmd-scan-partial-coverage.md) · [#18](https://github.com/bermudi/aur-check/issues/18)
+- ✓ **gh21** — SHA-1 trust anchors will not support SHA-256 git repos (Cohort 2 L4, #21) → [doc](gh21-sha256-trust-anchors.md) · [#21](https://github.com/bermudi/aur-check/issues/21)
 - ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-check/issues/22)
 - L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
 
@@ -128,7 +129,7 @@ the delegate transcripts (sessions above). All **fixed** except **L2**.
 
 - **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
   filed per-finding as each issue closes (see AGENTS.md "Findings & issue
-  tracking"). **#2 (C1), #11 (M2), #18 (L1), and #22 (L5) are done** → gh2, gh11, gh18, gh22; the rest are pending.
+  tracking"). **#2 (C1), #11 (M2), #18 (L1), #21 (L4), and #22 (L5) are done** → gh2, gh11, gh18, gh21, gh22; the rest are pending.
   Where they overlap
   Cohort 1 (already fixed), cross-link to the existing doc rather than duplicate.
 - **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).

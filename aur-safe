@@ -1338,7 +1338,7 @@ accepted_ref() {
   f="$ACCEPTED_DIR/$pkgbase"
   [[ -s "$f" ]] || return 1
   sha=$(awk -F'\t' '{print $1; exit}' "$f")
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
   git -C "$dir" cat-file -e "${sha}^{commit}" 2>/dev/null || return 1
   printf '%s\n' "$sha"
 }
@@ -1348,7 +1348,7 @@ accepted_ref() {
 write_ref() {
   local dir="$1" f="$2" sha url
   sha=$(git -C "$dir" rev-parse --verify "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null) || return 1
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
   url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
   _atomic_write_record "$f" "$sha"$'\t'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"$'\t'"$url"
 }
@@ -1509,12 +1509,12 @@ find_baseline_commit() {
         }
         ver = rel = epoch = ""
       }
-      /^[0-9a-f]{40} (blob|tree|commit|tag) [0-9]+$/ { if (bi > 0) emit(); bi++; next }
+      /^[0-9a-f]{40}([0-9a-f]{24})? (blob|tree|commit|tag) [0-9]+$/ { if (bi > 0) emit(); bi++; next }
       # cat-file --batch prints "<full-rev>:<path> missing" for absent objects.
       # Match the EXACT line format (sha:.SRCINFO, space, "missing") so blob
       # content lines ending in the word "missing" (e.g. "# arm64 binary is
       # missing") are never confused with a missing-object header.
-      /^[0-9a-f]{40}:\.SRCINFO missing$/            { if (bi > 0) emit(); bi++; next }
+      /^[0-9a-f]{40}([0-9a-f]{24})?:\.SRCINFO missing$/            { if (bi > 0) emit(); bi++; next }
       {
         if      ($0 ~ /^[[:space:]]*pkgver =/) { sub(/^[[:space:]]*pkgver = */, ""); ver = $0 }
         else if ($0 ~ /^[[:space:]]*pkgrel =/) { sub(/^[[:space:]]*pkgrel = */, ""); rel = $0 }
@@ -1573,7 +1573,7 @@ _clone_aur() {
   # a real package and scanning its fragments would be noise. Fail (return 1).
   [[ -f "$tmp/$pkgbase/PKGBUILD" ]] || { rm -rf "$tmp"; return 1; }
   if ! SCAN_SHA=$(git -C "$tmp/$pkgbase" rev-parse --verify "origin/${AUR_REMOTE_BRANCH}" 2>/dev/null) \
-      || [[ ! "$SCAN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+      || [[ ! "$SCAN_SHA" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
     rm -rf "$tmp"
     SCAN_SHA=""
     return 1
@@ -1664,7 +1664,7 @@ _stage_scan_if_gating() {
   [[ -n "${AUR_SAFE_STAGING:-}" ]] || return 0
   local pkgbase="$1" staged
   staged="$STAGED_DIR/$pkgbase"
-  [[ "${SCAN_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "${SCAN_SHA:-}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
   _atomic_write_record "$staged" "$SCAN_SHA"$'\t'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"$'\t'"${SCAN_URL:-}" \
     || return 1
   if ! printf '%s\n' "$pkgbase" >>"$MANIFEST_FILE"; then
@@ -2563,7 +2563,7 @@ _cmd_accept_locked() {
     staged_file="$STAGED_DIR/$pkgbase"
     [[ -f "$staged_file" ]] || { skipped=$((skipped+1)); continue; }
     staged_sha=$(awk -F'\t' '{print $1; exit}' "$staged_file")
-    [[ "$staged_sha" =~ ^[0-9a-f]{40}$ ]] \
+    [[ "$staged_sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
       || { skipped=$((skipped+1)); continue; }
     staged_at=$(stat -c %Y "$staged_file" 2>/dev/null) \
       || { skipped=$((skipped+1)); continue; }
@@ -2783,7 +2783,7 @@ cmd_makepkg() {
   [[ -f "$staged_file" ]] \
     || { log "$(c_red "BLOCK") makepkg guard: no staged ref for $pkgbase"; return 1; }
   staged_sha=$(awk -F'\t' '{print $1; exit}' "$staged_file")
-  [[ "$staged_sha" =~ ^[0-9a-f]{40}$ ]] \
+  [[ "$staged_sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
     || { log "$(c_red "BLOCK") makepkg guard: malformed staged ref for $pkgbase"; return 1; }
   head=$(git -C "$top" rev-parse --verify HEAD 2>/dev/null) \
     || { log "$(c_red "BLOCK") makepkg guard: cannot resolve HEAD for $pkgbase"; return 1; }
