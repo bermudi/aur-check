@@ -54,7 +54,7 @@ exists in the candidate:
 - `install`, `noextract`, `options`, `backup`
 - dependency arrays: `depends`, `makedepends`, `checkdepends`, `optdepends`,
   `conflicts`, `provides`, `replaces`
-- `# Maintainer:` / `# Contributor:` comments
+- `# Maintainer:` / `# Contributor:` comments (matched case-insensitively)
 
 For each removed assignment line the field name is extracted from the start of
 the line. If the candidate `origin/master:PKGBUILD` no longer contains that

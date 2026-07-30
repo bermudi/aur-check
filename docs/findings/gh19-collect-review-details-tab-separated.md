@@ -12,7 +12,7 @@
 non-boring `+` line for the review-detail summary:
 
 ```
-<raw added-line text> \t <formatted detail ("file:line[: in ctx]: text")>
+<raw added-line text> \t <formatted detail ("file:line: text")>
 ```
 
 The record was split with `IFS=$'\t' read -r d_text d_fmt` in the caller.
@@ -30,10 +30,11 @@ security decision was unaffected; this was a review-detail presentation bug.
   between the raw added-line text and the formatted detail:
 
   ```awk
-  printf "%s\0%s:%d in %s: %s\n", text, file, newln, where, text
+  printf "%s\0%s:%d: %s\n", text, file, newln, text
   ```
 
-  and the no-context branch uses the same `\0` separator.
+  The detail intentionally omits Git's heuristic hunk heading; it is not parsed
+  PKGBUILD shell scope.
 
 - The caller now reads the two fields in two `read` steps:
 
@@ -59,7 +60,7 @@ bytes needed by `_detail_is_build_logic()`.
 
 - `bash -n aur-safe` — clean.
 - `shellcheck -s bash aur-safe` — clean.
-- `./aur-safe selftest </dev/null` — 314 passed, 0 failed.
+- `./aur-safe selftest </dev/null` — 319 passed, 0 failed.
 - `classifier-detail-tab-in-text` sends an added build-command line containing
   a literal interior tab through `_collect_review_details()` and its caller,
   then asserts that the complete rendered `PKGBUILD:<line>: <text>` detail

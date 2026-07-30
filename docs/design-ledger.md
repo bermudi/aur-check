@@ -428,12 +428,15 @@ header, or a build/install statement like `install`/`cp`/`cmake`/`make`/`npm`/
 PKGBUILD var assignment), so the reviewer's eye lands on the security-relevant
 change. This is editorial only — the gate's classification is unaffected; a
 missed keyword falls through to the generic summary (fail-safe). The
-build-logic check is **content-based**, not git-hunk-annotation-based: PKGBUILD
-has no built-in diff driver, so git never annotates hunks with `package()`/
-`build()` context, making a prior `^PKGBUILD:N in (...)` summary regex
-effectively dead. The keyword list is not a security blacklist (the threat
-model's red line is against attacker-rotated package/installer names, not shell
-keywords).
+build-logic check is **content-based**, not git-hunk-annotation-based: Git's
+generic hunk heading is a heuristic, not parsed PKGBUILD shell scope, making a
+prior `^PKGBUILD:N in (...)` summary regex unreliable. Review details therefore
+render only `file:line: text`, never the hunk heading; one real `_build=...`
+change was otherwise mislabeled `in depends=(alsa-lib`. Plain numeric
+assignments receive a specific `PKGBUILD variable '<name>' changed` summary
+while remaining review. The keyword list is not a security blacklist (the
+threat model's red line is against attacker-rotated package/installer names,
+not shell keywords).
 Diff/read failures are `audit_unavailable` (exit 1), never consented or LLM
 auto-green, and never stage. Staging stays in the callers (cached uses `_stage_if_gating` with a
 cache dir; missing-cache uses `_stage_scan_if_gating` with `SCAN_SHA`).

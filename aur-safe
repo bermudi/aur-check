@@ -1145,18 +1145,17 @@ _pkgbuild_repo_dep_added_line() {
 # Wants the wanted lines (one per record) on a temp-file fd so newline-bearing
 # content can't break awk's `-v` (which mangles embedded newlines) or be
 # injected into the awk program text. Output per match, NUL-separated (0x00):
-#   <raw added-line text> \0 <formatted detail ("file:line[: in ctx]: text")>
-# Records preserve diff order so callers can prefer the first build-logic hit.
+#   <raw added-line text> \0 <formatted detail ("file:line: text")>
+# Git's optional hunk heading is deliberately omitted. For PKGBUILD it is a
+# heuristic label, not a parsed shell scope: e.g. an `_build=...` assignment can
+# be headed `depends=(alsa-lib` and rendering that as "in depends" is actively
+# misleading. Records preserve diff order so callers can prefer the first
+# build-logic hit.
 _collect_review_details() {
   local dir="$1" base_ref="$2" want_file="$3"
   git -C "$dir" --no-pager diff "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- \
     "${EXCLUDE_PATHS[@]}" 2>/dev/null \
     | awk -v want_file="$want_file" '
-        function trim(s) {
-          sub(/^[[:space:]]+/, "", s)
-          sub(/[[:space:]]+$/, "", s)
-          return s
-        }
         BEGIN {
           # Load wanted added-lines into w[] (keyed by line text) + wcount.
           n=0
@@ -1165,7 +1164,7 @@ _collect_review_details() {
           }
           close(want_file)
         }
-        /^diff --git / { file=""; newln=0; where=""; next }
+        /^diff --git / { file=""; newln=0; next }
         /^\+\+\+ b\// {
           file=substr($0, 7)
           next
@@ -1173,12 +1172,6 @@ _collect_review_details() {
         /^@@ / {
           if (match($0, /\+[0-9]+/)) {
             newln=substr($0, RSTART + 1, RLENGTH - 1)
-          }
-          where=""
-          if ($0 ~ /^@@ .* @@ /) {
-            where=$0
-            sub(/^@@ .* @@[[:space:]]*/, "", where)
-            where=trim(where)
           }
           next
         }
@@ -1189,12 +1182,9 @@ _collect_review_details() {
           if (marker == "+" && (text in w)) {
             # Carry the raw text (NUL-separated) so the build-logic check never
             # has to parse the formatted detail back apart — fixing the
-            # colon-in-text extraction bug.
-            if (where != "") {
-              printf "%s\0%s:%d in %s: %s\n", text, file, newln, where, text
-            } else {
-              printf "%s\0%s:%d: %s\n", text, file, newln, text
-            }
+            # colon-in-text extraction bug. Do not render the Git heuristic hunk
+            # heading as if it were a trustworthy shell scope.
+            printf "%s\0%s:%d: %s\n", text, file, newln, text
             # Mark emitted so a duplicate text later in the diff does not replay
             # (the first occurrence is the most useful location to show).
             delete w[text]
@@ -1209,11 +1199,11 @@ _collect_review_details() {
 # A review detail is "build logic" when its added text is a shell command that
 # runs at build/install time — the security-relevant case (vs inert metadata
 # like backup= or replaces= that survives the per-line boring loop). Content-
-# based, not git-hunk-annotation-based: PKGBUILD has no built-in diff driver,
-# so git never annotates hunks with package()/build() context, making the prior
-# `^PKGBUILD:N in (prepare|build|check|package)` summary regex effectively dead.
+# based, not git-hunk-annotation-based: Git's generic hunk heading is a
+# heuristic, not parsed PKGBUILD shell scope, making the prior
+# `^PKGBUILD:N in (prepare|build|check|package)` summary regex unreliable.
 # The function-keyword list is the same surface the summary used to key off,
-# now matched against the added text instead of git's (absent) hunk label. The
+# now matched against the added text instead of Git's hunk label. The
 # command list is NOT a security blacklist — these are bash statement keywords
 # / build-tool invocations whose presence on a `+` line marks it as build
 # logic; the threat model's red line is against attacker-rotated package names,
@@ -1241,6 +1231,12 @@ _review_added_line_summary() {
   local text="$1"
   if _detail_is_build_logic "$text"; then
     printf '%s\n' "package build instructions changed"
+  elif [[ "$text" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=[0-9]+[[:space:]]*$ ]]; then
+    # Editorial only: classification has already selected review. Calling out
+    # the exact numeric assignment avoids making a simple `_build=...` release
+    # identifier look like dependency/build logic while preserving the
+    # fail-closed decision for arbitrary PKGBUILD variables.
+    printf "PKGBUILD variable '%s' changed; numeric value needs review\n" "${BASH_REMATCH[1]}"
   else
     printf '%s\n' "build file changed in a way aur-safe cannot auto-clear"
   fi
@@ -1909,7 +1905,7 @@ classify_diff_rules() {
     fi
     while IFS= read -r removed_line; do
       [[ "$removed_line" =~ ^[[:space:]]*$ ]] && continue
-      if [[ "$removed_line" =~ ^[[:space:]]*#[[:space:]]*(Maintainer|Contributor): ]]; then
+      if grep -iqE '^[[:space:]]*#[[:space:]]*(Maintainer|Contributor):' <<<"$removed_line" 2>/dev/null; then
         if ! grep -iqE '^[[:space:]]*#[[:space:]]*(Maintainer|Contributor):' <<<"$candidate_pkgbuild" 2>/dev/null; then
           log "  $(c_yellow "review") [maintainer-line-removed]"
           removed_field_match=1
@@ -5483,6 +5479,27 @@ EOF
     log "  $(c_green "PASS") classifier-detail-tab-in-text"; pass=$((pass+1))
   else
     log "  $(c_red "FAIL") classifier-detail-tab-in-text (got: $_tab_out)"
+    fail=$((fail+1))
+  fi
+
+  # Git can label a PKGBUILD hunk containing `_build=...` with a preceding
+  # `depends=(...)` assignment. Rendering that heuristic heading as "in
+  # depends" made an ordinary release identifier look like a dependency-array
+  # mutation. Keep the useful file:line location, identify the numeric variable
+  # explicitly, and omit the false scope.
+  local _var_old_pkg _var_new_pkg _var_out _var_expected
+  printf -v _var_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\ndepends=(alsa-lib\n  gtk3)\nsource=("https://example.com/pkg-$pkgver.tar")\nsha256sums=(%s)\n_build=5358163105546240' "$_sum1"
+  _var_new_pkg=${_var_old_pkg/5358163105546240/4510119262814208}
+  _class_bld "$_clx" "cls-numeric-variable-detail" "$_var_old_pkg" "$_var_new_pkg" "$_old_src" "$_old_src"
+  LLM_AUTO_BORING=0
+  _var_out=$(classify_diff_rules "cls-numeric-variable-detail" "$_CLASS_DIR" "$_CLASS_BASE" 2>&1 >/dev/null)
+  _var_expected="      added: PKGBUILD:8: _build=4510119262814208"
+  if printf '%s\n' "$_var_out" | grep -Fq "PKGBUILD variable '_build' changed; numeric value needs review" \
+     && printf '%s\n' "$_var_out" | grep -Fqx "$_var_expected" \
+     && ! printf '%s\n' "$_var_out" | grep -Fq ' in depends='; then
+    log "  $(c_green "PASS") classifier-detail-numeric-variable-no-false-scope"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") classifier-detail-numeric-variable-no-false-scope (got: $_var_out)"
     fail=$((fail+1))
   fi
 
