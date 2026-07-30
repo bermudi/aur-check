@@ -486,6 +486,16 @@ only to exit-2 results after a real candidate was audited. Fetch/clone/diff/read
 or state failures map to exit 1, block the helper, and never stage. This closes
 the old zero-signal auto-proceed/first-contact re-seeding hole.
 
+**Helper update-query status contract.** `yay -Qua` and `paru -Qua` inherit
+pacman's query convention: no matching packages is exit 1, with zero bytes on
+both stdout and stderr. `cmd_gate` captures the channels separately and treats
+only that exact `(yay|paru, rc=1, regular readable empty stdout, regular
+readable empty stderr)` tuple as an empty candidate set. A newline, any output or
+diagnostic, a different status, an unavailable capture file, or an unrecognized
+helper remains audit-unavailable and blocks. This exception is deliberately
+narrow; treating every nonzero query as empty would turn a failed enumeration
+into consent.
+
 ### No name-list for alternative downloaders / network tools
 `aria2c`, `socat`, `nc`, `tftp`, `rsync`, `python -c "import urllib..."`, and
 the next attacker-chosen fetcher are intentionally **not** hard-coded into the
@@ -625,8 +635,9 @@ staged commits.
 
 ## Verification status (so you don't re-verify what's already proven)
 
-- `selftest`: **292/292**. Coverage includes hard/review rule variants; wrapper
-  dispatch, update-query failure, and gate-through-accept locking; atomic
+- `selftest`: **324/324**. Coverage includes hard/review rule variants; wrapper
+  dispatch, update-query empty-result/status handling, update-query failure, and
+  gate-through-accept locking; atomic
   accepted/staged state; pacman local-DB pkgbase/build/install binding (foreign
   `.SRCINFO` rejection, stale-build rejection, split packages, epoch zero);
   missing-cache baseline recovery and always-review tier 2; git/diff failure

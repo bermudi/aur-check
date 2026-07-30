@@ -228,6 +228,23 @@ fi
 log()   { printf '%s\n' "$*" >&2; }
 die()   { log "$(c_red "error:") $*"; exit 3; }
 
+# yay/paru inherit pacman's query convention: -Qua returns 1 with no output
+# when there are no AUR updates. Keep this exception exact: stdout and stderr
+# are captured in separate files so a newline, diagnostic, missing file, or
+# other nonzero result cannot masquerade as an empty candidate set. All other
+# query failures remain audit-unavailable (design-ledger "Audit-unavailable is
+# not consentable").
+_update_query_is_empty_success() {
+  local helper="$1" rc="$2" stdout_file="$3" stderr_file="$4"
+  [[ "$rc" == 1 ]] || return 1
+  case "${helper##*/}" in
+    yay|paru) ;;
+    *) return 1 ;;
+  esac
+  [[ -f "$stdout_file" && -r "$stdout_file" && ! -s "$stdout_file" \
+     && -f "$stderr_file" && -r "$stderr_file" && ! -s "$stderr_file" ]]
+}
+
 # Cache for repo-local config safety checks (H1). Keyed by the repo path used
 # with -C (or $(pwd) for no -C). A missing/unset key means "not checked yet".
 declare -A _GIT_SAFE_REPO=()
@@ -2536,22 +2553,31 @@ cmd_gate() {
   fi
   AUR_SAFE_STAGING=1
 
-  local updates qua_err qua_rc pkgs=()
-  qua_err=$(mktemp -t aur-safe-qua.XXXXXX) \
-    || { log "$(c_red "BLOCK") could not create update-query error log"; exit 1; }
+  local qua_out qua_err qua_rc pkgs=()
+  qua_out=$(mktemp -t aur-safe-qua-out.XXXXXX) \
+    || { log "$(c_red "BLOCK") could not create update-query output log"; exit 1; }
+  qua_err=$(mktemp -t aur-safe-qua-err.XXXXXX) \
+    || { rm -f "$qua_out"; log "$(c_red "BLOCK") could not create update-query error log"; exit 1; }
+  _register_temp_path "$qua_out"
   _register_temp_path "$qua_err"
-  updates=$("$helper" -Qua 2>"$qua_err"); qua_rc=$?
-  if (( qua_rc != 0 )); then
-    log "$(c_red "BLOCK") AUR update enumeration failed (helper rc $qua_rc); candidate set unknown"
-    sed 's/^/      /' "$qua_err" | head -8 >&2
-    rm -f "$qua_err"
+  "$helper" -Qua >"$qua_out" 2>"$qua_err"; qua_rc=$?
+  if [[ ! -f "$qua_out" || ! -r "$qua_out" || ! -f "$qua_err" || ! -r "$qua_err" ]]; then
+    log "$(c_red "BLOCK") update-query capture became unavailable; candidate set unknown"
+    rm -f "$qua_out" "$qua_err"
     exit 1
   fi
-  rm -f "$qua_err"
+  if (( qua_rc != 0 )) && ! _update_query_is_empty_success \
+      "$helper" "$qua_rc" "$qua_out" "$qua_err"; then
+    log "$(c_red "BLOCK") AUR update enumeration failed (helper rc $qua_rc); candidate set unknown"
+    sed 's/^/      /' "$qua_err" | head -8 >&2
+    rm -f "$qua_out" "$qua_err"
+    exit 1
+  fi
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     pkgs+=("${line%% *}")
-  done <<<"$updates"
+  done <"$qua_out"
+  rm -f "$qua_out" "$qua_err"
 
   if (( ${#pkgs[@]} == 0 )); then
     log "$(c_green "ok") no AUR updates pending"
@@ -3365,15 +3391,58 @@ cmd_selftest() {
     log "  $(c_green "PASS") wrapper-locks-gate-through-accept"; pass=$((pass+1))
   else log "  $(c_red "FAIL") wrapper-locks-gate-through-accept"; fail=$((fail+1)); fi
 
-  # A failed helper update query must be audit-unavailable, never "no updates".
-  local _gate_tmp _gate_out _gate_rc
+  # yay/paru return rc 1 with two empty output channels for a normal
+  # no-updates result. Only that exact protocol exception is clean; every
+  # diagnostic, candidate-looking output, newline, or other rc remains
+  # audit-unavailable and must block.
+  local _gate_tmp _gate_out _gate_rc _query_out _query_err
   _gate_tmp=$(mktemp -d)
   mkdir -p "$_gate_tmp/bin" "$_gate_tmp/state/accepted" "$_gate_tmp/state/staged"
-  printf '#!/usr/bin/env bash\nprintf "query exploded\\n" >&2\nexit 42\n' >"$_gate_tmp/bin/yay"
+  _query_out="$_gate_tmp/query.out"
+  _query_err="$_gate_tmp/query.err"
+  : >"$_query_out"
+  : >"$_query_err"
+  if _update_query_is_empty_success "$_gate_tmp/bin/yay" 1 "$_query_out" "$_query_err" \
+      && _update_query_is_empty_success "$_gate_tmp/bin/paru" 1 "$_query_out" "$_query_err"; then
+    log "  $(c_green "PASS") empty-query-rc1-is-no-updates"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") empty-query-rc1-is-no-updates"; fail=$((fail+1))
+  fi
+  printf '\n' >"$_query_out"
+  if ! _update_query_is_empty_success "$_gate_tmp/bin/yay" 1 "$_query_out" "$_query_err"; then
+    log "  $(c_green "PASS") newline-query-output-is-not-empty"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") newline-query-output-is-not-empty"; fail=$((fail+1))
+  fi
+  : >"$_query_out"
+  printf '%s\n' 'query exploded' >"$_query_err"
+  if ! _update_query_is_empty_success "$_gate_tmp/bin/yay" 1 "$_query_out" "$_query_err"; then
+    log "  $(c_green "PASS") query-diagnostic-not-clean"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") query-diagnostic-not-clean"; fail=$((fail+1))
+  fi
+  : >"$_query_err"
+  printf '%s\n' 'unexpected-pkg 1.0-1' >"$_query_out"
+  if ! _update_query_is_empty_success "$_gate_tmp/bin/yay" 1 "$_query_out" "$_query_err"; then
+    log "  $(c_green "PASS") failed-query-output-not-parsed"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") failed-query-output-not-parsed"; fail=$((fail+1))
+  fi
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$_gate_tmp/bin/yay"
   chmod +x "$_gate_tmp/bin/yay"
   _gate_out=$(PATH="$_gate_tmp/bin:$PATH" AUR_SAFE_STATE_DIR="$_gate_tmp/state" \
     "$0" gate 2>&1); _gate_rc=$?
-  if [ "$_gate_rc" = 1 ] && grep -q 'update enumeration failed' <<<"$_gate_out"; then
+  if [ "$_gate_rc" = 0 ] && grep -q 'no AUR updates pending' <<<"$_gate_out"; then
+    log "  $(c_green "PASS") gate-empty-query-rc1-is-clean"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") gate-empty-query-rc1-is-clean (rc=$_gate_rc)"; fail=$((fail+1))
+  fi
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "query exploded" >&2' 'exit 1' >"$_gate_tmp/bin/yay"
+  chmod +x "$_gate_tmp/bin/yay"
+  _gate_out=$(PATH="$_gate_tmp/bin:$PATH" AUR_SAFE_STATE_DIR="$_gate_tmp/state" \
+    "$0" gate 2>&1); _gate_rc=$?
+  if [ "$_gate_rc" = 1 ] && grep -q 'update enumeration failed' <<<"$_gate_out" \
+      && grep -q 'query exploded' <<<"$_gate_out"; then
     log "  $(c_green "PASS") gate-query-failure-not-clean"; pass=$((pass+1))
   else
     log "  $(c_red "FAIL") gate-query-failure-not-clean (rc=$_gate_rc)"; fail=$((fail+1))
