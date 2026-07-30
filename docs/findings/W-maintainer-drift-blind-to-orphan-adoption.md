@@ -95,6 +95,6 @@ is hardening, not a closure requirement.
   - `same-maintainer-version-bump` — same `# Maintainer:` on both sides with a
     routine `pkgver` bump → still classifies `boring` (no false positive from the
     loosened guard).
-- The remove-then-add launder (Finding H4, #8) is defeated because commit B, once
-  the baseline is maintainer-less, now raises `review` for the new maintainer
-  domain.
+- The remove-then-add launder (Finding H4, [#8](gh8-deletion-only-changes-classified-boring.md))
+  is defeated because commit B, once the baseline is maintainer-less, now raises
+  `review` for the new maintainer domain.

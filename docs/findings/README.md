@@ -51,12 +51,14 @@ C1–C3 + H1, #2–#5), gh18 (L1, #18), gh19 (L2, #19), and gh21–gh22 (L4–L5
 are resolved** — the `++` added-line-drop, fail-open source URI validation,
 advisory-only `cmd_audit`, repo-local git-config / git-invocation hardening,
 `cmd_scan` partial-coverage documentation, review-detail record separation,
-SHA-256 trust anchors, and uppercase package-name validation; **gh11 (M2, #11)
-is resolved** (C-locale determinism); **gh10 (M1, #10) is resolved** (duplicate
-of gh3 — source authority anomalies deterministically routed to review before
-the LLM boundary); **#24–#26 are fixed** (W/Y/X — maintainer-drift orphan
-adoption, advisory-accept commit binding, `source+=()` drift); #6–#9, #12–#17,
-and #20 remain pending. See <https://github.com/bermudi/aur-check/issues>.
+SHA-256 trust anchors, and uppercase package-name validation; **gh8 (H4, #8)
+is resolved** (deletion-only/removed PKGBUILD security fields no longer auto-
+clear as boring); **gh11 (M2, #11) is resolved** (C-locale determinism);
+**gh10 (M1, #10) is resolved** (duplicate of gh3 — source authority anomalies
+deterministically routed to review before the LLM boundary); **#24–#26 are fixed**
+(W/Y/X — maintainer-drift orphan adoption, advisory-accept commit binding,
+`source+=()` drift); #6–#7, #9, #12–#17, and #20 remain pending. See
+<https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
 
@@ -82,6 +84,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **T** — Changed patch content omitted from review evidence → [doc](T-patch-review-evidence-omitted.md)
 - ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
 - ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-check/issues/6)
+- ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-check/issues/8)
 
 ### Medium
 - ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
@@ -144,11 +147,11 @@ as a non-finding — see below).
 - **Cohort 2 (C/H/M/L, GitHub #2–#22) + #24–#26:** durable `docs/findings/`
   writeups are filed per-finding as each issue closes (see AGENTS.md "Findings &
   issue tracking"). **All closed issues have docs:** #2 (gh2), #3 (gh3), #4 (gh4),
-  #5 (gh5), #6 (gh6), #10 (gh10, duplicate of gh3), #11 (gh11), #18 (gh18), #19 (gh19),
-  #21 (gh21), #22 (gh22), #24 (W), #25 (Y), #26 (X). Where they overlap
+  #5 (gh5), #6 (gh6), #8 (gh8), #10 (gh10, duplicate of gh3), #11 (gh11), #18 (gh18),
+  #19 (gh19), #21 (gh21), #22 (gh22), #24 (W), #25 (Y), #26 (X). Where they overlap
   Cohort 1 (already fixed), the existing doc is cross-linked rather than
   duplicated.
-- **Open issues without docs (by design — doc is written on close):** #7, #8,
-  #9, #12, #13, #14, #15, #16, #17, #20.
+- **Open issues without docs (by design — doc is written on close):** #7, #9,
+  #12, #13, #14, #15, #16, #17, #20.
 - **L2 (Cohort 1):** rejected as a non-finding (see §Low-severity findings). No
   tracker home needed.

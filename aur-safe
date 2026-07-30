@@ -519,6 +519,25 @@ _diff_added_metadata_file() {
   _diff_added_lines <<<"$diff_out"
 }
 
+# Finding H4 / gh8: the added-line classifier is blind to removed lines. A
+# deleted PKGBUILD security-relevant field has no added-line signal, so the
+# candidate would otherwise auto-clear as boring. This extractor mirrors
+# _diff_added_lines/_diff_added_metadata_file for the removed half.
+_diff_removed_lines() {
+  awk '
+    /^@@/    { in_hunk = 1; next }
+    /^diff / { in_hunk = 0; next }
+    in_hunk && /^-/ { sub(/^-/, ""); print }
+  '
+}
+
+_diff_removed_metadata_file() {
+  local dir="$1" base_ref="$2" path="$3" diff_out
+  diff_out=$(git -C "$dir" --no-pager diff --text --no-textconv \
+    "${base_ref}..origin/${AUR_REMOTE_BRANCH}" -- "$path" 2>/dev/null) || return 1
+  _diff_removed_lines <<<"$diff_out"
+}
+
 _blob_is_nul_free() {
   local dir="$1" ref="$2" path="$3" tmp
   # A missing path is handled structurally as an add/delete, not a read error.
@@ -1686,7 +1705,7 @@ classify_diff_rules() {
   SCAN_DIFF_CLASS="review"
   SCAN_DIFF_REASON=""
 
-  local added pkg_added srcinfo_added scan_added
+  local added pkg_added srcinfo_added pkg_removed scan_added
   # PKGBUILD/.SRCINFO are expected text. Refuse NUL before any git output enters
   # a Bash scalar (which would silently drop it), then extract those files with
   # explicit path identity and `--text` so hostile attributes cannot hide them.
@@ -1698,6 +1717,7 @@ classify_diff_rules() {
   fi
   if ! pkg_added=$(_diff_added_metadata_file "$dir" "$base_ref" PKGBUILD) \
      || ! srcinfo_added=$(_diff_added_metadata_file "$dir" "$base_ref" .SRCINFO) \
+     || ! pkg_removed=$(_diff_removed_metadata_file "$dir" "$base_ref" PKGBUILD) \
      || ! added=$(cd "$dir" && diff_added "${base_ref}..origin/${AUR_REMOTE_BRANCH}"); then
     log "  $(c_yellow "review") $pkg — could not diff vs baseline (corrupt repo? missing object?)"
     SCAN_DIFF_CLASS="audit_unavailable"
@@ -1870,6 +1890,48 @@ classify_diff_rules() {
     log "  $(c_yellow "review") [source-non-ascii]"
     sed 's/^/      /' <<<"$nonascii_src" | head -4 >&2
     review_hits=1
+  fi
+
+  # Finding H4 / gh8: a removed PKGBUILD security-relevant field that is no
+  # longer present in the candidate has no added-line signal and must not auto-
+  # clear as boring. A value change or reflow that leaves the same field in the
+  # candidate is "inert"; array members that are not opener/assignment lines
+  # have no field name here, so the opener/closer removal covers full field
+  # deletion. Maintainer/Contributor comment removal is flagged when the new
+  # file has no such line.
+  local removed_line candidate_pkgbuild removed_field_match=0
+  if (( ! review_hits )); then
+    if ! candidate_pkgbuild=$(git -C "$dir" show "origin/${AUR_REMOTE_BRANCH}:PKGBUILD" 2>/dev/null); then
+      log "  $(c_yellow "review") $pkg — could not read candidate PKGBUILD for removed-field check"
+      SCAN_DIFF_CLASS="audit_unavailable"
+      SCAN_DIFF_REASON="candidate-pkgbuild-unavailable"
+      return 0
+    fi
+    while IFS= read -r removed_line; do
+      [[ "$removed_line" =~ ^[[:space:]]*$ ]] && continue
+      if [[ "$removed_line" =~ ^[[:space:]]*#[[:space:]]*(Maintainer|Contributor): ]]; then
+        if ! grep -iqE '^[[:space:]]*#[[:space:]]*(Maintainer|Contributor):' <<<"$candidate_pkgbuild" 2>/dev/null; then
+          log "  $(c_yellow "review") [maintainer-line-removed]"
+          removed_field_match=1
+          break
+        fi
+        continue
+      fi
+      [[ "$removed_line" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$removed_line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[+]?([[:space:]]*\[[0-9]+\])?[[:space:]]*= ]]; then
+        local field_name="${BASH_REMATCH[1]}"
+        if [[ "$field_name" =~ ^(source(_[[:alnum:]_]+)?|(md5|sha[0-9]+|b2)sums(_[[:alnum:]_]+)?|validpgpkeys|install|noextract|options|backup|depends|makedepends|checkdepends|optdepends|conflicts|provides|replaces)$ ]]; then
+          if ! grep -Eq "^[[:space:]]*${field_name}[+]?([[:space:]]*=[[:space:]]*\\(?|[[:space:]]*\\[[0-9]+\\][[:space:]]*=)" <<<"$candidate_pkgbuild" 2>/dev/null; then
+            log "  $(c_yellow "review") [pkgbuild-${field_name}-removed]"
+            removed_field_match=1
+            break
+          fi
+        fi
+      fi
+    done <<<"$pkg_removed"
+    if (( removed_field_match )); then
+      review_hits=1
+    fi
   fi
 
   if (( review_hits )); then
@@ -4412,6 +4474,10 @@ EOF
   # indexed checksum-array element assignment fixtures (sha512sums[0]=)
   local _sum512_old _sum512_new _idx_cs_old_pkg _idx_cs_new_pkg _idx_cs_old_src _idx_cs_new_src
   local _idx_skip_old_pkg _idx_skip_new_pkg _idx_subst_new_pkg
+  # Finding H4 / gh8: removed security-relevant PKGBUILD fields
+  local _del_vpgp_old_pkg _del_vpgp_new_pkg _del_vpgp_old_src _del_vpgp_new_src
+  local _del_sums_old_pkg _del_sums_new_pkg _del_sums_old_src _del_sums_new_src
+  local _del_source_old_pkg _del_source_new_pkg _del_source_old_src _del_source_new_src
   _sum1=1111111111111111111111111111111111111111111111111111111111111111
   _sum2=2222222222222222222222222222222222222222222222222222222222222222
   _old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
@@ -4426,6 +4492,22 @@ EOF
   printf -v _same_maintainer_new_pkg '# Maintainer: Daniel <daniel@example.com>\npkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
   _same_maintainer_old_src="$_old_src"
   _same_maintainer_new_src="$_new_src"
+
+  # Finding H4 / gh8 fixtures: deletion-only removal of security-relevant
+  # PKGBUILD fields. Each old package has the field; the new package drops it.
+  printf -v _del_vpgp_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nvalidpgpkeys=("0123456789ABCDEF0123456789ABCDEF01234567")' "$_sum1"
+  printf -v _del_vpgp_new_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum1"
+  _del_vpgp_old_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\tsha256sums = '"$_sum1"$'\n\tvalidpgpkeys = 0123456789ABCDEF0123456789ABCDEF01234567\n\npkgname = cls-pkg'
+  _del_vpgp_new_src="$_old_src"
+  _del_sums_old_pkg="$_old_basic"
+  printf -v _del_sums_new_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")'
+  _del_sums_old_src="$_old_src"
+  _del_sums_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsource = https://example.com/pkg-1.tar\n\npkgname = cls-pkg'
+  _del_source_old_pkg="$_old_basic"
+  printf -v _del_source_new_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsha256sums=(%s)' "$_sum1"
+  _del_source_old_src="$_old_src"
+  _del_source_new_src=$'pkgbase = cls-pkg\n\tpkgver = 1.0\n\tpkgrel = 1\n\tsha256sums = '"$_sum1"$'\n\npkgname = cls-pkg'
+
   printf -v _old_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum1"
   printf -v _new_multi_sum_pkg "pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=(\"https://example.com/pkg-1.tar\")\nsha256sums=(\n    '%s'\n)" "$_sum2"
   printf -v _sum2_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)' "$_sum2"
@@ -4542,6 +4624,25 @@ EOF
   tc_class same-maintainer-version-bump boring 0 \
     "$_same_maintainer_old_pkg" "$_same_maintainer_new_pkg" \
     "$_same_maintainer_old_src" "$_same_maintainer_new_src"
+
+  # Finding H4 / gh8: removal of security-relevant PKGBUILD fields must not
+  # auto-clear as boring. Positive control: replacement still clears.
+  tc_class delete-validpgpkeys-field review 2 \
+    "$_del_vpgp_old_pkg" "$_del_vpgp_new_pkg" \
+    "$_del_vpgp_old_src" "$_del_vpgp_new_src"
+  tc_class delete-sha256sums-field review 2 \
+    "$_del_sums_old_pkg" "$_del_sums_new_pkg" \
+    "$_del_sums_old_src" "$_del_sums_new_src"
+  tc_class delete-source-field review 2 \
+    "$_del_source_old_pkg" "$_del_source_new_pkg" \
+    "$_del_source_old_src" "$_del_source_new_src"
+  # Positive control: same-host source replacement still clears (the removed
+  # source= line is matched by an added source= line; field is still present).
+  tc_class same-host-source-replacement-boring boring 0 \
+    "$_old_basic" \
+    "$_host_pkg" \
+    "$_old_src" \
+    "$_host_src"
 
   tc_class checksum-only boring 0 \
     "$_old_basic" \

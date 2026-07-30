@@ -7,8 +7,8 @@ The repo accumulated findings in two largely independent cuts:
 - **Cohort 2 (GitHub #2–#22) + #24–#26** — a later review filed directly as
   GitHub issues under a C/H/M/L scheme. Each gets a `ghNN` doc when its issue
   closes (see AGENTS.md "Findings & issue tracking"); **all closed issues now
-  have docs** (gh2, gh3, gh4, gh5, gh11, gh18, gh19, gh21, gh22; #24→W, #25→Y,
-  #26→X cross-linked to existing Cohort 1 docs).
+  have docs** (gh2, gh3, gh4, gh5, gh6, gh8, gh11, gh18, gh19, gh21, gh22;
+  #24→W, #25→Y, #26→X cross-linked to existing Cohort 1 docs).
 
 This map reconciles them: each Cohort 2 item either (a) duplicates a Cohort 1
 finding → cross-link, no new doc; (b) extends one → note the extension on the
@@ -27,7 +27,7 @@ text, which predates several Cohort 1 fixes).
 | #5   | H1 | Repo-local git config + ext-diff not isolated | **FIXED** → [gh5](gh5-git-invocation-hardening.md) | done — extension of J/L7 |
 | #6   | H2 | Hard rules evadable via quoting/paths       | **FIXED** → [gh6](gh6-hard-rules-brittle.md) | done — architectural (structural classifier is the backstop) |
 | #7   | H3 | `.gitattributes` binary marking blunts scan | OPEN                  | **new** — needs doc |
-| #8   | H4 | Deletion-only changes classified boring     | OPEN                  | **new** — needs doc; related to W |
+| #8   | H4 | Deletion-only changes classified boring     | **FIXED** → [gh8](gh8-deletion-only-changes-classified-boring.md) | done — related to W |
 | #9   | H5 | makepkg guard untracked-file check too narrow | OPEN                | **new** — needs doc; extends S |
 | #10  | M1 | LLM verifier shouldn't see source-authority anomalies | **FIXED** → [gh10](gh10-llm-boring-edge-source-authority.md) (duplicate of gh3) | done |
 | #11  | M2 | No global `LC_ALL=C`                        | **FIXED** → [gh11](gh11-force-c-locale.md) | done |
@@ -43,11 +43,11 @@ text, which predates several Cohort 1 fixes).
 | #21  | L4 | SHA-1-only trust anchors (no SHA-256 git)    | **FIXED** → [gh21](gh21-sha256-trust-anchors.md) | done |
 | #22  | L5 | `_valid_pkg_name` rejects uppercase          | **FIXED** → gh22     | done — [gh22](gh22-uppercase-pkg-name-rejected.md) |
 
-**Tally:** 14 closed issues all have docs (gh2, gh3, gh4, gh5, gh6, gh10, gh11, gh18,
-gh19, gh21, gh22; #24→W, #25→Y, #26→X). 10 open issues (#7–#9, #12–#17, #20)
-remain; their docs will be written on close. 2 duplicates (#10↔gh3, #18↔B),
-1 extension (#5↔J/L7), 1 partial-overlap (#3↔E). Cohort 1 L2 is rejected
-(non-finding).
+**Tally:** 15 closed issues all have docs (gh2, gh3, gh4, gh5, gh6, gh8, gh10, gh11,
+gh18, gh19, gh21, gh22; #24→W, #25→Y, #26→X). 9 open issues (#7, #9, #12–#17,
+#20) remain; their docs will be written on close. 2 duplicates (#10↔gh3,
+#18↔B), 1 extension (#5↔J/L7), 1 partial-overlap (#3↔E). Cohort 1 L2 is
+rejected (non-finding).
 
 ## Verified-against-code notes (the ones worth checking, not just trusting the issue text)
 
@@ -76,12 +76,20 @@ remain; their docs will be written on close. 2 duplicates (#10↔gh3, #18↔B),
   reads `d_text` with `read -d ''` and `d_fmt` with a normal `read`. This
   preserves literal tabs in added PKGBUILD lines. Details are in
   [gh19](gh19-collect-review-details-tab-separated.md).
+- **#8 (H4) is FIXED.** Removed PKGBUILD security-relevant fields are now
+  tracked. `classify_diff_rules()` extracts removed metadata lines with
+  `_diff_removed_metadata_file()`, then for each removed assignment line checks
+  whether the candidate still contains the same field. Deletion of
+  `validpgpkeys`, `*sums`, `source`, dependency arrays, `install`/`noextract`/
+  `options`/`backup`, or the last maintainer/contributor comment routes to
+  `review`; value changes and reflows that keep the field clear normally.
+  See [gh8](gh8-deletion-only-changes-classified-boring.md).
 
 ## Notable relationships
 
 - **#8 (H4) ↔ W:** H4 is the deletion half (removing maintainer/integrity
   lines), W is the add-to-empty-baseline half. The two-commit launder in W's
-  doc uses H4's mechanism for step A. W is fixed (#24); H4 (#8) remains open.
+  doc uses H4's mechanism for step A. Both W (#24) and H4 (#8) are now fixed.
 - **#9 (H5) ↔ S:** H5 extends S's makepkg guard — the guard checks a narrow
   allowlist of untracked filenames (`PKGBUILD .SRCINFO *.install *.sh`) and
   misses `.gitattributes`, `.gitmodules`, submodules, uppercase extensions.
@@ -96,11 +104,11 @@ remain; their docs will be written on close. 2 duplicates (#10↔gh3, #18↔B),
 
 ## Pending work
 
-All closed issues (#2–#6, #10–#11, #18–#19, #21–#22, #24–#26) have their durable
-docs filed. The cross-links called out above are in place (#10→gh3 duplicate,
-#18→B duplicate, #5→J extension, #3→E partial). Remaining work is the 10 open
-issues (#7–#9, #12–#17, #20); each gets its `ghNN` doc on close per AGENTS.md
-"Findings & issue tracking." Cohort 1 L2 (LLM "prompt injection") is rejected as
+All closed issues (#2–#6, #8, #10–#11, #18–#19, #21–#22, #24–#26) have their
+durable docs filed. The cross-links called out above are in place (#10→gh3
+duplicate, #18→B duplicate, #5→J extension, #3→E partial). Remaining work is
+the 9 open issues (#7, #9, #12–#17, #20); each gets its `ghNN` doc on close per
+AGENTS.md "Findings & issue tracking." Cohort 1 L2 (LLM "prompt injection") is rejected as
 a non-finding — the verifier runs with `--no-tools --no-session` and can only
 auto-clear `boring_edge` metadata diffs, never hard/review; no tracker home
 needed.
