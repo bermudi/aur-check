@@ -58,10 +58,13 @@ bytes needed by `_detail_is_build_logic()`.
 ## Verification
 
 - `bash -n aur-safe` — clean.
-- `./aur-safe selftest </dev/null` — 312 passed, 0 failed.
-- The existing `classifier-detail-build-logic-colon-in-text` and
-  `classifier-detail-prefers-build-logic` selftests continue to pass, showing
-  the raw text is still correctly passed to the build-logic check.
+- `shellcheck -s bash aur-safe` — clean.
+- `./aur-safe selftest </dev/null` — 314 passed, 0 failed.
+- `classifier-detail-tab-in-text` sends an added build-command line containing
+  a literal interior tab through `_collect_review_details()` and its caller,
+  then asserts that the complete rendered `PKGBUILD:<line>: <text>` detail
+  retains the tab. Reverting the caller to `IFS=$'\t' read` makes this test
+  fail.
 
 ## Lesson
 

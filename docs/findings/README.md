@@ -51,8 +51,12 @@ C1–C3 + H1, #2–#5), gh18 (L1, #18), gh19 (L2, #19), and gh21–gh22 (L4–L5
 are resolved** — the `++` added-line-drop, fail-open source URI validation,
 advisory-only `cmd_audit`, repo-local git-config / git-invocation hardening,
 `cmd_scan` partial-coverage documentation, review-detail record separation,
-SHA-256 trust anchors, and uppercase package-name validation;
-#6–#17 and #20 remain pending; #24–#26 are fixed. See <https://github.com/bermudi/aur-check/issues>.
+SHA-256 trust anchors, and uppercase package-name validation; **gh11 (M2, #11)
+is resolved** (C-locale determinism); **gh10 (M1, #10) is resolved** (duplicate
+of gh3 — source authority anomalies deterministically routed to review before
+the LLM boundary); **#24–#26 are fixed** (W/Y/X — maintainer-drift orphan
+adoption, advisory-accept commit binding, `source+=()` drift); #6–#9, #12–#17,
+and #20 remain pending. See <https://github.com/bermudi/aur-check/issues>.
 
 ## Catalog
 
@@ -77,6 +81,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **L** — Concurrent gate runs corrupt the per-run manifest → [doc](L-manifest-race.md)
 - ✓ **T** — Changed patch content omitted from review evidence → [doc](T-patch-review-evidence-omitted.md)
 - ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
+- ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-check/issues/6)
 
 ### Medium
 - ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
@@ -88,6 +93,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
 - ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
 - ✓ **gh11** — Force C locale for deterministic regex and byte processing (Cohort 2 M2, #11) → [doc](gh11-force-c-locale.md) · [#11](https://github.com/bermudi/aur-check/issues/11)
+- ✓ **gh10** — LLM boring-edge auto-green should never see source authority anomalies (Cohort 2 M1, #10; duplicate of gh3) → [doc](gh10-llm-boring-edge-source-authority.md) · [#10](https://github.com/bermudi/aur-check/issues/10)
 
 ### Low
 - ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
@@ -106,17 +112,22 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 ## Low-severity findings (Cohort 1, L1–L9)
 
 Too minor for individual files; recorded here for completeness. Detail lives in
-the delegate transcripts (sessions above). All **fixed** except **L2**.
+the delegate transcripts (sessions above). All **fixed** except **L2** (rejected
+as a non-finding — see below).
 
 - **L1** (fixed) — `audit` path trust anchor autoseeds without install-confirmation.
   New installs now run under the transaction lock: `audit` stages the scanned
   SHA/pkgbase, the helper installs, and `accept` confirms via pacman before the
   first anchor is created.
-- **L2** (◷ open) — LLM boring-edge verifier prompt injection. Opt-in
-  `AUR_SAFE_LLM_AUTO_BORING=1` sends attacker-controlled diff text unfiltered to
-  the LLM. Off by default. **No GitHub issue yet** — needs one, or confirmation
-  that it is covered by [#10 (M1)](https://github.com/bermudi/aur-check/issues/10)
-  (source-authority anomalies reaching the verifier).
+- **L2** (rejected) — LLM boring-edge verifier "prompt injection." The verifier
+  runs with `pi --no-tools --no-session` (no tool access, single-shot text mode)
+  and only sees diffs that have already passed all hard and review rules
+  deterministically — it can exclusively auto-clear `boring_edge` (ambiguous
+  metadata), never hard/review/audit-unavailable. Worst case is a boring-edge
+  metadata diff gets auto-cleared instead of going to human review; the LLM
+  cannot execute, write, or call anything. Opt-in, off by default. Not a real
+  finding — the "prompt injection" framing imagined an agent with tools, not a
+  constrained oracle that emits one verdict string.
 - **L3** (fixed) — `classify_diff_rules` printed entire `$name_status` instead of
   `$path`. Cosmetic.
 - **L4** (fixed) — `write_ref` didn't validate `git rev-parse` success.
@@ -130,9 +141,14 @@ the delegate transcripts (sessions above). All **fixed** except **L2**.
 
 ## Pending reconciliation
 
-- **Cohort 2 (C/H/M/L, GitHub #2–#22):** durable `docs/findings/` writeups are
-  filed per-finding as each issue closes (see AGENTS.md "Findings & issue
-  tracking"). **#2 (C1), #11 (M2), #18 (L1), #19 (L2), #21 (L4), and #22 (L5) are done** → gh2, gh11, gh18, gh19, gh21, gh22; the rest are pending.
-  Where they overlap
-  Cohort 1 (already fixed), cross-link to the existing doc rather than duplicate.
-- **L2:** open with no tracker home — create a GitHub issue, or fold into #10 (M1).
+- **Cohort 2 (C/H/M/L, GitHub #2–#22) + #24–#26:** durable `docs/findings/`
+  writeups are filed per-finding as each issue closes (see AGENTS.md "Findings &
+  issue tracking"). **All closed issues have docs:** #2 (gh2), #3 (gh3), #4 (gh4),
+  #5 (gh5), #6 (gh6), #10 (gh10, duplicate of gh3), #11 (gh11), #18 (gh18), #19 (gh19),
+  #21 (gh21), #22 (gh22), #24 (W), #25 (Y), #26 (X). Where they overlap
+  Cohort 1 (already fixed), the existing doc is cross-linked rather than
+  duplicated.
+- **Open issues without docs (by design — doc is written on close):** #7, #8,
+  #9, #12, #13, #14, #15, #16, #17, #20.
+- **L2 (Cohort 1):** rejected as a non-finding (see §Low-severity findings). No
+  tracker home needed.

