@@ -1,0 +1,15 @@
+pub mod classifier;
+pub mod commands;
+pub mod config;
+pub mod diff;
+pub mod engine;
+pub mod git;
+pub mod llm_client;
+pub mod pkgbuild;
+pub mod rpc;
+pub mod rules;
+pub mod selftest;
+pub mod srcinfo;
+pub mod state;
+pub mod ui;
+pub mod wrapper;
