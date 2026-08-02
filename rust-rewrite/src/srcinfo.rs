@@ -105,7 +105,7 @@ impl Pacman for SystemPacman {
 
 /// Parse a pacman local-db `desc` file. `%NAME%`/`%VERSION%`/`%BASE%`/
 /// `%BUILDDATE%`/`%INSTALLDATE%` each precede their value on the next line.
-fn parse_desc(content: &str, wanted: &str) -> Option<LocalRecord> {
+pub fn parse_desc(content: &str, wanted: &str) -> Option<LocalRecord> {
     let mut name = None;
     let mut version = None;
     let mut base = None;

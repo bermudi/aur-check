@@ -748,13 +748,7 @@ pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
             return 1;
         }
     };
-    let plan = match prepare_makepkg(
-        &app.paths,
-        &cwd,
-        args,
-        active,
-        Path::new("/usr/bin/makepkg"),
-    ) {
+    let plan = match prepare_makepkg(&app.paths, &cwd, args, active, &app.makepkg_path) {
         Ok(plan) => plan,
         Err(error) => {
             app.reporter.review_msg(&format!("makepkg guard: {error}"));
@@ -1144,6 +1138,7 @@ mod tests {
             aur_url: "https://aur.archlinux.org".into(),
             yay_cache: cache,
             paru_cache: temp.path().join("paru"),
+            makepkg_path: PathBuf::from("/usr/bin/makepkg"),
             staging: false,
             llm_auto_boring: false,
             explain_maxlines: 1000,

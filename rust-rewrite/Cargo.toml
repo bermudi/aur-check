@@ -13,5 +13,17 @@ llm = { version = "1.3.8", default-features = false, features = ["rustls-tls", "
 tokio = { version = "1", features = ["rt-multi-thread"] }
 nix = { version = "0.29", default-features = false, features = ["fs"] }
 
+[[test]]
+name = "missing_cache_http"
+harness = false
+
+[[test]]
+name = "wrapper_transaction"
+harness = false
+
+[[test]]
+name = "command_flow"
+harness = false
+
 [profile.release]
 lto = true

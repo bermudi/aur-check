@@ -5,11 +5,20 @@ A Rust port of the deterministic AUR update gate. The trust model is unchanged:
 the generated wrapper guarded the helper checkout at the makepkg seam, and
 pacman's root-owned local database confirms a fresh install.
 
-**Validation status:** 83 Rust unit/integration tests and 59 embedded self-test
-assertions pass; the live missing-cache path has also been exercised. The root
-Bash oracle still has broader coverage (324 assertions) and passes in full. This
-is not yet a one-for-one parity certification, so treat the root implementation
-as the release version until the remaining command-flow scenarios are covered.
+**Validation status:** 83 Rust unit tests, 59 embedded self-test assertions,
+and 13 `harness = false` integration scenarios pass: seven command flows, three
+missing-cache HTTP flows, and three wrapper transactions. The root Bash oracle
+still has broader coverage (324 assertions) and passes in full. This is not yet
+a one-for-one parity certification, so the root implementation remains the
+release version pending a separate parity review.
+
+This is not yet a one-for-one parity certification, so treat the root Bash
+implementation as the release version until the remaining command-flow scenarios
+and production boundary coverage are complete.
+
+The `harness = false` integration tests use a file-backed fixture `Pacman`
+adapter and a shared test-binary subprocess driver; they do not exercise the
+root-owned pacman database or the standalone `main.rs` production startup path.
 
 The LLM is **not** part of the deterministic gate. It is used only for:
 
@@ -22,8 +31,12 @@ It cannot clear hard, review, or audit-unavailable classifications.
 
 ```sh
 cargo build --release
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
-cargo run -- selftest
+cargo run --quiet -- selftest
+bash -n assets/wrapper.sh
+zsh -n assets/wrapper.sh
 ```
 
 The wrapper is required for the complete gate → helper → accept transaction:
