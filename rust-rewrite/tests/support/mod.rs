@@ -645,6 +645,27 @@ fn log_last_by<F: Fn(&serde_json::Value) -> bool>(log: &Path, f: F) -> Option<se
 
 // --- repository builders ---------------------------------------------------
 
+/// Run fixture Git commands without consulting or executing user-controlled
+/// configuration, hooks, helpers, pagers, or credential machinery. The fixture
+/// must be deterministic even when the test runner inherits a hostile Git
+/// environment from the developer's shell.
+fn fixture_git() -> Command {
+    let mut command = Command::new("/usr/bin/git");
+    command.env_clear();
+    command
+        .env("HOME", "/nonexistent")
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("GIT_EDITOR", ":");
+    command
+}
+
 /// Build the HTTP fixture repository with the requested commits and return their
 /// SHAs in order. Each commit tuple is `(pkgver, extra_pkgbuild_lines)`.
 pub fn build_http_repo(
@@ -656,7 +677,7 @@ pub fn build_http_repo(
     let _ = fs::remove_dir_all(&src);
     fs::create_dir_all(&src).unwrap();
 
-    assert!(Command::new("/usr/bin/git")
+    assert!(fixture_git()
         .args(["-c", "init.defaultBranch=master", "init", "-q"])
         .arg(&src)
         .status()
@@ -672,7 +693,7 @@ pub fn build_http_repo(
         fs::write(src.join("PKGBUILD"), pkgbuild).unwrap();
         fs::write(src.join(".SRCINFO"), srcinfo).unwrap();
 
-        let status = Command::new("/usr/bin/git")
+        let status = fixture_git()
             .arg("-C")
             .arg(&src)
             .args(["add", "-A"])
@@ -680,7 +701,7 @@ pub fn build_http_repo(
             .unwrap();
         assert!(status.success());
 
-        let status = Command::new("/usr/bin/git")
+        let status = fixture_git()
             .arg("-C")
             .arg(&src)
             .args([
@@ -696,7 +717,7 @@ pub fn build_http_repo(
             .unwrap();
         assert!(status.success());
 
-        let out = Command::new("/usr/bin/git")
+        let out = fixture_git()
             .arg("-C")
             .arg(&src)
             .args(["rev-parse", "HEAD"])
@@ -708,7 +729,7 @@ pub fn build_http_repo(
 
     // Replace the empty HTTP repo with a bare clone of the source.
     let _ = fs::remove_dir_all(http_repo);
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .args(["clone", "--bare", "-q"])
         .arg(&src)
         .arg(http_repo)
@@ -716,7 +737,7 @@ pub fn build_http_repo(
         .unwrap();
     assert!(status.success());
 
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .arg("-C")
         .arg(http_repo)
         .arg("update-server-info")
@@ -739,7 +760,7 @@ pub fn build_http_repo_split(
     let _ = fs::remove_dir_all(&src);
     fs::create_dir_all(&src).unwrap();
 
-    assert!(Command::new("/usr/bin/git")
+    assert!(fixture_git()
         .args(["-c", "init.defaultBranch=master", "init", "-q"])
         .arg(&src)
         .status()
@@ -756,7 +777,7 @@ pub fn build_http_repo_split(
         fs::write(src.join("PKGBUILD"), pkgbuild).unwrap();
         fs::write(src.join(".SRCINFO"), srcinfo).unwrap();
 
-        let status = Command::new("/usr/bin/git")
+        let status = fixture_git()
             .arg("-C")
             .arg(&src)
             .args(["add", "-A"])
@@ -764,7 +785,7 @@ pub fn build_http_repo_split(
             .unwrap();
         assert!(status.success());
 
-        let status = Command::new("/usr/bin/git")
+        let status = fixture_git()
             .arg("-C")
             .arg(&src)
             .args([
@@ -780,7 +801,7 @@ pub fn build_http_repo_split(
             .unwrap();
         assert!(status.success());
 
-        let out = Command::new("/usr/bin/git")
+        let out = fixture_git()
             .arg("-C")
             .arg(&src)
             .arg("rev-parse")
@@ -791,7 +812,7 @@ pub fn build_http_repo_split(
     }
 
     let _ = fs::remove_dir_all(http_repo);
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .args(["clone", "--bare", "-q"])
         .arg(&src)
         .arg(http_repo)
@@ -799,7 +820,7 @@ pub fn build_http_repo_split(
         .unwrap();
     assert!(status.success());
 
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .arg("-C")
         .arg(http_repo)
         .arg("update-server-info")
@@ -968,7 +989,7 @@ fn fake_yay_or_paru(name: &str) {
         let _ = fs::remove_dir_all(&checkout);
 
         let url = format!("{}/{pkgbase}.git", aur_url());
-        let status = Command::new("/usr/bin/git")
+        let status = fixture_git()
             .args(["-c", "init.defaultBranch=master", "clone", "-q", "--", &url])
             .arg(&checkout)
             .status()
@@ -1028,14 +1049,14 @@ fn window_commit(checkout: &Path, payload: &str) -> anyhow::Result<()> {
     pkgbuild.push_str(&format!("\n# window commit marker: {}\n", payload));
     fs::write(checkout.join("PKGBUILD"), pkgbuild)?;
 
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .arg("-C")
         .arg(checkout)
         .args(["add", "PKGBUILD"])
         .status()?;
     anyhow::ensure!(status.success());
 
-    let out = Command::new("/usr/bin/git")
+    let out = fixture_git()
         .arg("-C")
         .arg(checkout)
         .arg("write-tree")
@@ -1043,7 +1064,7 @@ fn window_commit(checkout: &Path, payload: &str) -> anyhow::Result<()> {
     anyhow::ensure!(out.status.success());
     let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
-    let out = Command::new("/usr/bin/git")
+    let out = fixture_git()
         .arg("-C")
         .arg(checkout)
         .args(["rev-parse", "--verify", "HEAD"])
@@ -1051,7 +1072,7 @@ fn window_commit(checkout: &Path, payload: &str) -> anyhow::Result<()> {
     anyhow::ensure!(out.status.success());
     let parent = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
-    let out = Command::new("/usr/bin/git")
+    let out = fixture_git()
         .arg("-C")
         .arg(checkout)
         .env("GIT_AUTHOR_NAME", "Test")
@@ -1063,7 +1084,7 @@ fn window_commit(checkout: &Path, payload: &str) -> anyhow::Result<()> {
     anyhow::ensure!(out.status.success());
     let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
-    let status = Command::new("/usr/bin/git")
+    let status = fixture_git()
         .arg("-C")
         .arg(checkout)
         .args(["reset", "--hard", &commit])

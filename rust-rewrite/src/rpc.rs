@@ -10,6 +10,16 @@ use serde::Deserialize;
 
 use crate::state::valid_pkg_name;
 
+fn curl_binary() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(path) = std::env::var("AUR_SAFE_TEST_CURL_BIN") {
+            return path.into();
+        }
+    }
+    "/usr/bin/curl".into()
+}
+
 #[derive(Deserialize, Debug)]
 struct RpcResponse {
     #[serde(default)]
@@ -41,7 +51,7 @@ impl RpcClient for CurlRpc {
     fn info(&self, pkg: &str) -> Result<String> {
         let endpoint = format!("{}/rpc/v5/info", self.aur_url);
         let arg = format!("arg[]={pkg}");
-        let out = std::process::Command::new("/usr/bin/curl")
+        let out = std::process::Command::new(curl_binary())
             .args([
                 "-sG",
                 "--connect-timeout",
@@ -85,6 +95,46 @@ pub fn resolve_pkgbase<C: RpcClient + ?Sized>(client: &C, pkg: &str) -> Result<S
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static TEST_CURL_ENV: Mutex<()> = Mutex::new(());
+
+    struct CurlBinaryEnv {
+        previous: Option<OsString>,
+    }
+
+    impl CurlBinaryEnv {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("AUR_SAFE_TEST_CURL_BIN");
+            std::env::set_var("AUR_SAFE_TEST_CURL_BIN", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurlBinaryEnv {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(value) => std::env::set_var("AUR_SAFE_TEST_CURL_BIN", value),
+                None => std::env::remove_var("AUR_SAFE_TEST_CURL_BIN"),
+            }
+        }
+    }
+
+    fn with_fake_curl_binary<R>(script: &Path, f: impl FnOnce() -> R) -> R {
+        let _guard = TEST_CURL_ENV.lock().unwrap();
+        let _env = CurlBinaryEnv::set(script);
+        f()
+    }
+
+    fn logged_args(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
 
     /// Mock transport returning a canned body (or an error).
     struct MockRpc {
@@ -149,5 +199,68 @@ mod tests {
             body: RefCell::new(None),
         };
         assert!(resolve_pkgbase(&m, "cursor-bin").is_err());
+    }
+
+    #[test]
+    fn curl_transport_uses_expected_endpoint_and_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("curl.log");
+        let script = temp.path().join("fake_curl");
+        let expected =
+            "{\"resultcount\":1,\"results\":[{\"Name\":\"pkg\",\"PackageBase\":\"pkg\"}]}";
+        let script_body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\necho '{}'\n",
+            log.display(),
+            expected
+        );
+        std::fs::write(&script, script_body).unwrap();
+        let mut perm = std::fs::metadata(&script).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&script, perm).unwrap();
+
+        with_fake_curl_binary(&script, || {
+            let rpc = CurlRpc {
+                aur_url: "https://example.invalid/api".into(),
+            };
+            let body = rpc.info("target").unwrap();
+            assert_eq!(body.trim_end(), expected);
+            let actual = logged_args(&log);
+            let expected: Vec<String> = [
+                "-sG",
+                "--connect-timeout",
+                "3",
+                "--max-time",
+                "8",
+                "https://example.invalid/api/rpc/v5/info",
+                "--data-urlencode",
+                "arg[]=target",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect();
+            assert_eq!(
+                actual, expected,
+                "curl transport must receive the hardened argument vector"
+            );
+        });
+    }
+
+    #[test]
+    fn curl_transport_propagates_command_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("fake_curl_fail");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perm = std::fs::metadata(&script).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&script, perm).unwrap();
+
+        with_fake_curl_binary(&script, || {
+            let rpc = CurlRpc {
+                aur_url: "https://example.invalid/api".into(),
+            };
+            assert!(rpc.info("target").is_err());
+        });
     }
 }

@@ -5,10 +5,11 @@ A Rust port of the deterministic AUR update gate. The trust model is unchanged:
 the generated wrapper guarded the helper checkout at the makepkg seam, and
 pacman's root-owned local database confirms a fresh install.
 
-**Validation status:** 83 Rust unit tests, 59 embedded self-test assertions,
-and 13 `harness = false` integration scenarios pass: seven command flows, three
-missing-cache HTTP flows, and three wrapper transactions. The root Bash oracle
-still has broader coverage (324 assertions) and passes in full. This is not yet
+**Validation status:** 90 Rust unit tests, two standard integration tests, 59
+embedded self-test assertions, and 13 `harness = false` integration scenarios
+pass: seven command flows, three missing-cache HTTP flows, and three wrapper
+transactions. The root Bash oracle still has broader coverage (324 assertions)
+and passes in full. This is not yet
 a one-for-one parity certification, so the root implementation remains the
 release version pending a separate parity review.
 
@@ -16,9 +17,10 @@ This is not yet a one-for-one parity certification, so treat the root Bash
 implementation as the release version until the remaining command-flow scenarios
 and production boundary coverage are complete.
 
-The `harness = false` integration tests use a file-backed fixture `Pacman`
-adapter and a shared test-binary subprocess driver; they do not exercise the
-root-owned pacman database or the standalone `main.rs` production startup path.
+The two standard integration tests exercise the standalone `main.rs` startup
+and a real curl/RPC/HTTP-clone boundary. The `harness = false` integration tests
+use a file-backed fixture `Pacman` adapter and a shared test-binary subprocess
+driver; they do not exercise the root-owned pacman database.
 
 The LLM is **not** part of the deterministic gate. It is used only for:
 

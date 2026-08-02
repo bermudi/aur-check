@@ -78,3 +78,84 @@ fn isolate_process_environment() {
     std::env::set_var("LC_ALL", "C");
     std::env::set_var("LANG", "C");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static STARTUP_ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        previous: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, &str)]) -> Self {
+            let mut previous = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                previous.push(((*key).to_string(), std::env::var(key).ok()));
+                std::env::set_var(key, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, old) in self.previous.drain(..) {
+                match old {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn isolate_process_environment_removes_git_and_editor_env() {
+        let _guard = STARTUP_ENV_GUARD.lock().unwrap();
+        let _startup_vars = EnvGuard::set(&[
+            ("GIT_DIR", "/tmp/example.git"),
+            ("GIT_WORK_TREE", "/tmp/work"),
+            ("PAGER", "less"),
+            ("VISUAL", "vim"),
+            ("EDITOR", "nano"),
+            ("LC_ALL", "en_US.UTF-8"),
+            ("LANG", "en_US.UTF-8"),
+            ("GIT_CONFIG_GLOBAL", "/tmp/other"),
+            ("GIT_CONFIG_SYSTEM", "/tmp/system"),
+        ]);
+        isolate_process_environment();
+        assert!(
+            std::env::var("GIT_DIR").is_err(),
+            "GIT_DIR must be scrubbed"
+        );
+        assert!(
+            std::env::var("GIT_WORK_TREE").is_err(),
+            "GIT_WORK_TREE must be scrubbed"
+        );
+        assert!(
+            std::env::var("PAGER").is_err(),
+            "PAGER must be scrubbed by process isolation"
+        );
+        assert!(
+            std::env::var("VISUAL").is_err(),
+            "VISUAL must be scrubbed by process isolation"
+        );
+        assert!(
+            std::env::var("EDITOR").is_err(),
+            "EDITOR must be scrubbed by process isolation"
+        );
+        assert_eq!(
+            std::env::var("GIT_CONFIG_GLOBAL").ok(),
+            Some("/dev/null".into())
+        );
+        assert_eq!(
+            std::env::var("GIT_CONFIG_SYSTEM").ok(),
+            Some("/dev/null".into())
+        );
+        assert_eq!(std::env::var("LC_ALL").ok(), Some("C".into()));
+        assert_eq!(std::env::var("LANG").ok(), Some("C".into()));
+    }
+}

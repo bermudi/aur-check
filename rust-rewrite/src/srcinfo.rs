@@ -8,8 +8,18 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+#[cfg(not(test))]
+fn override_db_path() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+fn override_db_path() -> Option<PathBuf> {
+    std::env::var_os("AUR_SAFE_TEST_PACMAN_DB").map(PathBuf::from)
+}
 
 use anyhow::{bail, Result};
 use regex::bytes::{Regex, RegexBuilder};
@@ -38,12 +48,26 @@ pub struct LocalRecord {
     pub install_epoch: u64,
 }
 
+/// Pacman binary path. Overridable in test builds so `SystemPacman`'s subprocess
+/// seams (`query` / `sync_info` / `dep_satisfied`) can be exercised with a fake
+/// binary that logs argv and returns a chosen status — mirrors rpc's
+/// `curl_binary`. Production always resolves to `/usr/bin/pacman`.
+fn pacman_binary() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(path) = std::env::var("AUR_SAFE_TEST_PACMAN_BIN") {
+            return PathBuf::from(path);
+        }
+    }
+    PathBuf::from("/usr/bin/pacman")
+}
+
 /// Real pacman-backed implementation.
 pub struct SystemPacman;
 
 impl Pacman for SystemPacman {
     fn query(&self, name: &str) -> Option<String> {
-        let out = Command::new("/usr/bin/pacman")
+        let out = Command::new(pacman_binary())
             .args(["-Q", "--", name])
             .output()
             .ok()?;
@@ -55,18 +79,22 @@ impl Pacman for SystemPacman {
 
     fn local_record(&self, name: &str) -> Option<LocalRecord> {
         // pacman-conf DBPath, then scan <dbpath>/local/<name>-*/desc.
-        let out = Command::new("/usr/bin/pacman-conf")
-            .arg("DBPath")
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let dbpath = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if dbpath.is_empty() {
-            return None;
-        }
-        let local = Path::new(&dbpath).join("local");
+        let local = if let Some(override_db) = override_db_path() {
+            override_db
+        } else {
+            let out = Command::new("/usr/bin/pacman-conf")
+                .arg("DBPath")
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let dbpath = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if dbpath.is_empty() {
+                return None;
+            }
+            Path::new(&dbpath).join("local")
+        };
         let entries = std::fs::read_dir(&local).ok()?;
         for e in entries.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
@@ -83,7 +111,7 @@ impl Pacman for SystemPacman {
     }
 
     fn sync_info(&self, name: &str) -> bool {
-        Command::new("/usr/bin/pacman")
+        Command::new(pacman_binary())
             .args(["-Si", "--", name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -93,7 +121,7 @@ impl Pacman for SystemPacman {
     }
 
     fn dep_satisfied(&self, spec: &str) -> bool {
-        Command::new("/usr/bin/pacman")
+        Command::new(pacman_binary())
             .args(["-T", "--", spec])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -754,6 +782,200 @@ pub fn source_domains_from(pkgbuild: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static TEST_PACMAN_DB: Mutex<()> = Mutex::new(());
+
+    struct PacmanDbEnv {
+        previous: Option<OsString>,
+    }
+
+    impl PacmanDbEnv {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("AUR_SAFE_TEST_PACMAN_DB");
+            std::env::set_var("AUR_SAFE_TEST_PACMAN_DB", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for PacmanDbEnv {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(value) => std::env::set_var("AUR_SAFE_TEST_PACMAN_DB", value),
+                None => std::env::remove_var("AUR_SAFE_TEST_PACMAN_DB"),
+            }
+        }
+    }
+
+    #[test]
+    fn system_pacman_local_record_reads_real_layout() {
+        let _guard = TEST_PACMAN_DB.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("local");
+        let mismatch = db.join("pkg-0-1");
+        let match_dir = db.join("pkg-1-2");
+        fs::create_dir_all(&mismatch).unwrap();
+        fs::create_dir_all(&match_dir).unwrap();
+        fs::write(
+            mismatch.join("desc"),
+            "%NAME%\npkg-other\n%VERSION%\n0-1\n%BASE%\npkg-base\n%BUILDDATE%\n1\n%INSTALLDATE%\n2\n",
+        )
+        .unwrap();
+        fs::write(
+            match_dir.join("desc"),
+            "%NAME%\npkg\n%VERSION%\n1-2\n%BASE%\npkg-base\n%BUILDDATE%\n4\n%INSTALLDATE%\n5\n",
+        )
+        .unwrap();
+
+        let _db_env = PacmanDbEnv::set(&db);
+
+        let rec = SystemPacman
+            .local_record("pkg")
+            .expect("record for pkg must parse");
+        assert_eq!(rec.name, "pkg");
+        assert_eq!(rec.version, "1-2");
+        assert_eq!(rec.pkgbase, "pkg-base");
+        assert_eq!(rec.build_epoch, 4);
+        assert_eq!(rec.install_epoch, 5);
+        assert!(SystemPacman.local_record("missing").is_none());
+    }
+
+    // --- SystemPacman subprocess seams: query / sync_info / dep_satisfied ---
+    // These shell out to the pacman binary; the cfg(test) `pacman_binary()`
+    // override routes them at a fake script that logs argv and exits with a
+    // chosen status. Same shape as rpc's curl tests. `local_record` above is
+    // already covered via the AUR_SAFE_TEST_PACMAN_DB fixture override.
+
+    static TEST_PACMAN_BIN: Mutex<()> = Mutex::new(());
+
+    struct PacmanBinaryEnv {
+        previous: Option<OsString>,
+    }
+
+    impl PacmanBinaryEnv {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("AUR_SAFE_TEST_PACMAN_BIN");
+            std::env::set_var("AUR_SAFE_TEST_PACMAN_BIN", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for PacmanBinaryEnv {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(value) => std::env::set_var("AUR_SAFE_TEST_PACMAN_BIN", value),
+                None => std::env::remove_var("AUR_SAFE_TEST_PACMAN_BIN"),
+            }
+        }
+    }
+
+    fn write_exec(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
+        let mut perm = fs::metadata(path).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(path, perm).unwrap();
+    }
+
+    fn logged_args(log: &Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn assert_logged_args(log: &Path, expected: &[&str]) {
+        let actual = logged_args(log);
+        let expected: Vec<String> = expected.iter().map(|arg| (*arg).to_owned()).collect();
+        assert_eq!(
+            actual, expected,
+            "pacman received an unexpected argument vector"
+        );
+    }
+
+    #[test]
+    fn system_pacman_query_invokes_pacman_and_maps_output() {
+        let _guard = TEST_PACMAN_BIN.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("q.log");
+        let fake = temp.path().join("pacman");
+        write_exec(
+            &fake,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\necho 'ventoy-bin 1.0.97-1'\n",
+                log.display()
+            ),
+        );
+        let _env = PacmanBinaryEnv::set(&fake);
+
+        // success: stdout maps to the query string, argv is `pacman -Q -- <name>`
+        assert_eq!(
+            SystemPacman.query("ventoy-bin").as_deref(),
+            Some("ventoy-bin 1.0.97-1")
+        );
+        assert_logged_args(&log, &["-Q", "--", "ventoy-bin"]);
+
+        // failure: non-zero exit maps to None
+        let fail = temp.path().join("pacman-fail");
+        write_exec(&fail, "#!/bin/sh\nexit 1\n");
+        let _env_fail = PacmanBinaryEnv::set(&fail);
+        assert!(SystemPacman.query("absent").is_none());
+    }
+
+    #[test]
+    fn system_pacman_sync_info_invokes_pacman_and_maps_exit() {
+        let _guard = TEST_PACMAN_BIN.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("si.log");
+        let ok = temp.path().join("pacman");
+        write_exec(
+            &ok,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nexit 0\n",
+                log.display()
+            ),
+        );
+        let _env = PacmanBinaryEnv::set(&ok);
+
+        // success → true; argv is `pacman -Si -- <name>`
+        assert!(SystemPacman.sync_info("core/glibc"));
+        assert_logged_args(&log, &["-Si", "--", "core/glibc"]);
+
+        // failure → false (the wrapper uses this to tell repo from AUR packages)
+        let fail = temp.path().join("pacman-fail");
+        write_exec(&fail, "#!/bin/sh\nexit 1\n");
+        let _env_fail = PacmanBinaryEnv::set(&fail);
+        assert!(!SystemPacman.sync_info("aur/never"));
+    }
+
+    #[test]
+    fn system_pacman_dep_satisfied_invokes_pacman_and_maps_exit() {
+        // `pacman -T` exits 0 when the dependency is already satisfied.
+        let _guard = TEST_PACMAN_BIN.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("t.log");
+        let satisfied = temp.path().join("pacman");
+        write_exec(
+            &satisfied,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nexit 0\n",
+                log.display()
+            ),
+        );
+        let _env = PacmanBinaryEnv::set(&satisfied);
+
+        assert!(SystemPacman.dep_satisfied("glibc>=2.38"));
+        assert_logged_args(&log, &["-T", "--", "glibc>=2.38"]);
+
+        let unsatisfied = temp.path().join("pacman-fail");
+        write_exec(&unsatisfied, "#!/bin/sh\nexit 1\n");
+        let _env_fail = PacmanBinaryEnv::set(&unsatisfied);
+        assert!(!SystemPacman.dep_satisfied("missing-lib"));
+    }
 
     #[test]
     fn srcinfo_declares_membership() {
