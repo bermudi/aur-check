@@ -90,9 +90,7 @@ fn run_as_aur_safe() {
         .map(PathBuf::from)
         .expect("fixture driver needs AUR_SAFE_PACMAN_DB");
     let pacman = FixturePacman::new(pacman_db);
-    let rpc = CurlRpc {
-        aur_url: config.aur_url.clone(),
-    };
+    let rpc = CurlRpc::new(PathBuf::from("/usr/bin/curl"), config.aur_url.clone());
     let mut reporter = CollectingReporter::default();
     let mut llm = NoLlm;
 

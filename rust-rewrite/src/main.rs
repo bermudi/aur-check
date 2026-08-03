@@ -27,10 +27,8 @@ fn run() -> anyhow::Result<i32> {
     let paths = Paths::new(config.state_dir.clone());
     paths.ensure_dirs()?;
 
-    let pacman = SystemPacman;
-    let rpc = CurlRpc {
-        aur_url: config.aur_url.clone(),
-    };
+    let pacman = SystemPacman::new();
+    let rpc = CurlRpc::new(PathBuf::from("/usr/bin/curl"), config.aur_url.clone());
     let mut reporter = StderrReporter::new();
     let mut llm = NativeLlm::from_config(&config).map_err(anyhow::Error::msg)?;
     let llm_description = llm.description();

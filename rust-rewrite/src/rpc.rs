@@ -5,20 +5,12 @@
 //! poison the clone URL), PackageBase must pass the path-safe grammar, and an
 //! empty result set is a failure.
 
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 use serde::Deserialize;
 
 use crate::state::valid_pkg_name;
-
-fn curl_binary() -> std::path::PathBuf {
-    #[cfg(test)]
-    {
-        if let Ok(path) = std::env::var("AUR_SAFE_TEST_CURL_BIN") {
-            return path.into();
-        }
-    }
-    "/usr/bin/curl".into()
-}
 
 #[derive(Deserialize, Debug)]
 struct RpcResponse {
@@ -44,14 +36,27 @@ pub trait RpcClient {
 
 /// Real transport: `curl -sG --connect-timeout 3 --max-time 8`.
 pub struct CurlRpc {
+    curl_path: PathBuf,
     pub aur_url: String,
+}
+
+impl CurlRpc {
+    /// Build a transport with an explicitly selected curl executable. The
+    /// production caller supplies `/usr/bin/curl`; tests supply a disposable
+    /// script without mutating process-global environment.
+    pub fn new(curl_path: impl Into<PathBuf>, aur_url: impl Into<String>) -> Self {
+        Self {
+            curl_path: curl_path.into(),
+            aur_url: aur_url.into(),
+        }
+    }
 }
 
 impl RpcClient for CurlRpc {
     fn info(&self, pkg: &str) -> Result<String> {
         let endpoint = format!("{}/rpc/v5/info", self.aur_url);
         let arg = format!("arg[]={pkg}");
-        let out = std::process::Command::new(curl_binary())
+        let out = std::process::Command::new(&self.curl_path)
             .args([
                 "-sG",
                 "--connect-timeout",
@@ -95,38 +100,7 @@ pub fn resolve_pkgbase<C: RpcClient + ?Sized>(client: &C, pkg: &str) -> Result<S
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::Mutex;
-
-    static TEST_CURL_ENV: Mutex<()> = Mutex::new(());
-
-    struct CurlBinaryEnv {
-        previous: Option<OsString>,
-    }
-
-    impl CurlBinaryEnv {
-        fn set(path: &Path) -> Self {
-            let previous = std::env::var_os("AUR_SAFE_TEST_CURL_BIN");
-            std::env::set_var("AUR_SAFE_TEST_CURL_BIN", path);
-            Self { previous }
-        }
-    }
-
-    impl Drop for CurlBinaryEnv {
-        fn drop(&mut self) {
-            match self.previous.clone() {
-                Some(value) => std::env::set_var("AUR_SAFE_TEST_CURL_BIN", value),
-                None => std::env::remove_var("AUR_SAFE_TEST_CURL_BIN"),
-            }
-        }
-    }
-
-    fn with_fake_curl_binary<R>(script: &Path, f: impl FnOnce() -> R) -> R {
-        let _guard = TEST_CURL_ENV.lock().unwrap();
-        let _env = CurlBinaryEnv::set(script);
-        f()
-    }
 
     fn logged_args(log: &Path) -> Vec<String> {
         std::fs::read_to_string(log)
@@ -219,31 +193,27 @@ mod tests {
         perm.set_mode(0o755);
         std::fs::set_permissions(&script, perm).unwrap();
 
-        with_fake_curl_binary(&script, || {
-            let rpc = CurlRpc {
-                aur_url: "https://example.invalid/api".into(),
-            };
-            let body = rpc.info("target").unwrap();
-            assert_eq!(body.trim_end(), expected);
-            let actual = logged_args(&log);
-            let expected: Vec<String> = [
-                "-sG",
-                "--connect-timeout",
-                "3",
-                "--max-time",
-                "8",
-                "https://example.invalid/api/rpc/v5/info",
-                "--data-urlencode",
-                "arg[]=target",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect();
-            assert_eq!(
-                actual, expected,
-                "curl transport must receive the hardened argument vector"
-            );
-        });
+        let rpc = CurlRpc::new(script.clone(), "https://example.invalid/api");
+        let body = rpc.info("target").unwrap();
+        assert_eq!(body.trim_end(), expected);
+        let actual = logged_args(&log);
+        let expected: Vec<String> = [
+            "-sG",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "8",
+            "https://example.invalid/api/rpc/v5/info",
+            "--data-urlencode",
+            "arg[]=target",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            actual, expected,
+            "curl transport must receive the hardened argument vector"
+        );
     }
 
     #[test]
@@ -256,11 +226,7 @@ mod tests {
         perm.set_mode(0o755);
         std::fs::set_permissions(&script, perm).unwrap();
 
-        with_fake_curl_binary(&script, || {
-            let rpc = CurlRpc {
-                aur_url: "https://example.invalid/api".into(),
-            };
-            assert!(rpc.info("target").is_err());
-        });
+        let rpc = CurlRpc::new(script.clone(), "https://example.invalid/api");
+        assert!(rpc.info("target").is_err());
     }
 }
