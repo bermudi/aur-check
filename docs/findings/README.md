@@ -4,6 +4,15 @@ Durable record of aur-safe's security findings — the mechanisms, fixes, and
 lessons learned. This directory is the canonical long-form reference, cited by
 code comments and `AGENTS.md`.
 
+**Implementation lineage:** findings created before 2026-08-04 often cite the
+retired Bash script and its historical line numbers. The supported Rust
+implementation at the repository root is now the policy oracle. The Bash source
+and its full ledger are frozen under `archive/bash/`; open issues must be
+assessed and fixed against Rust rather than backported to the archive. The
+migration disposition for still-open Bash-era issues is recorded in
+[`ZZ-cohort2-reconciliation.md`](ZZ-cohort2-reconciliation.md); tracker state
+may lag code until closure review and durable `ghNN` documentation are complete.
+
 ## How findings are tracked
 
 Two artefacts, two roles:

@@ -1,7 +1,8 @@
-# mailing-list archive: input that motivated the tool, not the tool itself.
-# also provenance-sensitive — don't push to any remote without explicit review.
+/target/
+
+# Mailing-list archive: input that motivated the tool, not source.
 *.mbox
 *.mbox.gz
 
-# Local state and transcripts from the maintainer-only issue relay.
+# Local state and transcripts from the retired maintainer issue relay.
 .ralph-loop/

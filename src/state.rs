@@ -69,6 +69,7 @@ pub fn stash_flag(
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -117,9 +118,12 @@ impl Paths {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        fs::create_dir_all(&self.state_dir)?;
-        fs::create_dir_all(&self.accepted_dir)?;
-        fs::create_dir_all(&self.staged_dir)?;
+        secure_private_dir(&self.state_dir)?;
+        secure_private_dir(&self.accepted_dir)?;
+        secure_private_dir(&self.staged_dir)?;
+        for file in [&self.manifest_file, &self.state_dir.join("run.lock")] {
+            reject_unsafe_existing_file(file)?;
+        }
         Ok(())
     }
 
@@ -135,6 +139,64 @@ impl Paths {
     pub fn flag_context(&self, pkg: &str) -> PathBuf {
         self.state_dir.join(format!("flag.{pkg}.context"))
     }
+
+    pub fn reset_manifest(&self) -> Result<()> {
+        reject_unsafe_existing_file(&self.manifest_file)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&self.manifest_file)
+            .context("reset transaction manifest")?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.uid() != unsafe { nix::libc::geteuid() } {
+            bail!("transaction manifest is not a current-user regular file");
+        }
+        Ok(())
+    }
+}
+
+fn secure_private_dir(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("state path is not a real directory: {}", path.display());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)
+                .with_context(|| format!("create state directory {}", path.display()))?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    let effective_uid = unsafe { nix::libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        bail!(
+            "state directory is not owned by the current user: {}",
+            path.display()
+        );
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn reject_unsafe_existing_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.uid() != unsafe { nix::libc::geteuid() }
+            {
+                bail!("unsafe state file: {}", path.display());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 /// Replace a one-line state record atomically in its destination directory.
@@ -230,12 +292,19 @@ impl Paths {
         }
 
         let lock_path = self.state_dir.join("run.lock");
+        reject_unsafe_existing_file(&lock_path)?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&lock_path)
             .context("open run.lock")?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.uid() != unsafe { nix::libc::geteuid() } {
+            bail!("run.lock is not a current-user regular file");
+        }
         let locked = Flock::lock(file, FlockArg::LockExclusive)
             .map_err(|(_, errno)| errno)
             .context("flock run.lock")?;
@@ -441,6 +510,31 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(10_957), (2000, 1, 1));
         assert_eq!(civil_from_days(20_665), (2026, 7, 31));
+    }
+
+    #[test]
+    fn state_dirs_are_private_and_symlinks_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(temp.path().join("state"));
+        paths.ensure_dirs().unwrap();
+        for dir in [&paths.state_dir, &paths.accepted_dir, &paths.staged_dir] {
+            assert_eq!(fs::symlink_metadata(dir).unwrap().mode() & 0o777, 0o700);
+        }
+
+        let redirected = temp.path().join("redirected");
+        fs::create_dir(&redirected).unwrap();
+        let symlinked = Paths::new(temp.path().join("symlinked-state"));
+        std::os::unix::fs::symlink(&redirected, &symlinked.state_dir).unwrap();
+        assert!(symlinked.ensure_dirs().is_err());
+
+        let paths = Paths::new(temp.path().join("state-with-link"));
+        paths.ensure_dirs().unwrap();
+        let target = temp.path().join("manifest-target");
+        fs::write(&target, "do not truncate").unwrap();
+        std::os::unix::fs::symlink(&target, &paths.manifest_file).unwrap();
+        assert!(paths.ensure_dirs().is_err());
+        assert!(paths.reset_manifest().is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "do not truncate");
     }
 
     #[test]

@@ -26,6 +26,13 @@ pub fn dispatch(app: &mut App, args: &[String]) -> i32 {
             commands::cmd_explain(app, rest.first().map(String::as_str))
         }
         "accept" if rest.is_empty() => commands::cmd_accept(app),
+        "begin" if rest.is_empty() => commands::cmd_begin(app),
+        "abort" if rest.is_empty() => commands::cmd_abort(app),
+        "init-state" if rest.is_empty() => 0,
+        "state-dir" if rest.is_empty() => {
+            println!("{}", app.paths.state_dir.display());
+            0
+        }
         "rules" if rest.is_empty() => {
             print_rules();
             0
@@ -42,14 +49,27 @@ pub fn dispatch(app: &mut App, args: &[String]) -> i32 {
         known
             if matches!(
                 known,
-                "gate" | "audit" | "scan" | "explain" | "accept" | "rules" | "wrapper" | "selftest"
+                "gate"
+                    | "audit"
+                    | "scan"
+                    | "explain"
+                    | "accept"
+                    | "begin"
+                    | "abort"
+                    | "init-state"
+                    | "state-dir"
+                    | "rules"
+                    | "wrapper"
+                    | "selftest"
             ) =>
         {
-            eprintln!("error: invalid arguments for '{known}' (try: aur-safe --help)");
+            crate::ui::error(&format!(
+                "invalid arguments for '{known}' (try: aur-safe --help)"
+            ));
             3
         }
         other => {
-            eprintln!("error: unknown command '{other}' (try: aur-safe --help)");
+            crate::ui::error(&format!("unknown command '{other}' (try: aur-safe --help)"));
             3
         }
     }

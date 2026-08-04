@@ -48,6 +48,10 @@ fn assert_transaction_events(fixture: &Fixture, helper: &str) {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
             "cli:gate:start",
             "cli:gate:end:0",
             &format!("helper:{helper}:start"),
@@ -225,6 +229,67 @@ fn wrapper_paru_gate_build_accepts_exact_audited_tip() {
     assert_transaction_events(&fixture, "paru");
 }
 
+fn wrapper_zsh_yay_transaction_accepts_exact_audited_tip() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[("1".into(), "".into()), ("2".into(), "".into())],
+    );
+    let pacman = FixturePacman::new(fixture.pacman_db.clone());
+    pacman.seed_installed(pkgbase, "1-1", pkgbase, 1000, 1001);
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+
+    let (rc, _out, err) = fixture.run_wrapper_shell(
+        "/bin/zsh",
+        "yay",
+        &["-Syu"],
+        &[
+            ("AUR_SAFE_ALLOW_REVIEW", "1"),
+            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+        ],
+    );
+    assert_eq!(rc, 0, "zsh wrapper transaction failed: {err}");
+    let accepted = fixture.read_accepted(pkgbase).expect("accepted must exist");
+    assert_eq!(accepted.split('\t').next().unwrap(), shas[1]);
+    assert_transaction_events(&fixture, "yay");
+}
+
+fn wrapper_zsh_paru_transaction_accepts_exact_audited_tip() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[("1".into(), "".into()), ("2".into(), "".into())],
+    );
+    let pacman = FixturePacman::new(fixture.pacman_db.clone());
+    pacman.seed_installed(pkgbase, "1-1", pkgbase, 1000, 1001);
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+    fixture.hide_yay();
+
+    let (rc, _out, err) = fixture.run_wrapper_shell(
+        "/bin/zsh",
+        "paru",
+        &["-Syu"],
+        &[
+            ("AUR_SAFE_ALLOW_REVIEW", "1"),
+            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+        ],
+    );
+    assert_eq!(rc, 0, "zsh paru transaction failed: {err}");
+    let accepted = fixture.read_accepted(pkgbase).expect("accepted must exist");
+    assert_eq!(accepted.split('\t').next().unwrap(), shas[1]);
+    assert_transaction_events(&fixture, "paru");
+}
+
 fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
     let pkgbase = "gatepkg";
     let rpc_json = format!(
@@ -289,14 +354,18 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
             "cli:gate:start",
             "cli:gate:end:0",
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "cli:makepkg-guard:end:1",
             "helper:yay:end:1",
-            "cli:accept:start",
-            "cli:accept:end:0",
+            "cli:abort:start",
+            "cli:abort:end:0",
         ],
         "a rejected checkout must skip real makepkg but still reach accept"
     );
@@ -310,6 +379,14 @@ static TESTS: &[(&str, fn())] = &[
     (
         "wrapper_paru_gate_build_accepts_exact_audited_tip",
         wrapper_paru_gate_build_accepts_exact_audited_tip,
+    ),
+    (
+        "wrapper_zsh_yay_transaction_accepts_exact_audited_tip",
+        wrapper_zsh_yay_transaction_accepts_exact_audited_tip,
+    ),
+    (
+        "wrapper_zsh_paru_transaction_accepts_exact_audited_tip",
+        wrapper_zsh_paru_transaction_accepts_exact_audited_tip,
     ),
     (
         "wrapper_window_commit_never_executes_makepkg_or_advances_anchor",

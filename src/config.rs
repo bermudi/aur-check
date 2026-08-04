@@ -6,6 +6,7 @@
 //! default for a supply-chain security tool.
 
 use std::collections::HashMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -44,6 +45,9 @@ impl Config {
         let yay_cache = path_setting("AUR_SAFE_YAY_CACHE", &file, home.join(".cache/yay"));
         let paru_cache = path_setting("AUR_SAFE_PARU_CACHE", &file, home.join(".cache/paru/clone"));
         let state_dir = path_setting("AUR_SAFE_STATE_DIR", &file, home.join(".cache/aur-safe"));
+        validate_runtime_path("AUR_SAFE_YAY_CACHE", &yay_cache)?;
+        validate_runtime_path("AUR_SAFE_PARU_CACHE", &paru_cache)?;
+        validate_runtime_path("AUR_SAFE_STATE_DIR", &state_dir)?;
 
         let llm_auto_boring = matches!(get("AUR_SAFE_LLM_AUTO_BORING", &file, "0").as_str(), "1");
         let llm_backend = get("AUR_SAFE_LLM_BACKEND", &file, "openrouter");
@@ -110,6 +114,19 @@ fn optional(key: &str, file: &HashMap<String, String>) -> Option<String> {
 
 fn path_setting(key: &str, file: &HashMap<String, String>, default: PathBuf) -> PathBuf {
     optional(key, file).map(PathBuf::from).unwrap_or(default)
+}
+
+fn validate_runtime_path(key: &str, path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .any(|byte| byte.is_ascii_control())
+    {
+        bail!("{key} must be an absolute path without control bytes");
+    }
+    Ok(())
 }
 
 fn parse_positive<T>(key: &str, value: &str) -> Result<T>

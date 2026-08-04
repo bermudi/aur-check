@@ -14,8 +14,19 @@ This map reconciles them: each Cohort 2 item either (a) duplicates a Cohort 1
 finding → cross-link, no new doc; (b) extends one → note the extension on the
 existing doc; or (c) is genuinely new → a `ghNN` doc when closed.
 
-Status codes checked against `aur-safe` source on 2026-07-27 (not just the issue
-text, which predates several Cohort 1 fixes).
+Status codes in the original table were checked against the now-retired Bash
+source on 2026-07-27. They are historical, not the current Rust release status.
+
+## Rust migration disposition (2026-08-04)
+
+The Rust-primary migration resolves the mechanisms in #7 (forced text/NUL-safe
+evidence), #9 (all untracked files + regular blobs), #12 (typed JSON RPC), #13
+(size-framed batch parsing), #14 (escaped terminal/pager/provider output), #15
+(current-user `0700` non-symlink state plus no-follow trust files), #16
+(Rust-owned interaction and Bash/Zsh yay/paru transaction tests), and #20
+(head-and-tail advisory context with an explicit omission marker). Their GitHub
+issues remain the workflow authority until closed and given durable `ghNN`
+documents. #17 remains applicable as a fail-closed availability-hardening item.
 
 ## Summary table
 

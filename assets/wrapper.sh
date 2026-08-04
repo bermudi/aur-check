@@ -4,9 +4,8 @@
 # Written POSIX-ish so it loads under both bash and zsh (no bash-only array
 # slicing). Place in a file sourced by both shells, e.g. ~/.shrc.
 #
-# Exit 2 = review needed: interactive prompt offers [v]iew diff, [e]xplain,
-# [y]es continue, or [N]o abort. Honors AUR_SAFE_ALLOW_REVIEW=1 when
-# non-interactive.
+# Rust owns interactive review in both Bash and Zsh. Non-interactive review
+# blocks unless AUR_SAFE_ALLOW_REVIEW=1 was explicitly set.
 
 if command -v aur-safe >/dev/null 2>&1; then
   # Resolve helper executables before defining the shadowing shell functions;
@@ -142,8 +141,14 @@ if command -v aur-safe >/dev/null 2>&1; then
     done <<< "$_out"
     if [ "$_gate" = 1 ] || [ -n "$_out" ]; then
       local _sd
-      _sd="${AUR_SAFE_STATE_DIR:-$HOME/.cache/aur-safe}"
-      mkdir -p "$_sd" || return 1
+      # Resolve environment/config/default through the same typed Rust config
+      # used by gate and accept; shell-side defaults can select the wrong lock.
+      _sd=$("$_aur_safe_bin" state-dir) || return 1
+      [ -n "$_sd" ] || return 1
+      export AUR_SAFE_STATE_DIR="$_sd"
+      # Rust validates ownership, mode, and symlink hygiene before shell
+      # redirection opens the transaction lock.
+      "$_aur_safe_bin" init-state || return 1
       command -v flock >/dev/null 2>&1 || {
         printf 'aur-safe: flock is required for state locking\n' >&2
         return 1
@@ -155,7 +160,7 @@ if command -v aur-safe >/dev/null 2>&1; then
         if [ "$_gate" = 1 ]; then
           _aur_safe_gate || exit $?
         else
-          : >"$_sd/last-gate" || exit 1
+          "$_aur_safe_bin" begin || exit $?
         fi
         # A combined `-Syu explicit-target` must audit both the pending update
         # set and explicit new AUR targets in this same locked manifest.
@@ -186,10 +191,17 @@ if command -v aur-safe >/dev/null 2>&1; then
             --gpg /usr/bin/gpg --gpgflags '' --sudo /usr/bin/sudo --sudoflags '' "$@"
         )
         _rc=$?
-        # Promotion failure must be visible even though the helper's exit code
-        # remains the wrapper's public result.
-        aur-safe accept \
-          || printf 'aur-safe: accept failed; trust anchor unchanged\n' >&2
+        if [ "$_rc" -eq 0 ]; then
+          # Promotion failure must be visible even though the helper's exit code
+          # remains the wrapper's public result.
+          "$_aur_safe_bin" accept \
+            || printf 'aur-safe: accept failed; trust anchor unchanged\n' >&2
+        else
+          # A failed helper/guard transaction can never promote, even if an
+          # unrelated same-version install appears concurrently.
+          "$_aur_safe_bin" abort \
+            || printf 'aur-safe: failed transaction manifest could not be cleared\n' >&2
+        fi
         exit "$_rc"
       ) 9>"$_sd/run.lock"
       return $?
@@ -202,62 +214,14 @@ if command -v aur-safe >/dev/null 2>&1; then
         --gpg /usr/bin/gpg --gpgflags '' --sudo /usr/bin/sudo --sudoflags '' "$@"
   }
 
-  _AUR_SAFE_MENU_INPUT=""
-  _aur_safe_read_menu_input() {
-    local _first _rest
-    _AUR_SAFE_MENU_INPUT=""
-    IFS= read -r -n 1 _first || return 1
-    case "$_first" in
-      $'\e') return 2 ;;
-      ''|$'\n'|$'\r') return 0 ;;
-    esac
-    IFS= read -r _rest || return 1
-    _AUR_SAFE_MENU_INPUT="$_first$_rest"
-  }
-
   _aur_safe_gate() {
-    aur-safe gate
+    # Rust owns review interaction for both Bash and Zsh. A returned review code
+    # means non-interactive consent was unavailable, so the wrapper blocks.
+    "$_aur_safe_bin" gate
     local _rc=$?
     case $_rc in
       0) return 0 ;;
-      2) if [ "${AUR_SAFE_ALLOW_REVIEW:-}" = 1 ]; then
-           return 0
-         elif [ -t 0 ]; then
-           local _ans _sd _pkg _diff
-           _sd="${AUR_SAFE_STATE_DIR:-$HOME/.cache/aur-safe}"
-           while :; do
-             printf 'aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: ' >&2
-             _aur_safe_read_menu_input
-             local _input_rc=$?
-             [ "$_input_rc" -eq 2 ] && return 1
-             [ "$_input_rc" -eq 0 ] || return 1
-             _ans="$_AUR_SAFE_MENU_INPUT"
-             case "$_ans" in
-               y|Y) return 0 ;;
-               n|N|'') return 1 ;;
-               v|V)
-                 _pkg=$(cat "$_sd/last-flag.pkg" 2>/dev/null || true)
-                 _diff="$_sd/flag.${_pkg}.diff"
-                 if [ -n "$_pkg" ] && [ -r "$_diff" ]; then
-                   ${PAGER:-less} "$_diff"
-                 else
-                   printf 'aur-safe: no stashed diff found\n' >&2
-                 fi
-                 ;;
-               e|E)
-                 if aur-safe explain; then
-                   :
-                 else
-                   printf 'aur-safe: explain failed (no stashed diff, credentials, or LLM backend)\n' >&2
-                 fi
-                 ;;
-               *) printf 'aur-safe: enter v, e, y, or N\n' >&2 ;;
-             esac
-           done
-         else
-           printf 'aur-safe: review needed; no blocking rule fired (non-interactive; set AUR_SAFE_ALLOW_REVIEW=1 to continue after review)\n' >&2
-           return 1
-         fi ;;
+      2) printf 'aur-safe: review required; helper not run\n' >&2; return 1 ;;
       *) printf 'aur-safe: gate stopped before helper ran. run: aur-safe explain\n' >&2; return 1 ;;
     esac
   }

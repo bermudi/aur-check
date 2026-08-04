@@ -54,7 +54,7 @@ pub fn cmd_gate(app: &mut App) -> i32 {
     let _lock = match app.paths.acquire_lock() {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!("error: could not acquire state lock: {error:#}");
+            crate::ui::error(&format!("could not acquire state lock: {error:#}"));
             return 1;
         }
     };
@@ -65,8 +65,8 @@ pub fn cmd_gate(app: &mut App) -> i32 {
     state::gc_state(&app.paths);
 
     // Fresh manifest for this run.
-    if fs::write(&app.paths.manifest_file, "").is_err() {
-        eprintln!("error: cannot initialize gate manifest");
+    if app.paths.reset_manifest().is_err() {
+        eprintln!("error: cannot securely initialize gate manifest");
         return 1;
     }
     app.staging = true;
@@ -99,9 +99,9 @@ pub fn cmd_gate(app: &mut App) -> i32 {
         eprintln!(
             "error: AUR update enumeration failed (helper rc {qua_rc}); candidate set unknown"
         );
-        if let Ok(e) = fs::read_to_string(&qua_err) {
-            for line in e.lines().take(8) {
-                eprintln!("      {line}");
+        if let Ok(error_text) = fs::read_to_string(&qua_err) {
+            for line in error_text.lines().take(8) {
+                eprintln!("      {}", crate::ui::terminal_safe(line));
             }
         }
         return 1;
@@ -110,7 +110,7 @@ pub fn cmd_gate(app: &mut App) -> i32 {
     let content = match fs::read_to_string(&qua_out) {
         Ok(content) => content,
         Err(error) => {
-            eprintln!("error: cannot read AUR update enumeration: {error}");
+            crate::ui::error(&format!("cannot read AUR update enumeration: {error}"));
             return 1;
         }
     };
@@ -163,6 +163,47 @@ pub fn cmd_gate(app: &mut App) -> i32 {
 
 // --- cmd_check / cmd_audit ---------------------------------------------------
 
+/// Start an explicit-install transaction with an empty manifest. The generated
+/// wrapper calls this under its inherited lock instead of truncating a trust
+/// record through shell redirection.
+pub fn cmd_begin(app: &mut App) -> i32 {
+    let _lock = match app.paths.acquire_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            crate::ui::error(&format!("could not acquire state lock: {error:#}"));
+            return 1;
+        }
+    };
+    state::gc_state(&app.paths);
+    match app.paths.reset_manifest() {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::error(&format!(
+                "cannot securely initialize transaction manifest: {error:#}"
+            ));
+            1
+        }
+    }
+}
+
+/// Clear a failed transaction without promoting any staged ref.
+pub fn cmd_abort(app: &mut App) -> i32 {
+    let _lock = match app.paths.acquire_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            crate::ui::error(&format!("could not acquire state lock: {error:#}"));
+            return 1;
+        }
+    };
+    match app.paths.reset_manifest() {
+        Ok(()) => 0,
+        Err(error) => {
+            crate::ui::error(&format!("cannot securely abort transaction: {error:#}"));
+            1
+        }
+    }
+}
+
 pub fn cmd_check(app: &mut App, pkgs: &[String]) -> i32 {
     if pkgs.is_empty() {
         eprintln!("usage: aur-safe check <pkg> [<pkg>...]");
@@ -171,7 +212,7 @@ pub fn cmd_check(app: &mut App, pkgs: &[String]) -> i32 {
     let _lock = match app.paths.acquire_lock() {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!("error: could not acquire state lock: {error:#}");
+            crate::ui::error(&format!("could not acquire state lock: {error:#}"));
             return 1;
         }
     };
@@ -191,7 +232,7 @@ pub fn cmd_check(app: &mut App, pkgs: &[String]) -> i32 {
 
 pub fn cmd_audit(app: &mut App, pkg: &str) -> i32 {
     if !valid_pkg_name(pkg) {
-        eprintln!("error: invalid package name: {pkg}");
+        crate::ui::error(&format!("invalid package name: {pkg}"));
         return 3;
     }
     app.reporter.dim(&format!("findings for {pkg}"));
@@ -384,8 +425,9 @@ fn cmd_accept_locked(app: &mut App) -> i32 {
         }
     }
     // Rotate the manifest so a stale one can't be re-accepted.
-    if fs::write(&app.paths.manifest_file, "").is_err() {
-        app.reporter.review_msg("accept: could not rotate manifest");
+    if app.paths.reset_manifest().is_err() {
+        app.reporter
+            .review_msg("accept: could not securely rotate manifest");
         return 1;
     }
     app.reporter
@@ -488,7 +530,7 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
     let (pkg, flagfile) = match pkg_arg {
         Some(p) => {
             if !valid_pkg_name(p) {
-                eprintln!("error: invalid package name: {p}");
+                crate::ui::error(&format!("invalid package name: {p}"));
                 return 3;
             }
             (p.to_string(), app.paths.flag_diff(p))
@@ -506,7 +548,9 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
         return 3;
     }
     if !flagfile.is_file() {
-        eprintln!("error: no flagged diff for '{pkg}'. Run 'aur-safe gate' or 'check' first.");
+        crate::ui::error(&format!(
+            "no flagged diff for '{pkg}'. Run 'aur-safe gate' or 'check' first."
+        ));
         return 3;
     }
     let context = fs::read_to_string(app.paths.flag_context(&pkg)).unwrap_or_default();
@@ -531,26 +575,35 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
     let full = match fs::read_to_string(&flagfile) {
         Ok(full) if !full.is_empty() => full,
         Ok(_) => {
-            eprintln!("error: flagged diff for '{pkg}' is empty");
+            crate::ui::error(&format!("flagged diff for '{pkg}' is empty"));
             return 1;
         }
         Err(error) => {
-            eprintln!("error: cannot read flagged diff for '{pkg}': {error}");
+            crate::ui::error(&format!("cannot read flagged diff for '{pkg}': {error}"));
             return 1;
         }
     };
-    let total = full.lines().count();
-    let diff_body: String = full
-        .lines()
-        .take(app.explain_maxlines)
-        .collect::<Vec<_>>()
-        .join("\n");
-    if total > app.explain_maxlines {
-        app.reporter.dim(&format!(
-            "(diff truncated to {}/{} lines)",
-            app.explain_maxlines, total
+    let lines: Vec<&str> = full.lines().collect();
+    let total = lines.len();
+    let diff_body = if total <= app.explain_maxlines {
+        lines.join("\n")
+    } else {
+        let head = app.explain_maxlines.div_ceil(2);
+        let tail = app.explain_maxlines - head;
+        let omitted = total - app.explain_maxlines;
+        let mut selected = lines[..head].join("\n");
+        selected.push_str(&format!(
+            "\n--- {omitted} LINES OMITTED; VIEW RAW EVIDENCE LOCALLY ---\n"
         ));
-    }
+        if tail > 0 {
+            selected.push_str(&lines[total - tail..].join("\n"));
+        }
+        app.reporter.dim(&format!(
+            "(diff bounded to {} head/tail lines from {total}; {omitted} omitted)",
+            app.explain_maxlines
+        ));
+        selected
+    };
     let prompt = format!(
         r#"You are a security reviewer for Arch Linux AUR PKGBUILDs. A deterministic gate
 stashed the context below for package "{pkg}".
@@ -578,11 +631,11 @@ DETAILS:
     ));
     match app.llm.complete(&prompt) {
         Ok(response) => {
-            println!("{response}");
+            println!("{}", crate::ui::terminal_safe(&response));
             0
         }
         Err(error) => {
-            eprintln!("error: LLM explanation failed: {error}");
+            crate::ui::error(&format!("LLM explanation failed: {error}"));
             1
         }
     }
@@ -803,29 +856,71 @@ fn view_review_diffs(app: &mut App, pkgs: &[String]) {
         }
         return;
     }
-    let Ok(tmp) = tempfile::NamedTempFile::new() else {
-        return;
+    let tmp = match tempfile::NamedTempFile::new() {
+        Ok(tmp) => tmp,
+        Err(error) => {
+            crate::ui::error(&format!("could not create review bundle: {error}"));
+            return;
+        }
     };
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     for pkg in pkgs {
-        buf.push_str(&format!("===== {pkg} =====\n"));
+        buf.extend_from_slice(format!("===== {pkg} =====\n").as_bytes());
         let diff = app.paths.flag_diff(pkg);
         if diff.is_file() {
-            buf.push_str(&fs::read_to_string(&diff).unwrap_or_default());
+            match fs::read(&diff) {
+                Ok(content) => buf.extend_from_slice(&content),
+                Err(error) => buf.extend_from_slice(
+                    format!("could not read stashed diff: {error}\n").as_bytes(),
+                ),
+            }
         } else {
-            buf.push_str("no stashed diff found\n");
+            buf.extend_from_slice(b"no stashed diff found\n");
         }
-        buf.push('\n');
+        buf.push(b'\n');
     }
-    let _ = fs::write(tmp.path(), buf);
+    if let Err(error) = fs::write(tmp.path(), buf) {
+        crate::ui::error(&format!("could not write review bundle: {error}"));
+        return;
+    }
     page_file(tmp.path());
 }
 
 fn page_file(file: &Path) {
-    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-    let mut parts = pager.split_whitespace();
-    let bin = parts.next().unwrap_or("less");
-    let _ = Command::new(bin).args(parts).arg(file).status();
+    let raw = match fs::read(file) {
+        Ok(raw) => raw,
+        Err(error) => {
+            crate::ui::error(&format!("could not read review evidence: {error}"));
+            return;
+        }
+    };
+    let safe = match tempfile::NamedTempFile::new() {
+        Ok(safe) => safe,
+        Err(error) => {
+            crate::ui::error(&format!("could not create safe review file: {error}"));
+            return;
+        }
+    };
+    if let Err(error) = fs::write(safe.path(), crate::ui::document_safe_bytes(&raw)) {
+        crate::ui::error(&format!(
+            "could not prepare safe review evidence for paging: {error}"
+        ));
+        return;
+    }
+    // Fixed pager and escaped evidence: candidate bytes and inherited pager
+    // configuration cannot execute commands or alter terminal state.
+    match Command::new("/usr/bin/less")
+        .env_remove("LESS")
+        .env_remove("LESSOPEN")
+        .env_remove("LESSCLOSE")
+        .arg("--")
+        .arg(safe.path())
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => crate::ui::error(&format!("review pager exited with {status}")),
+        Err(error) => crate::ui::error(&format!("review pager unavailable: {error}")),
+    }
 }
 
 /// Interactive review prompt. Returns 0 to continue, 1 to abort, 2 for

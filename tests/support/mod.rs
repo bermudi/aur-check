@@ -31,6 +31,7 @@ pub const FIXTURE_FAKE_PACMAN_SYNC_ENV: &str = "AUR_SAFE_FAKE_PACMAN_SYNC";
 pub const FIXTURE_MAKEPKG_STATUS_ENV: &str = "AUR_SAFE_MAKEPKG_STATUS";
 pub const FIXTURE_HELPER_PREMAKEPKG_FAILURE_ENV: &str = "AUR_SAFE_HELPER_PREMAKEPKG_FAILURE";
 pub const FIXTURE_HELPER_POSTBUILD_FAILURE_ENV: &str = "AUR_SAFE_HELPER_POSTBUILD_FAILURE";
+pub const FIXTURE_UNRELATED_INSTALL_ENV: &str = "AUR_SAFE_UNRELATED_INSTALL_ON_FAILURE";
 pub const FIXTURE_ACCEPT_FAILURE_ENV: &str = "AUR_SAFE_TEST_ACCEPT_FAILURE";
 
 /// Run a list of test functions from a `harness = false` integration test binary.
@@ -545,6 +546,16 @@ impl Fixture {
         args: &[&str],
         extra_env: &[(&str, &str)],
     ) -> (i32, String, String) {
+        self.run_wrapper_shell("/bin/bash", helper, args, extra_env)
+    }
+
+    pub fn run_wrapper_shell(
+        &self,
+        shell: &str,
+        helper: &str,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let mut script = format!("source {}\n", self.wrapper_sh.display());
         script.push_str(helper);
         for a in args {
@@ -552,7 +563,7 @@ impl Fixture {
             script.push_str(&shell_quote(a));
         }
 
-        let mut cmd = Command::new("/bin/bash");
+        let mut cmd = Command::new(shell);
         cmd.arg("-c").arg(&script);
         for (k, v) in self.base_env() {
             cmd.env(k, v);
@@ -1026,6 +1037,10 @@ fn fake_yay_or_paru(name: &str) {
             std::process::exit(guard_exit);
         }
         if std::env::var(FIXTURE_HELPER_POSTBUILD_FAILURE_ENV).is_ok() {
+            if std::env::var(FIXTURE_UNRELATED_INSTALL_ENV).is_ok() {
+                record_helper_install(&checkout);
+                append_event(&format!("helper:{name}:unrelated-install"));
+            }
             if let Some(obj) = log.as_object_mut() {
                 obj.insert("postbuild_failure".into(), true.into());
             }

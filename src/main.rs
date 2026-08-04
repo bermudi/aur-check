@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     let code = match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            aur_safe::ui::error(&format!("{error:#}"));
             3
         }
     };

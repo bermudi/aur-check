@@ -35,7 +35,7 @@ prompt or `AGENTS.md`.
 - Do not paper over test failures, weaken an assertion, swallow errors, add a
   blacklist, or broaden a grammar without a proof tied to candidate context.
 - Update rationale-bearing docs when behavior or a settled security boundary
-  changes, but do not modify `AGENTS.md`, `ralph-loop`, or `tools/ralph/**`;
+  changes, but do not modify `AGENTS.md` or `tools/ralph/**`;
   those are harness-protected for the duration of an issue. When resolving
   GitHub issue `#N`, create exactly one durable
   `docs/findings/ghN-<slug>.md` record and add its one-line catalog entry as
@@ -51,12 +51,15 @@ Run the narrow checks while developing, then all repository gates before
 finishing:
 
 ```sh
-bash -n aur-safe
-./aur-safe selftest
-shellcheck -s bash aur-safe
+cargo fmt --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo run --quiet -- selftest
+bash -n assets/wrapper.sh
+zsh -n assets/wrapper.sh
 ```
 
-Every reported selftest must be green. Do not claim success from stale or
+Every reported test and selftest must be green. Do not claim success from stale or
 partial output.
 
 Commit all intended source, test, and durable-finding changes on the current

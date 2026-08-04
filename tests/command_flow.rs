@@ -130,6 +130,12 @@ fn explicit_aur_install_yay_audits_builds_accepts() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
+            "cli:begin:start",
+            "cli:begin:end:0",
             "cli:audit:start",
             "cli:audit:end:0",
             "helper:yay:start",
@@ -192,6 +198,12 @@ fn split_pkgname_to_pkgbase_transaction() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
+            "cli:begin:start",
+            "cli:begin:end:0",
             "cli:audit:start",
             "cli:audit:end:0",
             "helper:yay:start",
@@ -255,17 +267,21 @@ fn helper_failure_before_makepkg_leaves_anchor_unchanged() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
             "cli:gate:start",
             "cli:gate:end:0",
             "helper:yay:start",
             "helper:yay:end:1",
-            "cli:accept:start",
-            "cli:accept:end:0",
+            "cli:abort:start",
+            "cli:abort:end:0",
         ]
     );
 }
 
-fn helper_postbuild_failure_does_not_fabricate_install_evidence() {
+fn failed_helper_never_promotes_even_with_fresh_matching_evidence() {
     let pkgbase = "gatepkg";
     let rpc_json = format!(
         r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
@@ -288,11 +304,16 @@ fn helper_postbuild_failure_does_not_fabricate_install_evidence() {
             ("AUR_SAFE_ALLOW_REVIEW", "1"),
             ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
             ("AUR_SAFE_HELPER_POSTBUILD_FAILURE", "1"),
+            ("AUR_SAFE_UNRELATED_INSTALL_ON_FAILURE", "1"),
         ],
     );
     assert_eq!(rc, 1);
     assert!(fixture.makepkg_log().is_some(), "build must complete");
-    assert_eq!(pacman.find_record(pkgbase).unwrap().version, "1-1");
+    assert_eq!(
+        pacman.find_record(pkgbase).unwrap().version,
+        "2-1",
+        "matching fresh evidence exists independently of helper success"
+    );
     assert_eq!(fixture.read_accepted(pkgbase).unwrap().trim(), shas[0]);
     let staged = fixture.read_staged(pkgbase).expect("B remains staged");
     assert_eq!(staged.split('\t').next().unwrap(), shas[1]);
@@ -300,14 +321,19 @@ fn helper_postbuild_failure_does_not_fabricate_install_evidence() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
             "cli:gate:start",
             "cli:gate:end:0",
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "helper:yay:unrelated-install",
             "helper:yay:end:1",
-            "cli:accept:start",
-            "cli:accept:end:0",
+            "cli:abort:start",
+            "cli:abort:end:0",
         ],
         "a successful build is not installation evidence"
     );
@@ -360,6 +386,10 @@ fn wrapper_shows_accept_failure() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
             "cli:gate:start",
             "cli:gate:end:0",
             "helper:yay:start",
@@ -371,6 +401,54 @@ fn wrapper_shows_accept_failure() {
             "cli:accept:simulated-failure",
         ],
         "accept failure must happen after a successful guarded build"
+    );
+}
+
+fn wrapper_uses_config_file_state_dir_for_transaction_lock() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[("1".into(), "".into()), ("2".into(), "".into())],
+    );
+    let pacman = FixturePacman::new(fixture.pacman_db.clone());
+    pacman.seed_installed(pkgbase, "1-1", pkgbase, 1000, 1001);
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+    fs::write(
+        &fixture.config_file,
+        format!("AUR_SAFE_STATE_DIR={}\n", fixture.state.display()),
+    )
+    .unwrap();
+
+    let script = format!("source {}\nyay -Syu", fixture.wrapper_sh.display());
+    let mut command = Command::new("/bin/bash");
+    command.arg("-c").arg(script);
+    for (key, value) in fixture.base_env() {
+        if key != "AUR_SAFE_STATE_DIR" {
+            command.env(key, value);
+        }
+    }
+    command.env_remove("AUR_SAFE_STATE_DIR");
+    command.env("AUR_SAFE_ALLOW_REVIEW", "1");
+    command.env("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "config-file state transaction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture
+            .read_accepted(pkgbase)
+            .unwrap()
+            .split('\t')
+            .next()
+            .unwrap(),
+        shas[1]
     );
 }
 
@@ -406,6 +484,12 @@ fn repo_package_skips_aur_audit_in_explicit_install() {
     assert_eq!(
         fixture.events(),
         [
+            "cli:state-dir:start",
+            "cli:state-dir:end:0",
+            "cli:init-state:start",
+            "cli:init-state:end:0",
+            "cli:begin:start",
+            "cli:begin:end:0",
             "helper:yay:start",
             "helper:yay:end:0",
             "cli:accept:start",
@@ -433,10 +517,14 @@ static TESTS: &[(&str, fn())] = &[
         helper_failure_before_makepkg_leaves_anchor_unchanged,
     ),
     (
-        "helper_postbuild_failure_does_not_fabricate_install_evidence",
-        helper_postbuild_failure_does_not_fabricate_install_evidence,
+        "failed_helper_never_promotes_even_with_fresh_matching_evidence",
+        failed_helper_never_promotes_even_with_fresh_matching_evidence,
     ),
     ("wrapper_shows_accept_failure", wrapper_shows_accept_failure),
+    (
+        "wrapper_uses_config_file_state_dir_for_transaction_lock",
+        wrapper_uses_config_file_state_dir_for_transaction_lock,
+    ),
     (
         "repo_package_skips_aur_audit_in_explicit_install",
         repo_package_skips_aur_audit_in_explicit_install,
