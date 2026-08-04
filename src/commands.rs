@@ -261,6 +261,16 @@ pub fn cmd_audit(app: &mut App, pkg: &str) -> i32 {
             .review_msg("audit could not resolve a safe pkgbase");
         return 1;
     }
+    // First-contact: no accepted anchor for this pkgbase. The deterministic
+    // rules cannot see inside source tarballs, so a zero-hit scan does NOT
+    // mean a fresh package is safe. Match `check_pkg`'s missing-cache gate,
+    // which always requires whole-candidate review for first-contact packages
+    // (Finding H10 / #31).
+    let accepted = app.paths.accepted_file(&pkgbase);
+    let first_contact = !accepted.is_file()
+        || fs::read_to_string(&accepted)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
     if !scan.content.is_empty() && (scan.hard_hits || scan.review_hits) {
         let context = if scan.hard_hits {
             "audit-hard"
@@ -281,6 +291,24 @@ pub fn cmd_audit(app: &mut App, pkg: &str) -> i32 {
     if scan.review_hits {
         app.reporter
             .review_msg(&format!("{pkg} — review-rule hit(s); consent required"));
+        let rc = review_prompt(app, &[pkg.to_string()]);
+        if rc != 0 {
+            return rc;
+        }
+    } else if first_contact {
+        // Zero rule hits but no prior accepted anchor: the whole candidate is
+        // unseen. Stash it for review and require explicit consent before
+        // staging, mirroring the missing-cache gate's whole-file review.
+        if !scan.content.is_empty()
+            && state::stash_content(&app.paths, pkg, "audit-first-contact", &scan.content).is_err()
+        {
+            app.reporter
+                .review_msg(&format!("{pkg} — could not persist review evidence"));
+            return 1;
+        }
+        app.reporter.review_msg(&format!(
+            "{pkg} — no accepted anchor; first-contact whole-candidate review required"
+        ));
         let rc = review_prompt(app, &[pkg.to_string()]);
         if rc != 0 {
             return rc;
@@ -568,6 +596,9 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
         "audit-hard" => "The explicit-install audit hard-blocked this whole candidate before staging.",
         "audit-review" => {
             "The explicit-install audit scanned the whole candidate and stashed it for human review."
+        }
+        "audit-first-contact" => {
+            "The explicit-install audit scanned a first-contact candidate (no accepted anchor) and stashed the whole candidate for human review; deterministic rules cannot see inside source tarballs."
         }
         _ => "The deterministic gate stashed this context for review.",
     };

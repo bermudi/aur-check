@@ -154,6 +154,13 @@ fn isolate_git_env(cmd: &mut Command) {
 }
 
 /// Denylist of `.git/config` keys that can alter output / redirect / exec.
+///
+/// `http.` is blocked wholesale (issue #28): a repo-local `[http]` or
+/// URL-scoped `[http "https://aur.archlinux.org"]` section can route fetches
+/// through an attacker-controlled proxy and/or pin an attacker-controlled
+/// `sslCAInfo`, defeating `http.sslVerify=true` set via `-c`. URL-scoped
+/// sections override command-line `-c`, so blocking in
+/// `local_config_is_safe()` is the only robust kill switch.
 const UNSAFE_KEY_PREFIXES: &[&str] = &[
     "diff.",
     "url.",
@@ -163,6 +170,7 @@ const UNSAFE_KEY_PREFIXES: &[&str] = &[
     "credential.",
     "submodule.",
     "protocol.",
+    "http.",
 ];
 const UNSAFE_CORE_KEYS: &[&str] = &[
     "core.attributesfile",
@@ -239,6 +247,12 @@ mod tests {
             ("core.hooksPath", "/tmp/hooks"),
             ("remote.origin.proxy", "command"),
             ("include.path", "/tmp/evil-config"),
+            ("http.proxy", "http://attacker:8080"),
+            ("http.sslcainfo", "/tmp/evil-ca.pem"),
+            (
+                "http.https://aur.archlinux.org.proxy",
+                "http://attacker:8080",
+            ),
         ] {
             let temp = tempfile::tempdir().unwrap();
             assert!(Command::new("/usr/bin/git")

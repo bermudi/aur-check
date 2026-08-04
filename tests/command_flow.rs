@@ -150,6 +150,60 @@ fn explicit_aur_install_yay_audits_builds_accepts() {
     );
 }
 
+fn audit_first_contact_zero_hit_requires_review() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[("1".into(), "".into()), ("2".into(), "".into())],
+    );
+
+    // No prior accepted anchor and a clean PKGBUILD: deterministic rules cannot
+    // see inside source tarballs, so a first-contact audit must require human
+    // review even with zero rule hits (Finding H10 / #31). Without
+    // AUR_GATE_ALLOW_REVIEW the non-interactive audit returns 2 and must NOT
+    // stage the candidate.
+    let (rc, _out, _err) = fixture.run_aur_gate(&["audit", pkgbase], &[]);
+    assert_eq!(
+        rc, 2,
+        "first-contact zero-hit audit must require review, not auto-proceed"
+    );
+    assert!(
+        fixture.read_staged(pkgbase).is_none(),
+        "first-contact audit must not stage without consent"
+    );
+    assert!(
+        fixture.read_manifest().trim().is_empty(),
+        "first-contact audit must not append to the manifest without consent"
+    );
+    // Whole-candidate evidence must be stashed for human review with a distinct
+    // first-contact context so `aur-gate explain` can describe the reason.
+    let context = fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.context")))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(
+        context, "audit-first-contact",
+        "first-contact zero-hit audit must stash whole-candidate evidence"
+    );
+    assert!(fixture.state.join(format!("flag.{pkgbase}.diff")).is_file());
+
+    // With explicit consent, the same first-contact audit proceeds and stages
+    // the exact audited tip.
+    let (rc, _out, _err) =
+        fixture.run_aur_gate(&["audit", pkgbase], &[("AUR_GATE_ALLOW_REVIEW", "1")]);
+    assert_eq!(rc, 0, "consented first-contact audit must proceed");
+    let staged = fixture
+        .read_staged(pkgbase)
+        .expect("consented audit must stage");
+    assert_eq!(staged.split('\t').next().unwrap(), shas[1]);
+    assert_eq!(fixture.read_manifest().trim(), pkgbase);
+}
+
 fn split_pkgname_to_pkgbase_transaction() {
     let pkgbase = "foobase";
     let pkgname = "foo-bin";
@@ -507,6 +561,10 @@ static TESTS: &[(&str, fn())] = &[
     (
         "explicit_aur_install_yay_audits_builds_accepts",
         explicit_aur_install_yay_audits_builds_accepts,
+    ),
+    (
+        "audit_first_contact_zero_hit_requires_review",
+        audit_first_contact_zero_hit_requires_review,
     ),
     (
         "split_pkgname_to_pkgbase_transaction",

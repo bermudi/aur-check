@@ -128,6 +128,8 @@ if command -v aur-gate >/dev/null 2>&1; then
         --chroot|--chroot=*|--nochroot|--no-chroot|\
         --localrepo|--localrepo=*|--nolocalrepo|--no-localrepo|\
         --config|--config=*|--root|--root=*|--dbpath|--dbpath=*|\
+        --hookdir|--hookdir=*|--cachedir|--cachedir=*|\
+        --gpgdir|--gpgdir=*|--logfile|--logfile=*|\
         --sysroot|--sysroot=*|--arch|--arch=*|-r|-r*|-b|-b*|-[!-]*[rb]*|\
         --aururl|--aururl=*|--aurrpcur|--aurrpcur=*|\
         --aurrpcurl|--aurrpcurl=*|--mode|--mode=*|\
