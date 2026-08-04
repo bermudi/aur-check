@@ -66,7 +66,27 @@ clear as boring); **gh11 (M2, #11) is resolved** (C-locale determinism);
 **gh10 (M1, #10) is resolved** (duplicate of gh3 — source authority anomalies
 deterministically routed to review before the LLM boundary); **#24–#26 are fixed**
 (W/Y/X — maintainer-drift orphan adoption, advisory-accept commit binding,
-`source+=()` drift); #6–#7, #9, #12–#17, and #20 remain pending. See
+`source+=()` drift); **#7, #9, #13, #14, #20 were closed on 2026-08-04** after
+Rust-code re-evaluation (forced `--text`/NUL-safe evidence, all-untracked +
+regular-blob makepkg guard, size-framed `cat-file` parsing, escaped terminal/
+pager output, head-and-tail advisory context). **#12, #15, #16 remain partially
+open** (HTTPS-only `AUR_URL` not enforced; trust files lack `O_NOFOLLOW`;
+`--opt=value` wrapper forms unhandled) and **#17 remains open** (DoS
+availability hardening). See
+<https://github.com/bermudi/aur-gate/issues>.
+
+### GitHub Cohort 3 — 2026-08-04 (#27–#35)
+A third review (two adversarial passes: qwen3.8-max-preview on workflow/policy
+and qwen3.8-max on Git internals/shell runtime) was filed after verifying each
+finding against the Rust code. 9 genuinely new issues were filed; findings
+already resolved by the Rust migration or by existing fixes were not filed
+(binary-update DoS, build-time anchor poisoning, cmd_audit lockless, accept
+TOCTOU, helper config precedence, config/env mismatch, rule severity asymmetry,
+pacman -U boundary, line-continuation evasion). The new issues extend closed
+#5 (git config: `http.*` and `includeIf.*` gaps) and closed #4 (cmd_audit
+zero-hit first-contact). **#31 (H10) is resolved** — `cmd_audit` now requires
+whole-candidate review for first-contact packages even when the deterministic
+scan produces zero rule hits, matching `check_pkg`'s missing-cache gate. See
 <https://github.com/bermudi/aur-gate/issues>.
 
 ## Catalog
@@ -94,6 +114,10 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-gate/issues/24)
 - ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-gate/issues/6)
 - ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-gate/issues/8)
+- ◷ **#27** — Git replace refs & grafts enable auditor/builder view split (Cohort 3 H7) · [#27](https://github.com/bermudi/aur-gate/issues/27)
+- ◷ **#28** — Git `http.*` local config keys escape safety check — proxy/CA MITM (Cohort 3 H8, extends #5) · [#28](https://github.com/bermudi/aur-gate/issues/28)
+- ◷ **#30** — Wrapper dispatch does not reject `--hookdir`/`--cachedir`/`--gpgdir`/`--logfile` (Cohort 3 H9) · [#30](https://github.com/bermudi/aur-gate/issues/30)
+- ✓ **#31** — `cmd_audit` auto-proceeds on first-time install with zero rule hits (Cohort 3 H10, extends #4) → [doc](gh31-cmd-audit-first-contact-zero-hit.md) · [#31](https://github.com/bermudi/aur-gate/issues/31)
 
 ### Medium
 - ✓ **M** — `AUR_GATE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
@@ -106,6 +130,14 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-gate/issues/25)
 - ✓ **gh11** — Force C locale for deterministic regex and byte processing (Cohort 2 M2, #11) → [doc](gh11-force-c-locale.md) · [#11](https://github.com/bermudi/aur-gate/issues/11)
 - ✓ **gh10** — LLM boring-edge auto-green should never see source authority anomalies (Cohort 2 M1, #10; duplicate of gh3) → [doc](gh10-llm-boring-edge-source-authority.md) · [#10](https://github.com/bermudi/aur-gate/issues/10)
+- ◷ **#12** — AUR RPC parsing brittle, HTTPS not enforced (Cohort 2 M3, partial) · [#12](https://github.com/bermudi/aur-gate/issues/12)
+- ◷ **#15** — State-dir permissions / symlink hygiene — trust files lack `O_NOFOLLOW` (Cohort 2 M6, partial) · [#15](https://github.com/bermudi/aur-gate/issues/15)
+- ◷ **#16** — Wrapper portability — `--opt=value` unhandled (Cohort 2 M7, partial) · [#16](https://github.com/bermudi/aur-gate/issues/16)
+- ◷ **#17** — DoS via large repos/diffs (Cohort 2 M8, open) · [#17](https://github.com/bermudi/aur-gate/issues/17)
+- ◷ **#29** — Git `includeIf.*` bypasses `include.` prefix check (Cohort 3 M10, extends #5) · [#29](https://github.com/bermudi/aur-gate/issues/29)
+- ◷ **#32** — Wrapper resolves aur-gate/pacman/flock via PATH at runtime (Cohort 3 M11) · [#32](https://github.com/bermudi/aur-gate/issues/32)
+- ◷ **#33** — Zero-diff cached update exits clean without staging (Cohort 3 M12) · [#33](https://github.com/bermudi/aur-gate/issues/33)
+- ◷ **#34** — Predictable PID-based temp filename in `stash_flag` (Cohort 3 M13) · [#34](https://github.com/bermudi/aur-gate/issues/34)
 
 ### Low
 - ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-gate/issues/26)
@@ -113,6 +145,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **gh21** — SHA-1 trust anchors will not support SHA-256 git repos (Cohort 2 L4, #21) → [doc](gh21-sha256-trust-anchors.md) · [#21](https://github.com/bermudi/aur-gate/issues/21)
 - ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-gate/issues/22)
 - ✓ **gh19** — `_collect_review_details()` uses tab-separated records (Cohort 2 L2, #19) → [doc](gh19-collect-review-details-tab-separated.md) · [#19](https://github.com/bermudi/aur-gate/issues/19)
+- ◷ **#35** — Force-pushed history causes permanent lockout without auto-recovery (Cohort 3 L7) · [#35](https://github.com/bermudi/aur-gate/issues/35)
 - L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
 
 ### Founding pass (A–D, closed)
@@ -160,7 +193,8 @@ as a non-finding — see below).
   #19 (gh19), #21 (gh21), #22 (gh22), #24 (W), #25 (Y), #26 (X). Where they overlap
   Cohort 1 (already fixed), the existing doc is cross-linked rather than
   duplicated.
-- **Open issues without docs (by design — doc is written on close):** #7, #9,
-  #12, #13, #14, #15, #16, #17, #20.
+- **Open issues without docs (by design — doc is written on close):** #12,
+  #15, #16, #17 (Cohort 2 partial/open); #27–#35 (Cohort 3, all new).
+  (Closed 2026-08-04 pending their `ghNN` docs: #7, #9, #13, #14, #20.)
 - **L2 (Cohort 1):** rejected as a non-finding (see §Low-severity findings). No
   tracker home needed.
