@@ -161,12 +161,21 @@ fn isolate_git_env(cmd: &mut Command) {
 /// `sslCAInfo`, defeating `http.sslVerify=true` set via `-c`. URL-scoped
 /// sections override command-line `-c`, so blocking in
 /// `local_config_is_safe()` is the only robust kill switch.
+///
+/// `includeIf.` is blocked wholesale (extends #5/#28): `[includeIf "..."]`
+/// subsections do not start with `include.`, so the `include.` prefix alone
+/// would let a repo-local `includeIf.<condition>.path` pull in an
+/// attacker-controlled config file (which could itself set `http.*`, `url.*`,
+/// `alias.*`, etc., bypassing every other prefix check). The includeIf
+/// directive is the canonical config-injection vector and must be denied at
+/// the prefix level.
 const UNSAFE_KEY_PREFIXES: &[&str] = &[
     "diff.",
     "url.",
     "filter.",
     "alias.",
     "include.",
+    "includeif.",
     "credential.",
     "submodule.",
     "protocol.",
@@ -253,6 +262,9 @@ mod tests {
                 "http.https://aur.archlinux.org.proxy",
                 "http://attacker:8080",
             ),
+            // includeIf.<condition>.path does not start with `include.` and is
+            // the canonical config-injection vector (extends #5/#28).
+            ("includeif.onbranch.main.path", "/tmp/evil-config"),
         ] {
             let temp = tempfile::tempdir().unwrap();
             assert!(Command::new("/usr/bin/git")
