@@ -32,7 +32,7 @@ attacker-controlled location during the privileged install step.
 
 Added `--hookdir`, `--cachedir`, `--gpgdir`, `--logfile` (and their
 `--opt=value` forms) to the dispatch reject list at
-`assets/wrapper.sh:130-132`, alongside the existing `--config`/`--root`/`--dbpath`
+`assets/wrapper.sh:131-132`, alongside the existing `--config`/`--root`/`--dbpath`
 pacman context options. Any of these flags now aborts dispatch with the existing
 `custom helper/build trust context is unsupported` message before the helper is
 invoked.
