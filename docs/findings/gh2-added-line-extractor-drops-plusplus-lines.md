@@ -1,11 +1,11 @@
 # gh#2 — Added-line extractor drops lines beginning with `++` (C1)
 
-**Source:** GitHub issue [#2](https://github.com/bermudi/aur-check/issues/2)
+**Source:** GitHub issue [#2](https://github.com/bermudi/aur-gate/issues/2)
 (Cohort 2, critical C1)
 **Status:** fixed
 **Severity:** critical
-**Lines:** `_diff_added_lines()` at aur-safe:313; `diff_added()` at
-aur-safe:326; `_diff_added_metadata_file()` at aur-safe:338.
+**Lines:** `_diff_added_lines()` at aur-gate:313; `diff_added()` at
+aur-gate:326; `_diff_added_metadata_file()` at aur-gate:338.
 
 ## Summary
 
@@ -51,8 +51,8 @@ content.
 
 ## Verification
 
-- `bash -n aur-safe` clean; `shellcheck -s bash aur-safe` clean.
-- `./aur-safe selftest` → 283 passed, 0 failed.
+- `bash -n aur-gate` clean; `shellcheck -s bash aur-gate` clean.
+- `./aur-gate selftest` → 283 passed, 0 failed.
 - Two new fixtures pin **both** failure directions:
   - `diff-added-hunk-aware-plusplus-content` — crafted two-file diff: asserts
     `++`-prefixed content IS extracted (`++x;curl…`, `++second-file-payload`)

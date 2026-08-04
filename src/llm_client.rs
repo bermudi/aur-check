@@ -50,7 +50,7 @@ impl NativeLlm {
             LLMBackend::Ollama => "OLLAMA_API_KEY",
             _ => return None,
         };
-        std::env::var("AUR_SAFE_LLM_API_KEY")
+        std::env::var("AUR_GATE_LLM_API_KEY")
             .ok()
             .or_else(|| std::env::var(provider_key).ok())
             .filter(|key| !key.is_empty())

@@ -4,10 +4,10 @@ use std::process::Command;
 
 use support::build_http_repo;
 
-fn run_aur_safe(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_aur-safe"));
+fn run_aur_gate(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_aur-gate"));
     // Production configuration is environment-driven. Start from a deliberately
-    // small environment so a developer's proxy, AUR_SAFE_* setting, Git config,
+    // small environment so a developer's proxy, AUR_GATE_* setting, Git config,
     // or LLM credential cannot change this boundary test's behavior.
     cmd.env_clear();
     cmd.env("PATH", "/usr/bin:/bin");
@@ -16,7 +16,7 @@ fn run_aur_safe(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let out = cmd.args(args).output().expect("spawn aur-safe test binary");
+    let out = cmd.args(args).output().expect("spawn aur-gate test binary");
     let status = out.status.code().unwrap_or(-1);
     (
         status,
@@ -32,13 +32,13 @@ fn main_startup_rejects_invalid_llm_backend_before_dispatch() {
     let state = temp.path().join("state");
     let config = temp.path().join("config");
 
-    let (rc, _, err) = run_aur_safe(
+    let (rc, _, err) = run_aur_gate(
         &["check", "anything"],
         &[
             ("HOME", home.to_str().unwrap()),
-            ("AUR_SAFE_CONFIG", config.to_str().unwrap()),
-            ("AUR_SAFE_STATE_DIR", state.to_str().unwrap()),
-            ("AUR_SAFE_LLM_BACKEND", "bogus"),
+            ("AUR_GATE_CONFIG", config.to_str().unwrap()),
+            ("AUR_GATE_STATE_DIR", state.to_str().unwrap()),
+            ("AUR_GATE_LLM_BACKEND", "bogus"),
         ],
     );
 
@@ -47,7 +47,7 @@ fn main_startup_rejects_invalid_llm_backend_before_dispatch() {
         "invalid backend must fail startup with code 3: {err}"
     );
     assert!(
-        err.contains("unsupported AUR_SAFE_LLM_BACKEND") || err.contains("invalid LLM backend"),
+        err.contains("unsupported AUR_GATE_LLM_BACKEND") || err.contains("invalid LLM backend"),
         "unexpected startup error output: {err}"
     );
 }
@@ -61,7 +61,7 @@ fn main_check_route_reaches_production_rpc_and_clone_boundaries() {
     let paru = temp.path().join("paru");
     let config = temp.path().join("config");
 
-    let pkgbase = "boundary-pkg-aur-safe";
+    let pkgbase = "boundary-pkg-aur-gate";
     let rpc_json = format!(
         "{{\"resultcount\":1,\"results\":[{{\"Name\":\"{pkgbase}\",\"PackageBase\":\"{pkgbase}\"}}]}}"
     );
@@ -69,15 +69,15 @@ fn main_check_route_reaches_production_rpc_and_clone_boundaries() {
     let _shas = build_http_repo(&fixture.repo, pkgbase, &[("1".into(), String::new())]);
 
     let aur_url = format!("http://127.0.0.1:{}", fixture.port);
-    let (rc, _, err) = run_aur_safe(
+    let (rc, _, err) = run_aur_gate(
         &["check", pkgbase],
         &[
             ("HOME", home.to_str().unwrap()),
-            ("AUR_SAFE_CONFIG", config.to_str().unwrap()),
-            ("AUR_SAFE_STATE_DIR", state.to_str().unwrap()),
-            ("AUR_SAFE_AUR_URL", &aur_url),
-            ("AUR_SAFE_YAY_CACHE", yay.to_str().unwrap()),
-            ("AUR_SAFE_PARU_CACHE", paru.to_str().unwrap()),
+            ("AUR_GATE_CONFIG", config.to_str().unwrap()),
+            ("AUR_GATE_STATE_DIR", state.to_str().unwrap()),
+            ("AUR_GATE_AUR_URL", &aur_url),
+            ("AUR_GATE_YAY_CACHE", yay.to_str().unwrap()),
+            ("AUR_GATE_PARU_CACHE", paru.to_str().unwrap()),
         ],
     );
 

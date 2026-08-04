@@ -1,10 +1,10 @@
 # gh#19 — `_collect_review_details()` uses tab-separated records (Cohort 2 L2)
 
-**Source:** GitHub issue [#19](https://github.com/bermudi/aur-check/issues/19)
+**Source:** GitHub issue [#19](https://github.com/bermudi/aur-gate/issues/19)
 (Cohort 2, low L2)
 **Status:** fixed
 **Severity:** low
-**Lines:** `_collect_review_details()` at `aur-safe:1131`; caller at `aur-safe:1959-1963`
+**Lines:** `_collect_review_details()` at `aur-gate:1131`; caller at `aur-gate:1959-1963`
 
 ## Summary
 
@@ -58,9 +58,9 @@ bytes needed by `_detail_is_build_logic()`.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean.
-- `./aur-safe selftest </dev/null` — 319 passed, 0 failed.
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean.
+- `./aur-gate selftest </dev/null` — 319 passed, 0 failed.
 - `classifier-detail-tab-in-text` sends an added build-command line containing
   a literal interior tab through `_collect_review_details()` and its caller,
   then asserts that the complete rendered `PKGBUILD:<line>: <text>` detail

@@ -3,7 +3,7 @@
 **Source:** GitHub issue #3 (Cohort 2 C2, 2026-07-27)  
 **Status:** fixed (2026-07-28)  
 **Severity:** critical  
-**Code:** `_source_line_values_are_safe()`, `_pkgbuild_safe_array_literal_line()`, `_boring_srcinfo_added_line_class()`, `source_domains()` in `aur-safe`
+**Code:** `_source_line_values_are_safe()`, `_pkgbuild_safe_array_literal_line()`, `_boring_srcinfo_added_line_class()`, `source_domains()` in `aur-gate`
 
 ## Summary
 
@@ -59,9 +59,9 @@ part of this fail-open surface; local paths now go to `review`. Only
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via `.shellcheckrc`).
-- `./aur-safe selftest` — **292/292**.
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean (SC2016/SC2001 excluded via `.shellcheckrc`).
+- `./aur-gate selftest` — **292/292**.
 - New regression fixtures in `run_selftest` pin each exploit class plus negative
   controls:
   - `source-userinfo-bypass`

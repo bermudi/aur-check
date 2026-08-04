@@ -14,7 +14,7 @@ the helper can check out and build X′ even though only X was audited.
 Staging alone correctly prevents **anchor poisoning**: `accepted/<pkgbase>`
 would advance to X (the audited SHA), not X′. Before the final guard, however,
 that did not prevent X′'s PKGBUILD/build hooks from executing during the first
-helper run. Catching it next time was too late for aur-safe's primary promise:
+helper run. Catching it next time was too late for aur-gate's primary promise:
 stop malicious AUR updates before execution/pacman.
 
 Gate-time fetch failures already blocked; the mechanism below closes the
@@ -22,8 +22,8 @@ remaining ordinary two-fetch race.
 
 ## Implemented mechanism
 
-The generated wrapper passes the aur-safe executable through both helpers'
-`--makepkg` option. `AUR_SAFE_AS_MAKEPKG=1` selects `cmd_makepkg`, which runs at
+The generated wrapper passes the aur-gate executable through both helpers'
+`--makepkg` option. `AUR_GATE_AS_MAKEPKG=1` selects `cmd_makepkg`, which runs at
 the final safe seam before PKGBUILD is sourced and requires:
 
 1. a valid git checkout whose directory names the pkgbase;

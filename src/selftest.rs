@@ -129,7 +129,7 @@ fn failures() -> Vec<String> {
 }
 
 pub fn run() -> i32 {
-    eprintln!("aur-safe self-test");
+    eprintln!("aur-gate self-test");
     let failed = failures();
     for failure in &failed {
         eprintln!("  FAIL {failure}");

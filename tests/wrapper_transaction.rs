@@ -39,10 +39,10 @@ fn assert_flag_once(args: &[String], flag: &str) {
 
 fn assert_helper_caps(helper: &serde_json::Value) {
     let caps = helper["env_caps"].as_object().unwrap();
-    assert_eq!(caps["AUR_SAFE_AS_MAKEPKG"], "1");
-    assert_eq!(caps["AUR_SAFE_TRANSACTION_ACTIVE"], "1");
-    assert!(caps["AUR_SAFE_LOCK_HELD"].is_null());
-    assert!(caps["AUR_SAFE_STAGING"].is_null());
+    assert_eq!(caps["AUR_GATE_AS_MAKEPKG"], "1");
+    assert_eq!(caps["AUR_GATE_TRANSACTION_ACTIVE"], "1");
+    assert!(caps["AUR_GATE_LOCK_HELD"].is_null());
+    assert!(caps["AUR_GATE_STAGING"].is_null());
 }
 
 fn assert_transaction_events(fixture: &Fixture, helper: &str) {
@@ -87,8 +87,8 @@ fn wrapper_yay_gate_build_accepts_exact_audited_tip() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
         ],
     );
     assert_eq!(rc, 0, "yay wrapper transaction must return 0");
@@ -190,8 +190,8 @@ fn wrapper_paru_gate_build_accepts_exact_audited_tip() {
         "paru",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
         ],
     );
     assert_eq!(rc, 0, "paru wrapper transaction must return 0");
@@ -256,8 +256,8 @@ fn wrapper_zsh_yay_transaction_accepts_exact_audited_tip() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
         ],
     );
     assert_eq!(rc, 0, "zsh wrapper transaction failed: {err}");
@@ -287,8 +287,8 @@ fn wrapper_zsh_paru_transaction_accepts_exact_audited_tip() {
         "paru",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
         ],
     );
     assert_eq!(rc, 0, "zsh paru transaction failed: {err}");
@@ -317,9 +317,9 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
-            ("AUR_SAFE_WINDOW_COMMIT", "1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_WINDOW_COMMIT", "1"),
         ],
     );
     assert_ne!(rc, 0, "window-commit must fail the wrapper transaction");
@@ -385,7 +385,7 @@ fn wrapper_resourcing_replaces_existing_helper_functions() {
 
     for shell in ["/bin/bash", "/bin/zsh"] {
         let script = format!(
-            "source '{}'\nsource '{}'\n[ \"$_AUR_SAFE_YAY_BIN\" = '{}' ] || exit 41\n[ \"$_AUR_SAFE_PARU_BIN\" = '{}' ] || exit 42\ntype yay >/dev/null 2>&1 || exit 43\ntype paru >/dev/null 2>&1 || exit 44\n",
+            "source '{}'\nsource '{}'\n[ \"$_AUR_GATE_YAY_BIN\" = '{}' ] || exit 41\n[ \"$_AUR_GATE_PARU_BIN\" = '{}' ] || exit 42\ntype yay >/dev/null 2>&1 || exit 43\ntype paru >/dev/null 2>&1 || exit 44\n",
             fixture.wrapper_sh.display(),
             fixture.wrapper_sh.display(),
             expected_yay.display(),

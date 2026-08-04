@@ -1,6 +1,6 @@
 # gh10 — LLM boring-edge auto-green should never see source authority anomalies
 
-**Source:** GitHub issue [#10](https://github.com/bermudi/aur-check/issues/10)
+**Source:** GitHub issue [#10](https://github.com/bermudi/aur-gate/issues/10)
 (Cohort 2 M1)
 **Status:** fixed (duplicate of gh3)
 **Severity:** medium
@@ -8,7 +8,7 @@
 
 ## Summary
 
-If `AUR_SAFE_LLM_AUTO_BORING=1`, the LLM boring-edge verifier can auto-clear
+If `AUR_GATE_LLM_AUTO_BORING=1`, the LLM boring-edge verifier can auto-clear
 `boring_edge` diffs. Parser-ambiguous source changes (userinfo `@`, scheme
 downgrade, VCS type change, `SKIP` checksum, local paths, IPv6/scp-like forms)
 are visually subtle and should never be LLM-verifiable — they must be
@@ -26,9 +26,9 @@ mechanism and fix.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean.
-- `./aur-safe selftest` — all source-URI selftests green: `source-userinfo-bypass`,
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean.
+- `./aur-gate selftest` — all source-URI selftests green: `source-userinfo-bypass`,
   `source-scheme-downgrade`, `source-local-file`, `source-scp-like`,
   `source-ipv6-literal`, `source-vcs-plus-skip`, `source-https-port`,
   `source-variable-in-host`.

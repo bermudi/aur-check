@@ -1,16 +1,16 @@
 # gh#6 — Hard rules are brittle and can be evaded into review (Cohort 2 H2)
 
-**Source:** GitHub issue [#6](https://github.com/bermudi/aur-check/issues/6)
+**Source:** GitHub issue [#6](https://github.com/bermudi/aur-gate/issues/6)
 (Cohort 2, high H2)
 **Status:** fixed
 **Severity:** high
-**Lines:** rule list at `aur-safe:152-191`; fail-closed PKGBUILD structural
-classifier at `aur-safe:678-995` and `classify_diff_rules()` at
-`aur-safe:1684-1997`; selftest fixture at `aur-safe:5320-5325`
+**Lines:** rule list at `aur-gate:152-191`; fail-closed PKGBUILD structural
+classifier at `aur-gate:678-995` and `classify_diff_rules()` at
+`aur-gate:1684-1997`; selftest fixture at `aur-gate:5320-5325`
 
 ## Summary
 
-`aur-safe`'s hard-fail rules are extended regexes applied to raw added diff
+`aur-gate`'s hard-fail rules are extended regexes applied to raw added diff
 lines. They are fast and useful for known campaign patterns (`npm install`,
 `curl | sh`, `eval $(curl ...)`, etc.), but they are not a shell tokenizer.
 Issue #6 showed several ways to avoid the deterministic `hard` (exit 1) bucket
@@ -69,10 +69,10 @@ the attacker can rotate names faster than lists can track.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean (SC2016/SC2001 excluded via
   `.shellcheckrc`).
-- `./aur-safe selftest </dev/null` — 314 passed, 0 failed, including
+- `./aur-gate selftest </dev/null` — 314 passed, 0 failed, including
   `classifier-gh6-hard-rule-evasions-review`.
 
 ## Lesson

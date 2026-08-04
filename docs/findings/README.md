@@ -1,6 +1,6 @@
 # Findings
 
-Durable record of aur-safe's security findings — the mechanisms, fixes, and
+Durable record of aur-gate's security findings — the mechanisms, fixes, and
 lessons learned. This directory is the canonical long-form reference, cited by
 code comments and `AGENTS.md`.
 
@@ -37,7 +37,7 @@ Earliest findings from initial hardening. All closed. No severity classification
 
 ### 2026-06-26 red-team review (E–R)
 Three delegate reviewers against the full codebase + docs — 14 finding files.
-Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-check--/`:
+Session transcripts under `~/.pi/agent/sessions/--home-daniel-build-aur-gate--/`:
 
 | Reviewer | Role | Session |
 |---|---|---|
@@ -67,17 +67,17 @@ clear as boring); **gh11 (M2, #11) is resolved** (C-locale determinism);
 deterministically routed to review before the LLM boundary); **#24–#26 are fixed**
 (W/Y/X — maintainer-drift orphan adoption, advisory-accept commit binding,
 `source+=()` drift); #6–#7, #9, #12–#17, and #20 remain pending. See
-<https://github.com/bermudi/aur-check/issues>.
+<https://github.com/bermudi/aur-gate/issues>.
 
 ## Catalog
 
 Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to their issue.
 
 ### Critical
-- ✓ **gh2** — Added-line extractor drops lines beginning with `++` (C1, #2) → [doc](gh2-added-line-extractor-drops-plusplus-lines.md) · [#2](https://github.com/bermudi/aur-check/issues/2)
-- ✓ **gh3** — Source URI validation fail-open (userinfo, scheme downgrade, local paths, VCS/IPv6/port) → [doc](gh3-source-uri-fail-open.md) · [#3](https://github.com/bermudi/aur-check/issues/3)
-- ✓ **gh4** — Explicit new installs through `cmd_audit` were advisory-only (C3, #4) → [doc](gh4-cmd-audit-advisory-only.md) · [#4](https://github.com/bermudi/aur-check/issues/4)
-- ✓ **gh5** — Repo-local git config trusted; git invocation hardening incomplete (H1, #5) → [doc](gh5-git-invocation-hardening.md) · [#5](https://github.com/bermudi/aur-check/issues/5)
+- ✓ **gh2** — Added-line extractor drops lines beginning with `++` (C1, #2) → [doc](gh2-added-line-extractor-drops-plusplus-lines.md) · [#2](https://github.com/bermudi/aur-gate/issues/2)
+- ✓ **gh3** — Source URI validation fail-open (userinfo, scheme downgrade, local paths, VCS/IPv6/port) → [doc](gh3-source-uri-fail-open.md) · [#3](https://github.com/bermudi/aur-gate/issues/3)
+- ✓ **gh4** — Explicit new installs through `cmd_audit` were advisory-only (C3, #4) → [doc](gh4-cmd-audit-advisory-only.md) · [#4](https://github.com/bermudi/aur-gate/issues/4)
+- ✓ **gh5** — Repo-local git config trusted; git invocation hardening incomplete (H1, #5) → [doc](gh5-git-invocation-hardening.md) · [#5](https://github.com/bermudi/aur-gate/issues/5)
 - ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
 - △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
 - ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
@@ -91,28 +91,28 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **K** — `epoch=0` breaks install confirmation and baseline recovery → [doc](K-epoch-zero.md)
 - ✓ **L** — Concurrent gate runs corrupt the per-run manifest → [doc](L-manifest-race.md)
 - ✓ **T** — Changed patch content omitted from review evidence → [doc](T-patch-review-evidence-omitted.md)
-- ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-check/issues/24)
-- ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-check/issues/6)
-- ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-check/issues/8)
+- ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-gate/issues/24)
+- ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-gate/issues/6)
+- ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-gate/issues/8)
 
 ### Medium
-- ✓ **M** — `AUR_SAFE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
+- ✓ **M** — `AUR_GATE_ALLOW_REVIEW=0` enables auto-proceed → [doc](M-allow-review-boolean.md)
 - ✓ **N** — Split-package missing-cache clone failure (no scan, wrong staging key) → [doc](N-split-pkg-missing-cache.md)
 - ✓ **O** — `find_pkg_dir` slow path doesn't verify `.git` exists → [doc](O-find-pkg-dir-no-git.md)
 - △ **P** — Quoted PKGBUILD `source=()` entries reclassified as true-positive under gh3 → [doc](P-quoted-source-filenames-fp.md)
 - ✓ **Q** — `files_with_status` silently ignores git diff failures → [doc](Q-files-with-status-swallows-rc.md)
 - ✓ **R** — Package name regex allows `.`, `..`, `.git` → [doc](R-pkg-name-path-traversal.md)
 - ✓ **V** — Inline checksum-array reflow false-positive (availability/FP) → [doc](V-inline-checksum-reflow-fp.md)
-- ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-check/issues/25)
-- ✓ **gh11** — Force C locale for deterministic regex and byte processing (Cohort 2 M2, #11) → [doc](gh11-force-c-locale.md) · [#11](https://github.com/bermudi/aur-check/issues/11)
-- ✓ **gh10** — LLM boring-edge auto-green should never see source authority anomalies (Cohort 2 M1, #10; duplicate of gh3) → [doc](gh10-llm-boring-edge-source-authority.md) · [#10](https://github.com/bermudi/aur-check/issues/10)
+- ✓ **Y** — Advisory (non-wrapper) `accept` has no commit-identity binding → [doc](Y-advisory-accept-no-commit-binding.md) · [#25](https://github.com/bermudi/aur-gate/issues/25)
+- ✓ **gh11** — Force C locale for deterministic regex and byte processing (Cohort 2 M2, #11) → [doc](gh11-force-c-locale.md) · [#11](https://github.com/bermudi/aur-gate/issues/11)
+- ✓ **gh10** — LLM boring-edge auto-green should never see source authority anomalies (Cohort 2 M1, #10; duplicate of gh3) → [doc](gh10-llm-boring-edge-source-authority.md) · [#10](https://github.com/bermudi/aur-gate/issues/10)
 
 ### Low
-- ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-check/issues/26)
-- ✓ **gh18** — `cmd_scan` coverage is partial (Cohort 2 L1, #18) → [doc](gh18-cmd-scan-partial-coverage.md) · [#18](https://github.com/bermudi/aur-check/issues/18)
-- ✓ **gh21** — SHA-1 trust anchors will not support SHA-256 git repos (Cohort 2 L4, #21) → [doc](gh21-sha256-trust-anchors.md) · [#21](https://github.com/bermudi/aur-check/issues/21)
-- ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-check/issues/22)
-- ✓ **gh19** — `_collect_review_details()` uses tab-separated records (Cohort 2 L2, #19) → [doc](gh19-collect-review-details-tab-separated.md) · [#19](https://github.com/bermudi/aur-check/issues/19)
+- ✓ **X** — `source+=()` append invisible to source-domain drift → [doc](X-source-append-invisible-to-domain-drift.md) · [#26](https://github.com/bermudi/aur-gate/issues/26)
+- ✓ **gh18** — `cmd_scan` coverage is partial (Cohort 2 L1, #18) → [doc](gh18-cmd-scan-partial-coverage.md) · [#18](https://github.com/bermudi/aur-gate/issues/18)
+- ✓ **gh21** — SHA-1 trust anchors will not support SHA-256 git repos (Cohort 2 L4, #21) → [doc](gh21-sha256-trust-anchors.md) · [#21](https://github.com/bermudi/aur-gate/issues/21)
+- ✓ **gh22** — `_valid_pkg_name` rejects uppercase package names (Cohort 2 L5, #22) → [doc](gh22-uppercase-pkg-name-rejected.md) · [#22](https://github.com/bermudi/aur-gate/issues/22)
+- ✓ **gh19** — `_collect_review_details()` uses tab-separated records (Cohort 2 L2, #19) → [doc](gh19-collect-review-details-tab-separated.md) · [#19](https://github.com/bermudi/aur-gate/issues/19)
 - L1–L9 (Cohort 1 lows) — see §Low-severity findings below; all fixed except L2.
 
 ### Founding pass (A–D, closed)

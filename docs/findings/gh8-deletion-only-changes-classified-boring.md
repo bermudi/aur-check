@@ -1,14 +1,14 @@
 # gh#8 — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4)
 
-**Source:** GitHub issue [#8](https://github.com/bermudi/aur-check/issues/8)
+**Source:** GitHub issue [#8](https://github.com/bermudi/aur-gate/issues/8)
 (Cohort 2, high H4)
 **Related:** [W — Maintainer-drift blind to orphan adoption](W-maintainer-drift-blind-to-orphan-adoption.md)
 **Status:** fixed
 **Severity:** high
 **Lines:** `_diff_removed_lines` / `_diff_removed_metadata_file` at
-`aur-safe:522-538`; removed-field check in `classify_diff_rules()` at
-`aur-safe:1895-1935`; selftest fixtures and `tc_class` cases at
-`aur-safe:4477-4509` and `aur-safe:4628-4645`.
+`aur-gate:522-538`; removed-field check in `classify_diff_rules()` at
+`aur-gate:1895-1935`; selftest fixtures and `tc_class` cases at
+`aur-gate:4477-4509` and `aur-gate:4628-4645`.
 
 ## Summary
 
@@ -71,10 +71,10 @@ is about.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean (SC2016/SC2001 excluded via
   `.shellcheckrc`).
-- `./aur-safe selftest </dev/null` — 318 passed, 0 failed, including the new
+- `./aur-gate selftest </dev/null` — 318 passed, 0 failed, including the new
   fixtures:
   - `classifier-delete-validpgpkeys-field` (review)
   - `classifier-delete-sha256sums-field` (review)

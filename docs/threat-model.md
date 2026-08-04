@@ -39,11 +39,11 @@ than blacklists can track. Static name lists are a losing race.
 
 ### Structural pattern detection, not blacklists
 
-The attacker rotates names faster than blacklists can track, so aur-safe
+The attacker rotates names faster than blacklists can track, so aur-gate
 detects *structural patterns* rather than payload names:
 
 - **JS package managers** (npm/pnpm/bun/yarn) are **hard-fail** — they are the
-  primary campaign vector and have no legitimate use in aur-safe's audit
+  primary campaign vector and have no legitimate use in aur-gate's audit
   surface (`.install` hooks, `PKGBUILD` install functions).
 - **Other package managers** (pip/gem/cargo/go) are **review-only** — they have
   legitimate use in real AUR packages (Python/Ruby/Rust tooling).
@@ -71,13 +71,13 @@ verification.
 The gate is deterministic classification. Hard-fail, review, and
 audit-unavailable results are never auto-cleared by the LLM. The `explain`
 subcommand remains an on-demand second opinion on stashed diffs. Separately,
-`AUR_SAFE_LLM_AUTO_BORING=1` can ask a strict LLM verifier to auto-clear only
+`AUR_GATE_LLM_AUTO_BORING=1` can ask a strict LLM verifier to auto-clear only
 `boring_edge` diffs: parser-ambiguous changes that deterministic checks have
 already confined to metadata, checksum, or same-host `source=()` fields.
 
 ### The trust anchor is decoupled from the helper
 
-`~/.cache/aur-safe/accepted/<pkgbase>` is aur-safe's own trust anchor, not the
+`~/.cache/aur-gate/accepted/<pkgbase>` is aur-gate's own trust anchor, not the
 helper's HEAD. It means *the commit we audited, not what got installed* —
 staging plus install confirmation protects anchor advancement across the
 helper's second fetch. The generated wrapper's makepkg guard additionally
@@ -108,7 +108,7 @@ to pull a malicious npm package. The npm package's `package.json` contains a
 `"preinstall"` script (`"./src/hooks/deps"` or similar) — an ELF binary that
 exfiltrates local data at `npm install` time.
 
-aur-safe hard-fails on:
+aur-gate hard-fails on:
 
 - **New or modified `.install` files** (`install-hook-ref`, `install-hook-func`)
   — any reference to a `.install` file, or any `post_install`/`pre_install`/
@@ -120,7 +120,7 @@ network) defends against payloads that avoid the `.install` mechanism.
 ## Obfuscation arms race (three documented waves)
 
 The June 2026 campaign evolved through three distinct waves, each adding
-layers of obfuscation. aur-safe counters with structural patterns that don't
+layers of obfuscation. aur-gate counters with structural patterns that don't
 depend on specific obfuscation tricks.
 
 ### Wave 1 (June 11) — plaintext npm install
@@ -157,12 +157,12 @@ Added obfuscation to evade string-matching scanners. Example from
     }
 
 Mixed quoting (`$'\xNN'`, `"..."`, `'...'`) and hex/octal escape runs spell
-out `cd /tmp && bun add ansicolor nextfile-js`. This is why aur-safe detects
+out `cd /tmp && bun add ansicolor nextfile-js`. This is why aur-gate detects
 hex/octal escape *runs* (2+ adjacent) as hard-fail, and why single-escape
 whitelisting is a trap — the attacker mixes `\x63`, `\141`, `\x6e`, `\143`,
 `\x73` etc. interchangeably with plain characters and quote-concatenation.
 
-### Structural counter-patterns (aur-safe rules)
+### Structural counter-patterns (aur-gate rules)
 
 - **Hex/octal escape runs** — two adjacent `\xNN` or `\NNN` sequences spell
   hidden strings. Single escapes are review-only (ANSI color codes are `\x1b`,
@@ -197,7 +197,7 @@ The two URLs are visually indistinguishable in most terminals and diffs, but
 the second resolves to a different server. Browsers display these as punycode
 (`xn--nstall-ovf.xn--example-cl-62i.dev`), but `makepkg` does not.
 
-aur-safe now forces review for any added `source`/`source_<arch>` line with a
+aur-gate now forces review for any added `source`/`source_<arch>` line with a
 non-ASCII byte and for non-ASCII bytes on multiline URL continuation lines.
 The guard runs before boring classification and cannot be auto-cleared by the
 LLM. This is review-level mitigation rather than punycode normalization or a
@@ -206,19 +206,19 @@ hard block; `SKIP` sums still provide no independent integrity check.
 ## Related tools (community response)
 
 The attack spawned several independent scanner projects on the `aur-general`
-list. These are not part of aur-safe but informed its design and may be useful
+list. These are not part of aur-gate but informed its design and may be useful
 as second opinions:
 
 - **srcaudit** (Claudia Pellegrino / auerhuhn@archlinux.org) — pluggable
   makepkg integration for upstream source auditing. Designed with the same
-  PKGBUILD-trust assumption as aur-safe: it verifies upstream sources but
+  PKGBUILD-trust assumption as aur-gate: it verifies upstream sources but
   acknowledges a malicious PKGBUILD can `options=('!srcaudit')` to disable it.
   Hexora drop-in shipped first; the architecture supports additional scanners.
 - **Atomdrift** (Thomas Stromberg, Apache 2.0) — deterministic local AI
   platform using tree-sitter and rizin for binary analysis, immune to
   obfuscation. Arch pipeline results at https://lab.atomdrift.org/arch/.
 - **AURSCAN** (Andreas Reichel) — wraps yay, scans each package with Claude
-  LLM before installing. Advisory only (like aur-safe's `explain`).
+  LLM before installing. Advisory only (like aur-gate's `explain`).
 
 AUR registration was disabled on 2026-06-15 by Arch DevOps (artafinde) and
 remained closed through at least 2026-06-24.

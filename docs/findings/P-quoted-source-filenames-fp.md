@@ -3,7 +3,7 @@
 **Source:** qwen3.7-max red-team review, session `019f0517-d73a-78d5-929f-caae55c267e2`; also flagged by kimi-k2.6 as "new optdepends array" variant  
 **Status:** reclassified as gh3 (2026-07-28)
 **Severity:** medium  
-**Lines:** `_boring_added_line_class()` at aur-safe:293
+**Lines:** `_boring_added_line_class()` at aur-gate:293
 
 ## What happens
 
@@ -28,7 +28,7 @@ quoted filenames match neither.
 - `  "foo-1.1.tar.gz"` → matches nothing → `return 2` (review) ✗
 
 **Impact:** Benign version bumps trigger review prompts. Users without
-`AUR_SAFE_LLM_AUTO_BORING=1` see false positives on routine updates. The LLM
+`AUR_GATE_LLM_AUTO_BORING=1` see false positives on routine updates. The LLM
 verifier would auto-clear these, but it's opt-in.
 
 ## Fix and verification

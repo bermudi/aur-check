@@ -1,21 +1,21 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aur_safe::cli::dispatch;
-use aur_safe::config::Config;
-use aur_safe::engine::App;
-use aur_safe::llm_client::NativeLlm;
-use aur_safe::rpc::CurlRpc;
-use aur_safe::srcinfo::SystemPacman;
-use aur_safe::state::Paths;
-use aur_safe::ui::StderrReporter;
+use aur_gate::cli::dispatch;
+use aur_gate::config::Config;
+use aur_gate::engine::App;
+use aur_gate::llm_client::NativeLlm;
+use aur_gate::rpc::CurlRpc;
+use aur_gate::srcinfo::SystemPacman;
+use aur_gate::state::Paths;
+use aur_gate::ui::StderrReporter;
 
 fn main() -> ExitCode {
     isolate_process_environment();
     let code = match run() {
         Ok(code) => code,
         Err(error) => {
-            aur_safe::ui::error(&format!("{error:#}"));
+            aur_gate::ui::error(&format!("{error:#}"));
             3
         }
     };
@@ -43,12 +43,12 @@ fn run() -> anyhow::Result<i32> {
         yay_cache: config.yay_cache.clone(),
         paru_cache: config.paru_cache.clone(),
         makepkg_path: PathBuf::from("/usr/bin/makepkg"),
-        staging: std::env::var("AUR_SAFE_STAGING").as_deref() == Ok("1"),
+        staging: std::env::var("AUR_GATE_STAGING").as_deref() == Ok("1"),
         llm_auto_boring: config.llm_auto_boring,
         explain_maxlines: config.explain_maxlines,
         explain_model: llm_description,
-        hard: aur_safe::rules::hard_rules(),
-        review: aur_safe::rules::review_rules(),
+        hard: aur_gate::rules::hard_rules(),
+        review: aur_gate::rules::review_rules(),
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();

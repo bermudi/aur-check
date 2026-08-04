@@ -3,13 +3,13 @@
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
 **Status:** fixed (2026-07-23)
 **Severity:** medium  
-**Lines:** `check_pkg()` at aur-safe:985, `cmd_audit()` at aur-safe:1444
+**Lines:** `check_pkg()` at aur-gate:985, `cmd_audit()` at aur-gate:1444
 
 ## What happens
 
 The package name validation regex `^[a-z0-9@._+-]+$` allows `.`, `..`, and names
-starting with `.` (like `.git`). A user manually running `aur-safe check ..` or
-`aur-safe audit .git` passes validation:
+starting with `.` (like `.git`). A user manually running `aur-gate check ..` or
+`aur-gate audit .git` passes validation:
 
 - `find_pkg_dir "."` fast-path checks `"$base/./.git"` which resolves to the
   current directory. If CWD is a git repo, `check_pkg` would diff it, fetch from

@@ -129,7 +129,7 @@ pub fn cmd_gate(app: &mut App) -> i32 {
     }
 
     app.reporter
-        .dim(&format!("aur-safe: gating {} AUR update(s)", pkgs.len()));
+        .dim(&format!("aur-gate: gating {} AUR update(s)", pkgs.len()));
     let mut rc_overall = 0;
     let mut review_pkgs: Vec<String> = Vec::new();
     for pkg in &pkgs {
@@ -206,7 +206,7 @@ pub fn cmd_abort(app: &mut App) -> i32 {
 
 pub fn cmd_check(app: &mut App, pkgs: &[String]) -> i32 {
     if pkgs.is_empty() {
-        eprintln!("usage: aur-safe check <pkg> [<pkg>...]");
+        eprintln!("usage: aur-gate check <pkg> [<pkg>...]");
         return 3;
     }
     let _lock = match app.paths.acquire_lock() {
@@ -484,7 +484,7 @@ fn scan_report_file(app: &mut App, file: &Path) -> bool {
 
 pub fn cmd_scan(app: &mut App) -> i32 {
     app.reporter
-        .dim("aur-safe: scanning installed packages for payload patterns");
+        .dim("aur-gate: scanning installed packages for payload patterns");
     let mut files: Vec<PathBuf> = Vec::new();
     for pattern_root in [
         "/var/lib/pacman/local",
@@ -549,7 +549,7 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
     }
     if !flagfile.is_file() {
         crate::ui::error(&format!(
-            "no flagged diff for '{pkg}'. Run 'aur-safe gate' or 'check' first."
+            "no flagged diff for '{pkg}'. Run 'aur-gate gate' or 'check' first."
         ));
         return 3;
     }
@@ -670,10 +670,10 @@ fn unsafe_makepkg_arg(arg: &str) -> bool {
 }
 
 const CAPABILITY_ENV: &[&str] = &[
-    "AUR_SAFE_AS_MAKEPKG",
-    "AUR_SAFE_TRANSACTION_ACTIVE",
-    "AUR_SAFE_LOCK_HELD",
-    "AUR_SAFE_STAGING",
+    "AUR_GATE_AS_MAKEPKG",
+    "AUR_GATE_TRANSACTION_ACTIVE",
+    "AUR_GATE_LOCK_HELD",
+    "AUR_GATE_STAGING",
 ];
 
 #[derive(Debug)]
@@ -790,8 +790,8 @@ fn prepare_makepkg(
 }
 
 pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
-    let active = std::env::var("AUR_SAFE_AS_MAKEPKG").as_deref() == Ok("1")
-        && std::env::var("AUR_SAFE_TRANSACTION_ACTIVE").as_deref() == Ok("1");
+    let active = std::env::var("AUR_GATE_AS_MAKEPKG").as_deref() == Ok("1")
+        && std::env::var("AUR_GATE_TRANSACTION_ACTIVE").as_deref() == Ok("1");
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -817,7 +817,7 @@ pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
 // --- review UI ----------------------------------------------------------------
 
 fn print_review_pkg_list(reporter: &mut dyn crate::classifier::Reporter, pkgs: &[String]) {
-    reporter.dim("aur-safe: packages needing review:");
+    reporter.dim("aur-gate: packages needing review:");
     for (i, pkg) in pkgs.iter().enumerate() {
         reporter.dim(&format!("  {}. {pkg}", i + 1));
     }
@@ -924,14 +924,14 @@ fn page_file(file: &Path) {
 }
 
 /// Interactive review prompt. Returns 0 to continue, 1 to abort, 2 for
-/// non-interactive-without-allow. Honors AUR_SAFE_ALLOW_REVIEW=1.
+/// non-interactive-without-allow. Honors AUR_GATE_ALLOW_REVIEW=1.
 pub fn review_prompt(app: &mut App, pkgs_in: &[String]) -> i32 {
-    if std::env::var("AUR_SAFE_ALLOW_REVIEW").as_deref() == Ok("1") {
+    if std::env::var("AUR_GATE_ALLOW_REVIEW").as_deref() == Ok("1") {
         return 0;
     }
     if !std::io::stdin().is_terminal() {
         app.reporter.review_msg(
-            "review needed; no blocking rule fired (non-interactive; set AUR_SAFE_ALLOW_REVIEW=1 to continue after review)",
+            "review needed; no blocking rule fired (non-interactive; set AUR_GATE_ALLOW_REVIEW=1 to continue after review)",
         );
         return 2;
     }
@@ -949,20 +949,20 @@ pub fn review_prompt(app: &mut App, pkgs_in: &[String]) -> i32 {
     }
     loop {
         let prompt = if review_pkgs.len() > 1 {
-            "aur-safe: review needed — [l]ist / [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: "
+            "aur-gate: review needed — [l]ist / [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: "
         } else {
-            "aur-safe: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: "
+            "aur-gate: review needed — [v]iew diff / [e]xplain / [y]es continue / [N]/Esc abort: "
         };
         eprint!("{prompt}");
         let _ = std::io::stderr().flush();
         let Ok(ans) = read_menu_input() else {
-            app.reporter.dim("aur-safe: aborted by user");
+            app.reporter.dim("aur-gate: aborted by user");
             return 1;
         };
         match ans.as_str() {
             "y" | "Y" => return 0,
             "" | "n" | "N" => {
-                app.reporter.dim("aur-safe: aborted by user");
+                app.reporter.dim("aur-gate: aborted by user");
                 return 1;
             }
             "l" | "L" => print_review_pkg_list(&mut *app.reporter, &review_pkgs),
@@ -988,7 +988,7 @@ pub fn review_prompt(app: &mut App, pkgs_in: &[String]) -> i32 {
                     None => continue,
                 }
             }
-            _ => app.reporter.dim("aur-safe: enter l, v, e, y, or N/Esc"),
+            _ => app.reporter.dim("aur-gate: enter l, v, e, y, or N/Esc"),
         }
     }
 }
@@ -1007,9 +1007,9 @@ fn choose_review_pkg(
     }
     print_review_pkg_list(reporter, pkgs);
     let prompt = if allow_all {
-        format!("aur-safe: {action} which package? [number/name, empty=all, Esc cancels] ")
+        format!("aur-gate: {action} which package? [number/name, empty=all, Esc cancels] ")
     } else {
-        format!("aur-safe: {action} which package? [number/name, Esc cancels] ")
+        format!("aur-gate: {action} which package? [number/name, Esc cancels] ")
     };
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
@@ -1025,7 +1025,7 @@ fn choose_review_pkg(
     match resolve_review_pkg(&target, pkgs) {
         Some(p) => Some(p),
         None => {
-            reporter.dim(&format!("aur-safe: unknown review target '{target}'"));
+            reporter.dim(&format!("aur-gate: unknown review target '{target}'"));
             None
         }
     }

@@ -3,7 +3,7 @@
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
 **Status:** fixed in generated wrapper (2026-07-23; existing wrappers must be regenerated)
 **Severity:** high  
-**Lines:** `MANIFEST_FILE` at aur-safe:46, `_stage_if_gating()` at aur-safe:591-595, `_stage_scan_if_gating()` at aur-safe:675-680, `cmd_gate()` at aur-safe:1215, `cmd_accept()` at aur-safe:1270-1295
+**Lines:** `MANIFEST_FILE` at aur-gate:46, `_stage_if_gating()` at aur-gate:591-595, `_stage_scan_if_gating()` at aur-gate:675-680, `cmd_gate()` at aur-gate:1215, `cmd_accept()` at aur-gate:1270-1295
 
 ## What happens
 

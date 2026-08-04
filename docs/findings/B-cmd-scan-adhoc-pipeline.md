@@ -3,7 +3,7 @@
 **Source:** kimi-k2.6 delegate review, session `019f0184-3dbd-7d44-b9b3-8ef793ee553b`  
 **Updated:** 2026-06-26 — fixed by converging `cmd_scan` on the shared rule arrays  
 **Status:** closed (fixed in code; retroactive scanner is report-only and advisory)
-**Lines:** `_scan_report_file()` / `cmd_scan()` at `aur-safe:842-887`
+**Lines:** `_scan_report_file()` / `cmd_scan()` at `aur-gate:842-887`
 
 ## What happens
 

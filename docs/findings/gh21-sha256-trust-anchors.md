@@ -1,20 +1,20 @@
 # gh#21 — SHA-1 trust anchors will not support SHA-256 git repos (Cohort 2 L4)
 
-**Source:** GitHub issue [#21](https://github.com/bermudi/aur-check/issues/21)
+**Source:** GitHub issue [#21](https://github.com/bermudi/aur-gate/issues/21)
 (Cohort 2, low L4)
 **Status:** fixed
 **Severity:** low
-**Lines:** `accepted_ref()` at `aur-safe:1341`; `write_ref()` at `aur-safe:1351`;
-`find_baseline_commit()` awk parser at `aur-safe:1512,1517`; `_clone_aur()` at
-`aur-safe:1576`; `_stage_scan_if_gating()` at `aur-safe:1667`; `_cmd_accept_locked()`
-at `aur-safe:2566`; `cmd_makepkg()` at `aur-safe:2786`.
+**Lines:** `accepted_ref()` at `aur-gate:1341`; `write_ref()` at `aur-gate:1351`;
+`find_baseline_commit()` awk parser at `aur-gate:1512,1517`; `_clone_aur()` at
+`aur-gate:1576`; `_stage_scan_if_gating()` at `aur-gate:1667`; `_cmd_accept_locked()`
+at `aur-gate:2566`; `cmd_makepkg()` at `aur-gate:2786`.
 
 ## Summary
 
-`aur-safe` validates git object IDs by matching `^[0-9a-f]{40}$` wherever a
+`aur-gate` validates git object IDs by matching `^[0-9a-f]{40}$` wherever a
 commit SHA enters the trust path:
 
-- `accepted_ref()` reads `~/.cache/aur-safe/accepted/<pkgbase>`.
+- `accepted_ref()` reads `~/.cache/aur-gate/accepted/<pkgbase>`.
 - `write_ref()` records the `origin/master` tip as a staged or accepted ref.
 - `_clone_aur()` and `_stage_scan_if_gating()` capture and record the missing-cache
   gate-time tip.
@@ -48,10 +48,10 @@ git object name, so only the input-shape validation needed widening.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean (SC2016/SC2001 excluded via
   `.shellcheckrc`).
-- `./aur-safe selftest </dev/null` — 312 passed, 0 failed. Existing SHA-1-only
+- `./aur-gate selftest </dev/null` — 312 passed, 0 failed. Existing SHA-1-only
   fixtures still resolve and promote correctly, and the baseline-recovery
   `cat-file --batch` parser stays in sync. A positive SHA-256 block
   (`-- gh21 SHA-256 trust anchors --`) builds a real `git init

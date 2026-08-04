@@ -1,10 +1,10 @@
 # gh#18 — `cmd_scan` coverage is partial (Cohort 2 L1)
 
-**Source:** GitHub issue [#18](https://github.com/bermudi/aur-check/issues/18)
+**Source:** GitHub issue [#18](https://github.com/bermudi/aur-gate/issues/18)
 (Cohort 2, low L1)
 **Status:** fixed
 **Severity:** low
-**Lines:** `cmd_scan()` at `aur-safe:2706`
+**Lines:** `cmd_scan()` at `aur-gate:2706`
 
 ## Summary
 
@@ -32,10 +32,10 @@ and advisory.
 
 ## Verification
 
-- `bash -n aur-safe` — clean.
-- `shellcheck -s bash aur-safe` — clean (SC2016/SC2001 excluded via
+- `bash -n aur-gate` — clean.
+- `shellcheck -s bash aur-gate` — clean (SC2016/SC2001 excluded via
   `.shellcheckrc`).
-- `./aur-safe selftest` — unchanged (no code changes).
+- `./aur-gate selftest` — unchanged (no code changes).
 
 ## Lesson
 

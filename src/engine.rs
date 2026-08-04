@@ -569,7 +569,7 @@ impl<'a> App<'a> {
             ));
         }
         self.reporter.dim(&format!(
-            "scan stashed: {}/flag.{pkg}.diff  (run: aur-safe explain {pkg})",
+            "scan stashed: {}/flag.{pkg}.diff  (run: aur-gate explain {pkg})",
             self.paths.state_dir.display()
         ));
         if state::stage_scan_if_gating(&self.paths, self.staging, &pkgbase, &scan_sha, &scan_url)

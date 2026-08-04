@@ -1,13 +1,13 @@
 # Finding W — Maintainer-drift blind to orphan adoption (empty baseline)
 
 **Source:** follow-up red-team review (post A–V, 2026-07-27)
-**Tracking:** [#24 (H6)](https://github.com/bermudi/aur-check/issues/24)
+**Tracking:** [#24 (H6)](https://github.com/bermudi/aur-gate/issues/24)
 **Status:** fixed
 **Severity:** high
-**Lines:** `classify_diff_rules()` drift guard at aur-safe:1827-1838; comment
-short-circuit in `_boring_pkgbuild_added_line_class()` at aur-safe:866;
-`maintainer_domains()` at aur-safe:589-595. Asymmetry vs. source-side guard at
-aur-safe:1840-1852.
+**Lines:** `classify_diff_rules()` drift guard at aur-gate:1827-1838; comment
+short-circuit in `_boring_pkgbuild_added_line_class()` at aur-gate:866;
+`maintainer_domains()` at aur-gate:589-595. Asymmetry vs. source-side guard at
+aur-gate:1840-1852.
 
 ## What happens
 
@@ -28,11 +28,11 @@ A baseline with no `# Maintainer:` / `# Contributor:` line yields `old_d=""`, so
 the set-diff is skipped entirely. The attacker's adoption commit then *adds* a
 `# Maintainer: <impersonated> <evil-domain>` line, which is a comment — and
 comments are deterministically boring (`grep -Eq '^[[:space:]]*#' … && return 0`
-at aur-safe:591). Grep confirms no other structural rule keys on maintainer
+at aur-gate:591). Grep confirms no other structural rule keys on maintainer
 lines. Net result: **exit 0, fully clean, no impersonation signal.**
 
 This is an asymmetry, not a deliberate gate: the adjacent source-domain guard at
-aur-safe:1566-1567 runs on `if [[ -n "$new_s" ]]` — only the *new* side required.
+aur-gate:1566-1567 runs on `if [[ -n "$new_s" ]]` — only the *new* side required.
 The maintainer guard was written to require both.
 
 ## Why the "narrow precondition" framing understates it
@@ -86,8 +86,8 @@ is hardening, not a closure requirement.
 
 ## Verification
 
-- `bash -n aur-safe` clean; `shellcheck -s bash aur-safe` clean.
-- `./aur-safe selftest </dev/null` → 309 passed, 0 failed.
+- `bash -n aur-gate` clean; `shellcheck -s bash aur-gate` clean.
+- `./aur-gate selftest </dev/null` → 309 passed, 0 failed.
 - New selftest fixtures pin both directions:
   - `orphan-adopt-maintainer-drift` — baseline PKGBUILD has no maintainer line;
     tip adds `# Maintainer: Attacker <x@evil-cdn.xyz>` → now classifies `review`

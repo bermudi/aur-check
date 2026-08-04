@@ -2,7 +2,7 @@
 
 ## Project
 
-`aur-safe` is a deterministic pre-install gate for Arch Linux AUR updates. The
+`aur-gate` is a deterministic pre-install gate for Arch Linux AUR updates. The
 Rust implementation at the repository root is canonical and release-supported.
 The retired Bash implementation is frozen under `archive/bash/`; it is history,
 not an oracle and must not receive fixes.
@@ -17,7 +17,7 @@ Read before changing the trust path:
 
 Rust 2021, Git, util-linux `flock`, curl, pacman, and yay or paru. The generated
 cross-shell wrapper is `assets/wrapper.sh`. Runtime state is
-`~/.cache/aur-safe/`.
+`~/.cache/aur-gate/`.
 
 - `src/engine.rs` — cached/missing-cache gate orchestration
 - `src/classifier.rs`, `src/pkgbuild.rs`, `src/rules.rs` — deterministic policy

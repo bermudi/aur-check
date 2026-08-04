@@ -3,7 +3,7 @@
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
 **Status:** fixed (2026-07-23)
 **Severity:** high  
-**Lines:** `_installed_matches()` at aur-safe:515-518, `find_baseline_commit()` at aur-safe:567
+**Lines:** `_installed_matches()` at aur-gate:515-518, `find_baseline_commit()` at aur-gate:567
 
 ## What happens
 
@@ -23,7 +23,7 @@ recovery. Pacman only displays the epoch prefix when it is non-zero, so
 **Impact:** The trust anchor never advances for packages with `epoch=0`. Every
 subsequent gate re-audits the full diff from the stale anchor, training users
 that the gate "always flags this package." In automation with
-`AUR_SAFE_ALLOW_REVIEW=1`, it causes repeated consent prompts or log noise. It
+`AUR_GATE_ALLOW_REVIEW=1`, it causes repeated consent prompts or log noise. It
 also degrades missing-cache baseline recovery to the weaker whole-file fallback.
 
 ## Fix

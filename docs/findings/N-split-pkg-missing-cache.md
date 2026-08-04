@@ -20,7 +20,7 @@ Two consequences:
 
 1. **No scan at all.** The original finding text said clone failure returns 2
    "after tier-2 whole-file scan." This was inaccurate — `missing_cache_gate`
-   returns 2 *immediately* on clone failure (aur-safe:1027-1029), so the split
+   returns 2 *immediately* on clone failure (aur-gate:1027-1029), so the split
    member got neither baseline recovery (tier 1) nor a whole-file scan (tier
    2). The user sees a consent prompt with zero diff content.
 

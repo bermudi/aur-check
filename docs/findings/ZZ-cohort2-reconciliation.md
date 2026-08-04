@@ -64,9 +64,9 @@ rejected (non-finding).
 
 - **#2 (C1) is FIXED.** Was `sed -n '/^+++/!s/^+//p'` in `diff_added` /
   `_diff_added_metadata_file`; an added PKGBUILD line beginning with `++` was
-  dropped. Replaced by the hunk-aware `_diff_added_lines()` (aur-safe:313);
+  dropped. Replaced by the hunk-aware `_diff_added_lines()` (aur-gate:313);
   see [gh2](gh2-added-line-extractor-drops-plusplus-lines.md).
-- **#5 (H1) is FIXED (closed).** The `git()` wrapper (`aur-safe:~226-365`)
+- **#5 (H1) is FIXED (closed).** The `git()` wrapper (`aur-gate:~226-365`)
   forces `--no-ext-diff`, `--no-textconv`, `--word-diff=none`, and a short
   list of `-c` overrides on every call; the environment is sanitized at load;
   and `_git_local_config_is_safe()` fail-closes on repo-local `.git/config`

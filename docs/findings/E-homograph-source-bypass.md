@@ -3,7 +3,7 @@
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
 **Status:** mitigated (review-level, 2026-07-01)
 **Severity:** critical  
-**Lines:** `source_domains()` at aur-safe:257-266, `_source_line_nonascii()` at aur-safe:268-285, `classify_diff_rules()` ~aur-safe:1052-1060, `_boring_added_line_class()` at aur-safe:313
+**Lines:** `source_domains()` at aur-gate:257-266, `_source_line_nonascii()` at aur-gate:268-285, `classify_diff_rules()` ~aur-gate:1052-1060, `_boring_added_line_class()` at aur-gate:313
 
 ## What happens
 

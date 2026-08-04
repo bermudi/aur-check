@@ -2,7 +2,7 @@
 
 **Source:** glm-5.1 delegate review, session `019f0184-3dba-7727-bac9-7f203e6516af`  
 **Status:** closed (working as designed, documentation note only)  
-**Lines:** `_installed_matches()` at `aur-safe:253`, `cmd_accept()` at `aur-safe:733,751`
+**Lines:** `_installed_matches()` at `aur-gate:253`, `cmd_accept()` at `aur-gate:733,751`
 
 ## What the reviewer flagged
 

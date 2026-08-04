@@ -1,5 +1,5 @@
 //! Shared CLI dispatch used by the production binary and the subprocess test
-//! harness. The `AUR_SAFE_AS_MAKEPKG=1` guard is checked first; it must not be
+//! harness. The `AUR_GATE_AS_MAKEPKG=1` guard is checked first; it must not be
 //! reachable through the normal command table.
 
 use crate::commands;
@@ -8,7 +8,7 @@ use crate::engine::App;
 /// Route `args` to the appropriate command. Returns the stable exit code:
 /// 0 clean, 1 blocked / audit-unavailable, 2 review, 3 usage/unknown.
 pub fn dispatch(app: &mut App, args: &[String]) -> i32 {
-    if std::env::var("AUR_SAFE_AS_MAKEPKG").as_deref() == Ok("1") {
+    if std::env::var("AUR_GATE_AS_MAKEPKG").as_deref() == Ok("1") {
         return commands::cmd_makepkg(app, args);
     }
 
@@ -64,12 +64,12 @@ pub fn dispatch(app: &mut App, args: &[String]) -> i32 {
             ) =>
         {
             crate::ui::error(&format!(
-                "invalid arguments for '{known}' (try: aur-safe --help)"
+                "invalid arguments for '{known}' (try: aur-gate --help)"
             ));
             3
         }
         other => {
-            crate::ui::error(&format!("unknown command '{other}' (try: aur-safe --help)"));
+            crate::ui::error(&format!("unknown command '{other}' (try: aur-gate --help)"));
             3
         }
     }
@@ -88,33 +88,33 @@ fn print_rules() {
 
 fn print_usage() {
     println!(
-        r#"aur-safe — deterministic gate for AUR updates
+        r#"aur-gate — deterministic gate for AUR updates
 
 usage:
-  aur-safe gate                gate all pending AUR updates
-  aur-safe check <pkg> ...     gate specific cached package(s)
-  aur-safe audit <pkg>         gate an uncached/new package
-  aur-safe scan                scan installed pkgs for payload patterns
-  aur-safe explain [pkg]       advisory LLM second-opinion on a flagged diff
-  aur-safe accept              promote staged refs (called by the wrapper)
-  aur-safe rules               list active rules
-  aur-safe wrapper             print the shell wrapper (not installed)
-  aur-safe selftest            run embedded deterministic smoke tests
+  aur-gate gate                gate all pending AUR updates
+  aur-gate check <pkg> ...     gate specific cached package(s)
+  aur-gate audit <pkg>         gate an uncached/new package
+  aur-gate scan                scan installed pkgs for payload patterns
+  aur-gate explain [pkg]       advisory LLM second-opinion on a flagged diff
+  aur-gate accept              promote staged refs (called by the wrapper)
+  aur-gate rules               list active rules
+  aur-gate wrapper             print the shell wrapper (not installed)
+  aur-gate selftest            run embedded deterministic smoke tests
 
 env:
-  AUR_SAFE_YAY_CACHE           yay cache dir (default: ~/.cache/yay)
-  AUR_SAFE_PARU_CACHE          paru cache dir (default: ~/.cache/paru/clone)
-  AUR_SAFE_STATE_DIR           state dir (default: ~/.cache/aur-safe)
-  AUR_SAFE_BRANCH              remote branch (default: master)
-  AUR_SAFE_AUR_URL             AUR base URL (default: https://aur.archlinux.org)
-  AUR_SAFE_CONFIG              config file (default: ~/.config/aur-safe/config)
-  AUR_SAFE_LLM_BACKEND         openai|anthropic|ollama|deepseek|openrouter
-  AUR_SAFE_MODEL               provider model ID (default: z-ai/glm-5.2)
-  AUR_SAFE_LLM_BASE_URL        optional provider API base URL
-  AUR_SAFE_LLM_API_KEY         provider-neutral API-key override (env only)
-  AUR_SAFE_LLM_TIMEOUT_SECONDS request timeout (default: 120)
-  AUR_SAFE_EXPLAIN_MAXLINES    diff truncation (default: 1000)
-  AUR_SAFE_LLM_AUTO_BORING     1 enables the strict boring-edge verifier
+  AUR_GATE_YAY_CACHE           yay cache dir (default: ~/.cache/yay)
+  AUR_GATE_PARU_CACHE          paru cache dir (default: ~/.cache/paru/clone)
+  AUR_GATE_STATE_DIR           state dir (default: ~/.cache/aur-gate)
+  AUR_GATE_BRANCH              remote branch (default: master)
+  AUR_GATE_AUR_URL             AUR base URL (default: https://aur.archlinux.org)
+  AUR_GATE_CONFIG              config file (default: ~/.config/aur-gate/config)
+  AUR_GATE_LLM_BACKEND         openai|anthropic|ollama|deepseek|openrouter
+  AUR_GATE_MODEL               provider model ID (default: z-ai/glm-5.2)
+  AUR_GATE_LLM_BASE_URL        optional provider API base URL
+  AUR_GATE_LLM_API_KEY         provider-neutral API-key override (env only)
+  AUR_GATE_LLM_TIMEOUT_SECONDS request timeout (default: 120)
+  AUR_GATE_EXPLAIN_MAXLINES    diff truncation (default: 1000)
+  AUR_GATE_LLM_AUTO_BORING     1 enables the strict boring-edge verifier
 
 The generated wrapper is required for the full gate → build → accept TOCTOU guarantee.
 The LLM is advisory and can never clear hard, review, or audit-unavailable results."#

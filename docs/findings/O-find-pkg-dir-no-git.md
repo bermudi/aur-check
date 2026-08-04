@@ -3,7 +3,7 @@
 **Source:** qwen3.7-max red-team review, session `019f0517-d73a-78d5-929f-caae55c267e2`; also flagged by glm-5.1  
 **Status:** fixed (2026-07-23)
 **Severity:** medium  
-**Lines:** `find_pkg_dir()` slow path at aur-safe:192
+**Lines:** `find_pkg_dir()` slow path at aur-gate:192
 
 ## What happens
 

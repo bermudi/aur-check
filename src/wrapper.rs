@@ -19,7 +19,7 @@ mod tests {
 
     fn classify(args: &[&str]) -> String {
         let temp = tempfile::tempdir().unwrap();
-        for binary in ["aur-safe", "yay", "paru"] {
+        for binary in ["aur-gate", "yay", "paru"] {
             executable(&temp.path().join(binary));
         }
         let path = format!(
@@ -31,7 +31,7 @@ mod tests {
         let output = Command::new("bash")
             .env("PATH", path)
             .arg("-c")
-            .arg("source \"$1\"; shift; _aur_safe_classify \"$@\"")
+            .arg("source \"$1\"; shift; _aur_gate_classify \"$@\"")
             .arg("wrapper-test")
             .arg(wrapper)
             .args(args)
@@ -48,16 +48,16 @@ mod tests {
     #[test]
     fn wrapper_classification_matches_bash_oracle() {
         let cases: &[(&[&str], &str)] = &[
-            (&[], "AUR_SAFE_GATE\n"),
-            (&["-Syu"], "AUR_SAFE_GATE\n"),
-            (&["-Sua"], "AUR_SAFE_GATE\n"),
-            (&["-Syyu"], "AUR_SAFE_GATE\n"),
-            (&["-Syua"], "AUR_SAFE_GATE\n"),
-            (&["-Su"], "AUR_SAFE_GATE\n"),
-            (&["--sysupgrade"], "AUR_SAFE_GATE\n"),
-            (&["-S", "-u"], "AUR_SAFE_GATE\n"),
-            (&["-Sua", "--noconfirm"], "AUR_SAFE_GATE\n"),
-            (&["-Syu", "explicit"], "PKG:explicit\nAUR_SAFE_GATE\n"),
+            (&[], "AUR_GATE_GATE\n"),
+            (&["-Syu"], "AUR_GATE_GATE\n"),
+            (&["-Sua"], "AUR_GATE_GATE\n"),
+            (&["-Syyu"], "AUR_GATE_GATE\n"),
+            (&["-Syua"], "AUR_GATE_GATE\n"),
+            (&["-Su"], "AUR_GATE_GATE\n"),
+            (&["--sysupgrade"], "AUR_GATE_GATE\n"),
+            (&["-S", "-u"], "AUR_GATE_GATE\n"),
+            (&["-Sua", "--noconfirm"], "AUR_GATE_GATE\n"),
+            (&["-Syu", "explicit"], "PKG:explicit\nAUR_GATE_GATE\n"),
             (&["-S", "foo"], "PKG:foo\n"),
             (&["-S", "UpperCase-Pkg"], "PKG:UpperCase-Pkg\n"),
             (&["-S", "foo", "bar"], "PKG:foo\nPKG:bar\n"),
@@ -82,11 +82,11 @@ mod tests {
     fn wrapper_pins_transaction_and_helper_security_contract() {
         for fragment in [
             "flock 9",
-            "AUR_SAFE_LOCK_HELD=1",
+            "AUR_GATE_LOCK_HELD=1",
             "exec 9>&-",
-            "unset AUR_SAFE_LOCK_HELD AUR_SAFE_STAGING",
-            "AUR_SAFE_TRANSACTION_ACTIVE=1",
-            "AUR_SAFE_TRANSACTION_ACTIVE=0",
+            "unset AUR_GATE_LOCK_HELD AUR_GATE_STAGING",
+            "AUR_GATE_TRANSACTION_ACTIVE=1",
+            "AUR_GATE_TRANSACTION_ACTIVE=0",
             "--rebuildall",
             "--rebuild=all",
             "--nomakepkgconf",

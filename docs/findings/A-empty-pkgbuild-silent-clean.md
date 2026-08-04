@@ -2,7 +2,7 @@
 
 **Source:** kimi-k2.6 delegate review, session `019f0184-3dbd-7d44-b9b3-8ef793ee553b`  
 **Status:** closed (fixed — `_scan_whole_pkg` failure surfaces as review exit 2)  
-**Lines:** `_scan_whole_pkg()` at `aur-safe:382`, caller at `aur-safe:595`
+**Lines:** `_scan_whole_pkg()` at `aur-gate:382`, caller at `aur-gate:595`
 
 ## What happens
 
@@ -10,7 +10,7 @@
 drops the return code:
 
 ```bash
-# aur-safe:595
+# aur-gate:595
 _scan_whole_pkg "$dir"; rm -rf "${dir%/*}"
 if (( SCAN_HITS )); then
   # ... review hit path ...
@@ -37,7 +37,7 @@ empty → clean.
 
 ## Fix
 
-One line at `aur-safe:595` — check `$?` from `_scan_whole_pkg` and surface as
+One line at `aur-gate:595` — check `$?` from `_scan_whole_pkg` and surface as
 review (exit 2) on failure:
 
 ```bash

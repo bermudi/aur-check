@@ -32,45 +32,45 @@ impl Config {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME is not set; refusing to place trust state in a shared fallback")?;
-        let config_file = std::env::var_os("AUR_SAFE_CONFIG")
+        let config_file = std::env::var_os("AUR_GATE_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config/aur-safe/config"));
+            .unwrap_or_else(|| home.join(".config/aur-gate/config"));
         let file = parse_config_file(&config_file)?;
 
-        let branch = get("AUR_SAFE_BRANCH", &file, "master");
+        let branch = get("AUR_GATE_BRANCH", &file, "master");
         validate_branch(&branch)?;
-        let aur_url = get("AUR_SAFE_AUR_URL", &file, "https://aur.archlinux.org");
+        let aur_url = get("AUR_GATE_AUR_URL", &file, "https://aur.archlinux.org");
         validate_aur_url(&aur_url)?;
 
-        let yay_cache = path_setting("AUR_SAFE_YAY_CACHE", &file, home.join(".cache/yay"));
-        let paru_cache = path_setting("AUR_SAFE_PARU_CACHE", &file, home.join(".cache/paru/clone"));
-        let state_dir = path_setting("AUR_SAFE_STATE_DIR", &file, home.join(".cache/aur-safe"));
-        validate_runtime_path("AUR_SAFE_YAY_CACHE", &yay_cache)?;
-        validate_runtime_path("AUR_SAFE_PARU_CACHE", &paru_cache)?;
-        validate_runtime_path("AUR_SAFE_STATE_DIR", &state_dir)?;
+        let yay_cache = path_setting("AUR_GATE_YAY_CACHE", &file, home.join(".cache/yay"));
+        let paru_cache = path_setting("AUR_GATE_PARU_CACHE", &file, home.join(".cache/paru/clone"));
+        let state_dir = path_setting("AUR_GATE_STATE_DIR", &file, home.join(".cache/aur-gate"));
+        validate_runtime_path("AUR_GATE_YAY_CACHE", &yay_cache)?;
+        validate_runtime_path("AUR_GATE_PARU_CACHE", &paru_cache)?;
+        validate_runtime_path("AUR_GATE_STATE_DIR", &state_dir)?;
 
-        let llm_auto_boring = matches!(get("AUR_SAFE_LLM_AUTO_BORING", &file, "0").as_str(), "1");
-        let llm_backend = get("AUR_SAFE_LLM_BACKEND", &file, "openrouter");
+        let llm_auto_boring = matches!(get("AUR_GATE_LLM_AUTO_BORING", &file, "0").as_str(), "1");
+        let llm_backend = get("AUR_GATE_LLM_BACKEND", &file, "openrouter");
         if !matches!(
             llm_backend.as_str(),
             "openai" | "anthropic" | "ollama" | "deepseek" | "openrouter"
         ) {
             bail!(
-                "unsupported AUR_SAFE_LLM_BACKEND {llm_backend:?}; expected openai, anthropic, ollama, deepseek, or openrouter"
+                "unsupported AUR_GATE_LLM_BACKEND {llm_backend:?}; expected openai, anthropic, ollama, deepseek, or openrouter"
             );
         }
-        let llm_base_url = optional("AUR_SAFE_LLM_BASE_URL", &file);
-        let explain_model = get("AUR_SAFE_MODEL", &file, "z-ai/glm-5.2");
+        let llm_base_url = optional("AUR_GATE_LLM_BASE_URL", &file);
+        let explain_model = get("AUR_GATE_MODEL", &file, "z-ai/glm-5.2");
         if explain_model.is_empty() || explain_model.bytes().any(|b| b.is_ascii_control()) {
-            bail!("AUR_SAFE_MODEL must be a non-empty, single-line model identifier");
+            bail!("AUR_GATE_MODEL must be a non-empty, single-line model identifier");
         }
         let explain_maxlines = parse_positive::<usize>(
-            "AUR_SAFE_EXPLAIN_MAXLINES",
-            &get("AUR_SAFE_EXPLAIN_MAXLINES", &file, "1000"),
+            "AUR_GATE_EXPLAIN_MAXLINES",
+            &get("AUR_GATE_EXPLAIN_MAXLINES", &file, "1000"),
         )?;
         let llm_timeout_seconds = parse_positive::<u64>(
-            "AUR_SAFE_LLM_TIMEOUT_SECONDS",
-            &get("AUR_SAFE_LLM_TIMEOUT_SECONDS", &file, "120"),
+            "AUR_GATE_LLM_TIMEOUT_SECONDS",
+            &get("AUR_GATE_LLM_TIMEOUT_SECONDS", &file, "120"),
         )?;
 
         Ok(Self {
@@ -150,7 +150,7 @@ fn validate_aur_url(url: &str) -> Result<()> {
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
         || url.ends_with('/')
     {
-        bail!("AUR_SAFE_AUR_URL must be a single-line http(s) base URL without a trailing slash");
+        bail!("AUR_GATE_AUR_URL must be a single-line http(s) base URL without a trailing slash");
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ fn validate_branch(branch: &str) -> Result<()> {
         || branch.contains("@{")
         || !bytes_ok
     {
-        bail!("AUR_SAFE_BRANCH is not a safe git branch name: {branch:?}");
+        bail!("AUR_GATE_BRANCH is not a safe git branch name: {branch:?}");
     }
     Ok(())
 }
@@ -226,14 +226,14 @@ mod tests {
 
     #[test]
     fn llm_auto_boring_precedence_and_fail_closed_values() {
-        let file = HashMap::from([("AUR_SAFE_LLM_AUTO_BORING".to_owned(), "1".to_owned())]);
-        let from_file = get_with("AUR_SAFE_LLM_AUTO_BORING", &file, "0", |_| None);
+        let file = HashMap::from([("AUR_GATE_LLM_AUTO_BORING".to_owned(), "1".to_owned())]);
+        let from_file = get_with("AUR_GATE_LLM_AUTO_BORING", &file, "0", |_| None);
         assert_eq!(from_file, "1", "config file should enable the opt-in");
 
-        let from_env = get_with("AUR_SAFE_LLM_AUTO_BORING", &file, "0", |_| Some("0".into()));
+        let from_env = get_with("AUR_GATE_LLM_AUTO_BORING", &file, "0", |_| Some("0".into()));
         assert_eq!(from_env, "0", "environment must override the file");
 
-        let invalid = get_with("AUR_SAFE_LLM_AUTO_BORING", &file, "0", |_| {
+        let invalid = get_with("AUR_GATE_LLM_AUTO_BORING", &file, "0", |_| {
             Some("bogus".into())
         });
         assert!(

@@ -98,7 +98,7 @@ pub fn valid_pkg_name(name: &str) -> bool {
     ok && !name.starts_with('.')
 }
 
-/// All state locations, derived from AUR_SAFE_STATE_DIR.
+/// All state locations, derived from AUR_GATE_STATE_DIR.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub state_dir: PathBuf,
@@ -269,19 +269,19 @@ pub enum StateLock {
 
 impl Paths {
     pub fn acquire_lock(&self) -> Result<StateLock> {
-        if std::env::var("AUR_SAFE_LOCK_HELD").as_deref() == Ok("1") {
+        if std::env::var("AUR_GATE_LOCK_HELD").as_deref() == Ok("1") {
             // Do not trust the env claim alone: the wrapper passes the actual
             // locked fd 9 through exec. Verify fd 9 is the real lock file
             // (same device/inode), then take the non-blocking lock. A spoofed
             // variable without the inherited fd must fail closed.
             let fd: RawFd = 9;
             let fd_stat =
-                nix::sys::stat::fstat(fd).context("AUR_SAFE_LOCK_HELD set but fd 9 is not open")?;
+                nix::sys::stat::fstat(fd).context("AUR_GATE_LOCK_HELD set but fd 9 is not open")?;
             let lock_path = self.state_dir.join("run.lock");
             let file_stat = nix::sys::stat::stat(&lock_path)
                 .context("cannot stat run.lock for inherited-lock check")?;
             if fd_stat.st_dev != file_stat.st_dev || fd_stat.st_ino != file_stat.st_ino {
-                bail!("AUR_SAFE_LOCK_HELD set without inherited lock fd");
+                bail!("AUR_GATE_LOCK_HELD set without inherited lock fd");
             }
             let rc = unsafe { nix::libc::flock(fd, nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
             if rc != 0 {

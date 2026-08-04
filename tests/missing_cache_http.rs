@@ -15,7 +15,7 @@ fn missing_cache_http_no_baseline_requires_review_and_stages_tip() {
         pkgbase,
         &[("1".into(), "".into()), ("2".into(), "".into())],
     );
-    let (rc, _out, _err) = fixture.run_aur_safe(&["check", pkgbase], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
     assert_eq!(rc, 2, "no-baseline missing-cache must require review");
 
     let context = fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.context")))
@@ -61,7 +61,7 @@ fn missing_cache_http_baseline_hard_delta_blocks_without_staging() {
     pacman.seed_installed(pkgbase, "1-1", pkgbase, 1000, 1001);
     fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
 
-    let (rc, _out, _err) = fixture.run_aur_safe(&["check", pkgbase], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
     assert_eq!(rc, 1, "hard delta in missing-cache baseline must block");
 
     assert!(
@@ -86,7 +86,7 @@ fn missing_cache_http_clone_failure_blocks_without_staging() {
     );
     let fixture = Fixture::new(pkgbase, &rpc_json);
     // Intentionally leave the HTTP repository empty so git clone fails.
-    let (rc, _out, _err) = fixture.run_aur_safe(&["check", pkgbase], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
     assert_eq!(
         rc, 1,
         "clone failure must return audit-unavailable, not review"

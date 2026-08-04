@@ -2,14 +2,14 @@
 
 **Source:** glm-5.1 delegate review, session `019f0184-3dba-7727-bac9-7f203e6516af`  
 **Status:** closed (fixed — assert git diff exit code; surface as review on failure)  
-**Lines:** `diff_added()` at `aur-safe:160-163`, pre-diff short-circuit at `aur-safe:648`
+**Lines:** `diff_added()` at `aur-gate:160-163`, pre-diff short-circuit at `aur-gate:648`
 
 ## What happens
 
 `diff_added` pipes `git diff` through `sed` with stderr silenced:
 
 ```bash
-# aur-safe:160-163
+# aur-gate:160-163
 diff_added() {
   git --no-pager diff "$@" -- "${EXCLUDE_PATHS[@]}" 2>/dev/null \
     | sed -n '/^+++/!s/^+//p'
@@ -21,7 +21,7 @@ silenced, stdout is empty → `added` is empty → every rule loop finds nothing
 `scan_diff_rules` returns 0 (clean). The pre-diff short-circuit has the same hole:
 
 ```bash
-# aur-safe:645-648 (approx, cached path)
+# aur-gate:645-648 (approx, cached path)
 if ! git -C "$dir" diff --name-only "${base}..origin/${AUR_REMOTE_BRANCH}" \
   -- "${EXCLUDE_PATHS[@]}" 2>/dev/null | grep -q .; then
   # "ok — no source changes" path

@@ -1,11 +1,11 @@
 # Finding X — `source+=()` append invisible to source-domain drift
 
 **Source:** follow-up red-team review (post A–V, 2026-07-27)
-**Tracking:** [#26 (L6)](https://github.com/bermudi/aur-check/issues/26)
+**Tracking:** [#26 (L6)](https://github.com/bermudi/aur-gate/issues/26)
 **Status:** fixed
 **Severity:** low
-**Lines:** `source_domains()` awk anchor at aur-safe:608. Same pattern family at
-aur-safe:772, 1034, 1036, 1046, 1061 (contextual array helpers); only the
+**Lines:** `source_domains()` awk anchor at aur-gate:608. Same pattern family at
+aur-gate:772, 1034, 1036, 1046, 1061 (contextual array helpers); only the
 drift extractor was required for closure.
 
 ## What happens
@@ -38,7 +38,7 @@ Two independent safety nets hold, so no payload reaches pacman through this:
 1. The added `source+=(...)` line fails the boring source grammar and routes to
    `review` via the general non-boring fallthrough — the reviewer still sees the
    line, host included.
-2. `_source_line_nonascii()` shape-2 (aur-safe:648) matches **any** added line
+2. `_source_line_nonascii()` shape-2 (aur-gate:648) matches **any** added line
    containing `://` with a byte ≥ 0x80, so IDN homographs on an appended source
    URL are still forced to review regardless of the `+=` syntax.
 
@@ -55,7 +55,7 @@ Add the optional `+` to the drift anchor (the load-bearing one for this finding)
 ```
 
 The bracket-expression form `[+]?` is portable across awk, `grep -E`, and Bash
-`[[ =~ ]]`. The contextual array helpers (aur-safe:772, 1034, 1036, 1046, 1061)
+`[[ =~ ]]`. The contextual array helpers (aur-gate:772, 1034, 1036, 1046, 1061)
 still match only the non-append `source=(` form; that is sufficient because the
 added `source+=(...)` line is already caught as non-boring and the drift signal
 now fires before the per-line classifier runs.
@@ -67,8 +67,8 @@ now fires before the per-line classifier runs.
 - `source-append-same-host-no-drift` — a `source+=("https://example.com/pkg-2.tar")`
   append reusing the baseline host produces an empty `comm -13` set-diff, so
   `[source-domain-new]` does not fire.
-- `bash -n aur-safe` clean; `shellcheck -s bash aur-safe` clean.
-- `./aur-safe selftest </dev/null` → 307 passed, 0 failed (was 305 before the
+- `bash -n aur-gate` clean; `shellcheck -s bash aur-gate` clean.
+- `./aur-gate selftest </dev/null` → 307 passed, 0 failed (was 305 before the
   two new regression fixtures).
 
 ## Lesson

@@ -22,11 +22,11 @@ arbitrary installed-system package name and version.
 3. X's `.SRCINFO` is crafted to lie: `pkgname = glibc`, `pkgver = 2.41`,
    `pkgrel = 1`, no epoch — exactly matches the system-glibc on a generic Arch
    system. PKGBUILD stays `pkgname=P pkgver=99 pkgrel=1`.
-4. User runs gate. Exit 2 review; user clicks `y` (or `AUR_SAFE_ALLOW_REVIEW=1`).
+4. User runs gate. Exit 2 review; user clicks `y` (or `AUR_GATE_ALLOW_REVIEW=1`).
 5. Helper fetches X, builds P (`pkgname=P pkgver=99-1` by PKGBUILD — but
    `build()` runs the malicious shell → exfiltration already happened at
    build time).
-6. Wrapper calls `aur-safe accept`.
+6. Wrapper calls `aur-gate accept`.
 7. `_installed_matches(cache_clone, X)`:
    - reads `X:.SRCINFO` → pkgname=glibc, want=2.41-1
    - `_pacman_query glibc` → "glibc 2.41-1"

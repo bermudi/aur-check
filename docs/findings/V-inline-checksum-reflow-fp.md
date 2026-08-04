@@ -58,4 +58,4 @@ outside occurrence prevents auto-clear.
 - inline-opener duplicate cannot mask `validpgpkeys`: `review`, rc 2;
 - inline opener plus standalone closer: `boring`, rc 0;
 - `bash -n`, shellcheck, and 277 selftests pass;
-- live `./aur-safe check opera-developer`: `ok`, rc 0.
+- live `./aur-gate check opera-developer`: `ok`, rc 0.

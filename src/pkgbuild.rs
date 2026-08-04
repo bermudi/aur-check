@@ -711,7 +711,7 @@ pub fn review_added_line_summary(text: &str) -> String {
         let name = String::from_utf8_lossy(caps.get(1).unwrap().as_bytes());
         return format!("PKGBUILD variable '{name}' changed; numeric value needs review");
     }
-    "build file changed in a way aur-safe cannot auto-clear".to_string()
+    "build file changed in a way aur-gate cannot auto-clear".to_string()
 }
 
 #[cfg(test)]
@@ -929,7 +929,7 @@ mod tests {
         );
         assert_eq!(
             review_added_line_summary("weird shell thing"),
-            "build file changed in a way aur-safe cannot auto-clear"
+            "build file changed in a way aur-gate cannot auto-clear"
         );
     }
 }

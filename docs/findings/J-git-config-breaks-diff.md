@@ -3,7 +3,7 @@
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
 **Status:** fixed (2026-06-28) — `export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` at script load; pinned by `git-config-isolation-hard-rules-fire` selftest  
 **Severity:** high  
-**Lines:** `diff_added()` at aur-safe:208-211, `_pkgbuild_optdepends_added_line()` at aur-safe:291-319, `_describe_added_line()` at aur-safe:320-351, `files_with_status()` at aur-safe:238-246, `name_status` loop at aur-safe:714-736
+**Lines:** `diff_added()` at aur-gate:208-211, `_pkgbuild_optdepends_added_line()` at aur-gate:291-319, `_describe_added_line()` at aur-gate:320-351, `files_with_status()` at aur-gate:238-246, `name_status` loop at aur-gate:714-736
 
 ## What happens
 

@@ -3,7 +3,7 @@
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
 **Status:** fixed (2026-07-23)
 **Severity:** high  
-**Lines:** `add_review pip` at aur-safe:151
+**Lines:** `add_review pip` at aur-gate:151
 
 ## What happens
 

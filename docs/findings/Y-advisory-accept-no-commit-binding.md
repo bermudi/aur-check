@@ -1,11 +1,11 @@
 # Finding Y — Advisory (non-wrapper) `accept` has no commit-identity binding
 
 **Source:** follow-up red-team review (post A–V, 2026-07-27)
-**Tracking:** [#25 (M9)](https://github.com/bermudi/aur-check/issues/25)
+**Tracking:** [#25 (M9)](https://github.com/bermudi/aur-gate/issues/25)
 **Status:** fixed
 **Severity:** medium
-**Lines:** `_installed_matches()` at aur-safe:1149; `_cmd_accept_locked()` call
-at aur-safe:~2310. Refines [Finding D](./D-accept-version-vs-sha.md); depends on
+**Lines:** `_installed_matches()` at aur-gate:1149; `_cmd_accept_locked()` call
+at aur-gate:~2310. Refines [Finding D](./D-accept-version-vs-sha.md); depends on
 [Finding S](./S-helper-build-toctou.md)'s makepkg guard for the safe path.
 
 ## What happens
@@ -44,8 +44,8 @@ defense assumes the damage is caught on the *next* update — but a malicious
 makepkg guard does: it requires the helper checkout HEAD to equal the staged SHA
 and a fresh build immediately before PKGBUILD execution.
 
-**That guard is wrapper-only.** It is injected by `aur-safe wrapper` and only
-exists when the user has installed the wrapper function. Anyone using aur-safe
+**That guard is wrapper-only.** It is injected by `aur-gate wrapper` and only
+exists when the user has installed the wrapper function. Anyone using aur-gate
 advisorily (`gate` / `check` + a manual `yay`/`paru`, without the wrapper) gets:
 
 1. `gate` audits and stages commit X.
@@ -96,7 +96,7 @@ Two options, in increasing effort:
 Implemented option 1 (documentation). `docs/design-ledger.md` §"Why staging" now
 explicitly states that `accept` confirms installs by version + freshness, not by
 installed commit SHA, and that the build-time `HEAD == staged SHA` guard is
-injected **only** by the generated wrapper. `aur-safe` usage output now carries
+injected **only** by the generated wrapper. `aur-gate` usage output now carries
 the same advisory note under a `notes:` section. This makes the deployment
 assumption explicit: the full build-time TOCTOU guarantee requires the wrapper;
 direct `gate`/`check` + manual `yay`/`paru` usage provides post-build delta
@@ -106,8 +106,8 @@ detection through the next gate, not build-time protection.
 
 - `docs/design-ledger.md` §"Why staging" renders the version-equivalence
   assumption and the wrapper-only build-time guard clearly.
-- `aur-safe --help` / `aur-safe -h` prints the advisory note that the wrapper is
+- `aur-gate --help` / `aur-gate -h` prints the advisory note that the wrapper is
   required for the full build-time TOCTOU guarantee.
 - The wrapper path remains described as the full-protection deployment in both
   documents.
-- `bash -n aur-safe` clean; `./aur-safe selftest` all green.
+- `bash -n aur-gate` clean; `./aur-gate selftest` all green.

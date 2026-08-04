@@ -3,7 +3,7 @@
 **Source:** kimi-k2.6 red-team review, session `019f0517-d73a-78d5-929f-c514eed1880d`  
 **Status:** fixed (2026-07-23)
 **Severity:** medium  
-**Lines:** `files_with_status()` at aur-safe:238-246
+**Lines:** `files_with_status()` at aur-gate:238-246
 
 ## What happens
 

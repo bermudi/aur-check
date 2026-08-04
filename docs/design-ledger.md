@@ -1,4 +1,4 @@
-# aur-safe design ledger
+# aur-gate design ledger
 
 This is the canonical design ledger for the supported Rust implementation.
 The retired Bash-era ledger is preserved at `archive/bash/design-ledger.md` for
@@ -38,7 +38,7 @@ the same user. It is nevertheless created as current-user-owned, non-symlinked
 
 ## Central invariant
 
-`~/.cache/aur-safe/accepted/<pkgbase>` means the exact commit that was both:
+`~/.cache/aur-gate/accepted/<pkgbase>` means the exact commit that was both:
 
 1. audited by deterministic policy, and
 2. built under the generated wrapper's exact-staged-SHA guard and freshly
@@ -49,7 +49,7 @@ stale, moved, malformed, or uninstalled candidate cannot advance `accepted`.
 
 ## Transaction
 
-The generated Bash/Zsh wrapper resolves the real helper and aur-safe binary once,
+The generated Bash/Zsh wrapper resolves the real helper and aur-gate binary once,
 validates state, and holds fd 9 across:
 
 1. `gate` or explicit-install `begin` + `audit`;
@@ -58,7 +58,7 @@ validates state, and holds fd 9 across:
    `abort` to rotate the manifest without any promotion attempt.
 
 The helper child closes fd 9 and loses lock/staging capabilities. It receives only
-pinned pacman/git/gpg/sudo programs, fixed fresh-build flags, and the aur-safe
+pinned pacman/git/gpg/sudo programs, fixed fresh-build flags, and the aur-gate
 binary as `--makepkg`. Immediately before PKGBUILD execution, `cmd_makepkg`
 requires manifest membership, exact `HEAD == staged SHA`, regular committed
 surfaces, a clean index/worktree, and zero untracked files.

@@ -4,7 +4,7 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aur_safe::srcinfo::Pacman;
+use aur_gate::srcinfo::Pacman;
 use support::{build_http_repo, build_http_repo_split, Fixture, FixturePacman};
 
 fn accept_rejects_stale_install_then_promotes_fresh() {
@@ -25,7 +25,7 @@ fn accept_rejects_stale_install_then_promotes_fresh() {
     fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
 
     // `check` stages B and appends to the manifest.
-    let (rc, _out, _err) = fixture.run_aur_safe(&["check", pkgbase], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
     assert_eq!(rc, 2, "clean missing-cache baseline must require review");
     assert_eq!(
         fixture
@@ -53,7 +53,7 @@ fn accept_rejects_stale_install_then_promotes_fresh() {
     assert!(status.success());
 
     // Accept with stale installed A must skip promotion.
-    let (rc, _out, _err) = fixture.run_aur_safe(&["accept"], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["accept"], &[]);
     assert_eq!(rc, 0, "accept must return 0 even when skipping");
     assert_eq!(
         fixture.read_accepted(pkgbase).unwrap().trim(),
@@ -72,7 +72,7 @@ fn accept_rejects_stale_install_then_promotes_fresh() {
         .as_secs();
     pacman.seed_installed(pkgbase, "2-1", pkgbase, now, now);
     fs::write(fixture.state.join("last-gate"), pkgbase).unwrap();
-    let (rc, _out, _err) = fixture.run_aur_safe(&["accept"], &[]);
+    let (rc, _out, _err) = fixture.run_aur_gate(&["accept"], &[]);
     assert_eq!(rc, 0);
     assert_eq!(
         fixture
@@ -106,7 +106,7 @@ fn explicit_aur_install_yay_audits_builds_accepts() {
     // No prior accepted anchor: first-contact whole-candidate review.
     // `cmd_audit` stages the candidate and exits 0 when allowed to proceed.
     let (rc, _out, _err) =
-        fixture.run_wrapper("yay", &["-S", pkgbase], &[("AUR_SAFE_ALLOW_REVIEW", "1")]);
+        fixture.run_wrapper("yay", &["-S", pkgbase], &[("AUR_GATE_ALLOW_REVIEW", "1")]);
     assert_eq!(rc, 0, "yay -S <aur pkg> must audit, build, and accept");
 
     let accepted = fixture.read_accepted(pkgbase).expect("accepted must exist");
@@ -165,7 +165,7 @@ fn split_pkgname_to_pkgbase_transaction() {
     );
 
     let (rc, _out, _err) =
-        fixture.run_wrapper("yay", &["-S", pkgname], &[("AUR_SAFE_ALLOW_REVIEW", "1")]);
+        fixture.run_wrapper("yay", &["-S", pkgname], &[("AUR_GATE_ALLOW_REVIEW", "1")]);
     assert_eq!(
         rc, 0,
         "split package install must resolve pkgbase and accept"
@@ -238,9 +238,9 @@ fn helper_failure_before_makepkg_leaves_anchor_unchanged() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
-            ("AUR_SAFE_HELPER_PREMAKEPKG_FAILURE", "1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_HELPER_PREMAKEPKG_FAILURE", "1"),
         ],
     );
     assert_eq!(rc, 1, "helper failure must abort the wrapper");
@@ -301,10 +301,10 @@ fn failed_helper_never_promotes_even_with_fresh_matching_evidence() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
-            ("AUR_SAFE_HELPER_POSTBUILD_FAILURE", "1"),
-            ("AUR_SAFE_UNRELATED_INSTALL_ON_FAILURE", "1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_HELPER_POSTBUILD_FAILURE", "1"),
+            ("AUR_GATE_UNRELATED_INSTALL_ON_FAILURE", "1"),
         ],
     );
     assert_eq!(rc, 1);
@@ -359,9 +359,9 @@ fn wrapper_shows_accept_failure() {
         "yay",
         &["-Syu"],
         &[
-            ("AUR_SAFE_ALLOW_REVIEW", "1"),
-            ("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1"),
-            ("AUR_SAFE_TEST_ACCEPT_FAILURE", "1"),
+            ("AUR_GATE_ALLOW_REVIEW", "1"),
+            ("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1"),
+            ("AUR_GATE_TEST_ACCEPT_FAILURE", "1"),
         ],
     );
     // The wrapper prints accept failure to stderr even when the helper itself
@@ -420,7 +420,7 @@ fn wrapper_uses_config_file_state_dir_for_transaction_lock() {
     fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
     fs::write(
         &fixture.config_file,
-        format!("AUR_SAFE_STATE_DIR={}\n", fixture.state.display()),
+        format!("AUR_GATE_STATE_DIR={}\n", fixture.state.display()),
     )
     .unwrap();
 
@@ -428,13 +428,13 @@ fn wrapper_uses_config_file_state_dir_for_transaction_lock() {
     let mut command = Command::new("/bin/bash");
     command.arg("-c").arg(script);
     for (key, value) in fixture.base_env() {
-        if key != "AUR_SAFE_STATE_DIR" {
+        if key != "AUR_GATE_STATE_DIR" {
             command.env(key, value);
         }
     }
-    command.env_remove("AUR_SAFE_STATE_DIR");
-    command.env("AUR_SAFE_ALLOW_REVIEW", "1");
-    command.env("AUR_SAFE_FAKE_UPDATE", "gatepkg 2-1");
+    command.env_remove("AUR_GATE_STATE_DIR");
+    command.env("AUR_GATE_ALLOW_REVIEW", "1");
+    command.env("AUR_GATE_FAKE_UPDATE", "gatepkg 2-1");
     let output = command.output().unwrap();
     assert!(
         output.status.success(),
@@ -470,7 +470,7 @@ fn repo_package_skips_aur_audit_in_explicit_install() {
     let (rc, _out, _err) = fixture.run_wrapper(
         "yay",
         &["-S", repo_pkg],
-        &[("AUR_SAFE_FAKE_PACMAN_SYNC", repo_pkg)],
+        &[("AUR_GATE_FAKE_PACMAN_SYNC", repo_pkg)],
     );
     assert_eq!(rc, 0, "wrapper must pass through repo packages");
     assert!(fixture.read_manifest().trim().is_empty());

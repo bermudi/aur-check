@@ -1120,7 +1120,7 @@ pub fn scan_diff_rules(ctx: &mut Ctx, pkg: &str, dir: &Path, base_ref: &str) -> 
                 return 1;
             }
             ctx.reporter.dim(&format!(
-                "diff stashed: {}/flag.{pkg}.diff  (run: aur-safe explain {pkg})",
+                "diff stashed: {}/flag.{pkg}.diff  (run: aur-gate explain {pkg})",
                 ctx.paths.state_dir.display()
             ));
             2
@@ -1143,7 +1143,7 @@ pub fn scan_diff_rules(ctx: &mut Ctx, pkg: &str, dir: &Path, base_ref: &str) -> 
                     return 1;
                 }
                 ctx.reporter.dim(&format!(
-                    "diff stashed: {}/flag.{pkg}.diff  (run: aur-safe explain {pkg})",
+                    "diff stashed: {}/flag.{pkg}.diff  (run: aur-gate explain {pkg})",
                     ctx.paths.state_dir.display()
                 ));
                 return 2;
@@ -1187,7 +1187,7 @@ pub fn scan_diff_rules(ctx: &mut Ctx, pkg: &str, dir: &Path, base_ref: &str) -> 
                         return 1;
                     }
                     ctx.reporter.dim(&format!(
-                        "diff stashed: {}/flag.{pkg}.diff  (run: aur-safe explain {pkg})",
+                        "diff stashed: {}/flag.{pkg}.diff  (run: aur-gate explain {pkg})",
                         ctx.paths.state_dir.display()
                     ));
                     2

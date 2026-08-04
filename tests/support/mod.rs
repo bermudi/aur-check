@@ -14,25 +14,25 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aur_safe::classifier::{CollectingReporter, NoLlm};
-use aur_safe::cli::dispatch;
-use aur_safe::config::Config;
-use aur_safe::engine::App;
-use aur_safe::rpc::CurlRpc;
-use aur_safe::srcinfo::{parse_desc, LocalRecord, Pacman};
-use aur_safe::state::Paths;
+use aur_gate::classifier::{CollectingReporter, NoLlm};
+use aur_gate::cli::dispatch;
+use aur_gate::config::Config;
+use aur_gate::engine::App;
+use aur_gate::rpc::CurlRpc;
+use aur_gate::srcinfo::{parse_desc, LocalRecord, Pacman};
+use aur_gate::state::Paths;
 
-pub const DRIVER_ENV: &str = "AUR_SAFE_DRIVER";
-pub const FIXTURE_MAKEPKG_ENV: &str = "AUR_SAFE_FIXTURE_MAKEPKG";
-pub const FIXTURE_PACMAN_DB_ENV: &str = "AUR_SAFE_PACMAN_DB";
-pub const FIXTURE_LOG_ENV: &str = "AUR_SAFE_FIXTURE_LOG";
-pub const FIXTURE_FAKE_UPDATE_ENV: &str = "AUR_SAFE_FAKE_UPDATE";
-pub const FIXTURE_FAKE_PACMAN_SYNC_ENV: &str = "AUR_SAFE_FAKE_PACMAN_SYNC";
-pub const FIXTURE_MAKEPKG_STATUS_ENV: &str = "AUR_SAFE_MAKEPKG_STATUS";
-pub const FIXTURE_HELPER_PREMAKEPKG_FAILURE_ENV: &str = "AUR_SAFE_HELPER_PREMAKEPKG_FAILURE";
-pub const FIXTURE_HELPER_POSTBUILD_FAILURE_ENV: &str = "AUR_SAFE_HELPER_POSTBUILD_FAILURE";
-pub const FIXTURE_UNRELATED_INSTALL_ENV: &str = "AUR_SAFE_UNRELATED_INSTALL_ON_FAILURE";
-pub const FIXTURE_ACCEPT_FAILURE_ENV: &str = "AUR_SAFE_TEST_ACCEPT_FAILURE";
+pub const DRIVER_ENV: &str = "AUR_GATE_DRIVER";
+pub const FIXTURE_MAKEPKG_ENV: &str = "AUR_GATE_FIXTURE_MAKEPKG";
+pub const FIXTURE_PACMAN_DB_ENV: &str = "AUR_GATE_PACMAN_DB";
+pub const FIXTURE_LOG_ENV: &str = "AUR_GATE_FIXTURE_LOG";
+pub const FIXTURE_FAKE_UPDATE_ENV: &str = "AUR_GATE_FAKE_UPDATE";
+pub const FIXTURE_FAKE_PACMAN_SYNC_ENV: &str = "AUR_GATE_FAKE_PACMAN_SYNC";
+pub const FIXTURE_MAKEPKG_STATUS_ENV: &str = "AUR_GATE_MAKEPKG_STATUS";
+pub const FIXTURE_HELPER_PREMAKEPKG_FAILURE_ENV: &str = "AUR_GATE_HELPER_PREMAKEPKG_FAILURE";
+pub const FIXTURE_HELPER_POSTBUILD_FAILURE_ENV: &str = "AUR_GATE_HELPER_POSTBUILD_FAILURE";
+pub const FIXTURE_UNRELATED_INSTALL_ENV: &str = "AUR_GATE_UNRELATED_INSTALL_ON_FAILURE";
+pub const FIXTURE_ACCEPT_FAILURE_ENV: &str = "AUR_GATE_TEST_ACCEPT_FAILURE";
 
 /// Run a list of test functions from a `harness = false` integration test binary.
 /// When the binary is re-entered as a fake subprocess, dispatch to that role
@@ -58,7 +58,7 @@ pub fn main(tests: &[(&'static str, fn())]) {
 }
 
 /// Re-entry point for the fixture binary. The parent test creates symlinks
-/// named `aur-safe`, `yay`, `paru`, `makepkg`, and `pacman` all pointing to
+/// named `aur-gate`, `yay`, `paru`, `makepkg`, and `pacman` all pointing to
 /// the same test binary. `argv[0]` and the inherited fixture environment
 /// select the role.
 fn driver_main() {
@@ -68,13 +68,13 @@ fn driver_main() {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     match argv0 {
-        "aur-safe" => run_as_aur_safe(),
+        "aur-gate" => run_as_aur_gate(),
         "yay" => fake_yay_or_paru("yay"),
         "paru" => fake_yay_or_paru("paru"),
         "makepkg" => fake_makepkg(),
         "pacman" => fake_pacman(),
         other => {
-            eprintln!("aur-safe driver: unknown argv0 '{other}'");
+            eprintln!("aur-gate driver: unknown argv0 '{other}'");
             std::process::exit(1);
         }
     }
@@ -82,14 +82,14 @@ fn driver_main() {
 
 // --- child driver (production CLI in a controlled fixture) -----------------
 
-fn run_as_aur_safe() {
+fn run_as_aur_gate() {
     let config = Config::load().expect("fixture driver config");
     let paths = Paths::new(config.state_dir.clone());
     paths.ensure_dirs().expect("fixture state dirs");
 
     let pacman_db = std::env::var_os(FIXTURE_PACMAN_DB_ENV)
         .map(PathBuf::from)
-        .expect("fixture driver needs AUR_SAFE_PACMAN_DB");
+        .expect("fixture driver needs AUR_GATE_PACMAN_DB");
     let pacman = FixturePacman::new(pacman_db);
     let rpc = CurlRpc::new(PathBuf::from("/usr/bin/curl"), config.aur_url.clone());
     let mut reporter = CollectingReporter::default();
@@ -110,16 +110,16 @@ fn run_as_aur_safe() {
         yay_cache: config.yay_cache.clone(),
         paru_cache: config.paru_cache.clone(),
         makepkg_path,
-        staging: std::env::var("AUR_SAFE_STAGING").as_deref() == Ok("1"),
+        staging: std::env::var("AUR_GATE_STAGING").as_deref() == Ok("1"),
         llm_auto_boring: false,
         explain_maxlines: config.explain_maxlines,
         explain_model: "none".into(),
-        hard: aur_safe::rules::hard_rules(),
-        review: aur_safe::rules::review_rules(),
+        hard: aur_gate::rules::hard_rules(),
+        review: aur_gate::rules::review_rules(),
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = if std::env::var("AUR_SAFE_AS_MAKEPKG").as_deref() == Ok("1") {
+    let command = if std::env::var("AUR_GATE_AS_MAKEPKG").as_deref() == Ok("1") {
         "makepkg-guard"
     } else {
         args.first().map(String::as_str).unwrap_or("usage")
@@ -129,7 +129,7 @@ fn run_as_aur_safe() {
         && args.first().is_some_and(|arg| arg == "accept")
     {
         append_event("cli:accept:simulated-failure");
-        eprintln!("aur-safe: simulated accept failure");
+        eprintln!("aur-gate: simulated accept failure");
         std::process::exit(1);
     }
     let rc = dispatch(&mut app, &args);
@@ -445,7 +445,7 @@ impl Fixture {
         let http_repo = http.repo.clone();
 
         let exe = std::env::current_exe().expect("current test executable");
-        for name in ["aur-safe", "yay", "paru", "makepkg", "pacman"] {
+        for name in ["aur-gate", "yay", "paru", "makepkg", "pacman"] {
             let link = bin.join(name);
             symlink(&exe, &link).ok();
         }
@@ -462,7 +462,7 @@ impl Fixture {
 
         let makepkg = bin.join("makepkg");
         fs::write(&config_file, "").unwrap();
-        fs::write(&wrapper_sh, aur_safe::wrapper::WRAPPER).unwrap();
+        fs::write(&wrapper_sh, aur_gate::wrapper::WRAPPER).unwrap();
         Self {
             temp,
             home,
@@ -490,42 +490,42 @@ impl Fixture {
         let mut env = HashMap::new();
         env.insert("HOME".into(), self.home.to_string_lossy().to_string());
         env.insert(
-            "AUR_SAFE_STATE_DIR".into(),
+            "AUR_GATE_STATE_DIR".into(),
             self.state.to_string_lossy().to_string(),
         );
         env.insert(
-            "AUR_SAFE_YAY_CACHE".into(),
+            "AUR_GATE_YAY_CACHE".into(),
             self.yay_cache.to_string_lossy().to_string(),
         );
         env.insert(
-            "AUR_SAFE_PARU_CACHE".into(),
+            "AUR_GATE_PARU_CACHE".into(),
             self.paru_cache.to_string_lossy().to_string(),
         );
-        env.insert("AUR_SAFE_AUR_URL".into(), self.aur_url.clone());
+        env.insert("AUR_GATE_AUR_URL".into(), self.aur_url.clone());
         env.insert(
-            "AUR_SAFE_CONFIG".into(),
+            "AUR_GATE_CONFIG".into(),
             self.config_file.to_string_lossy().to_string(),
         );
         env.insert(
-            "AUR_SAFE_PACMAN_DB".into(),
+            "AUR_GATE_PACMAN_DB".into(),
             self.pacman_db.to_string_lossy().to_string(),
         );
         env.insert(
-            "AUR_SAFE_FIXTURE_MAKEPKG".into(),
+            "AUR_GATE_FIXTURE_MAKEPKG".into(),
             self.makepkg.to_string_lossy().to_string(),
         );
         env.insert(
-            "AUR_SAFE_FIXTURE_LOG".into(),
+            "AUR_GATE_FIXTURE_LOG".into(),
             self.log.to_string_lossy().to_string(),
         );
         env.insert("PATH".into(), path);
-        env.insert("AUR_SAFE_STAGING".into(), "1".into());
+        env.insert("AUR_GATE_STAGING".into(), "1".into());
         env.insert(DRIVER_ENV.into(), "1".into());
         env
     }
 
-    pub fn run_aur_safe(&self, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
-        let mut cmd = Command::new(self.bin.join("aur-safe"));
+    pub fn run_aur_gate(&self, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
+        let mut cmd = Command::new(self.bin.join("aur-gate"));
         cmd.args(args);
         for (k, v) in self.base_env() {
             cmd.env(k, v);
@@ -533,7 +533,7 @@ impl Fixture {
         for (k, v) in extra_env {
             cmd.env(*k, *v);
         }
-        let out = cmd.output().expect("spawn aur-safe");
+        let out = cmd.output().expect("spawn aur-gate");
         let rc = out.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -854,10 +854,10 @@ fn fake_yay_or_paru(name: &str) {
     if let Some(obj) = log.as_object_mut() {
         let caps = obj.get_mut("env_caps").unwrap().as_object_mut().unwrap();
         for var in [
-            "AUR_SAFE_AS_MAKEPKG",
-            "AUR_SAFE_TRANSACTION_ACTIVE",
-            "AUR_SAFE_LOCK_HELD",
-            "AUR_SAFE_STAGING",
+            "AUR_GATE_AS_MAKEPKG",
+            "AUR_GATE_TRANSACTION_ACTIVE",
+            "AUR_GATE_LOCK_HELD",
+            "AUR_GATE_STAGING",
         ] {
             let value = std::env::var(var)
                 .ok()
@@ -1009,7 +1009,7 @@ fn fake_yay_or_paru(name: &str) {
             std::process::exit(1);
         }
 
-        if let Ok(window) = std::env::var("AUR_SAFE_WINDOW_COMMIT") {
+        if let Ok(window) = std::env::var("AUR_GATE_WINDOW_COMMIT") {
             if window_commit(&checkout, &window).is_ok() {
                 if let Some(obj) = log.as_object_mut() {
                     obj.insert("window_commit".into(), window.into());
@@ -1116,10 +1116,10 @@ fn fake_makepkg() {
 
     let mut present_caps = Vec::new();
     for var in [
-        "AUR_SAFE_AS_MAKEPKG",
-        "AUR_SAFE_TRANSACTION_ACTIVE",
-        "AUR_SAFE_LOCK_HELD",
-        "AUR_SAFE_STAGING",
+        "AUR_GATE_AS_MAKEPKG",
+        "AUR_GATE_TRANSACTION_ACTIVE",
+        "AUR_GATE_LOCK_HELD",
+        "AUR_GATE_STAGING",
     ] {
         if std::env::var(var).is_ok() {
             present_caps.push(var);
@@ -1191,7 +1191,7 @@ fn record_helper_install(checkout: &Path) {
     let version = format!("{pkgver}-{pkgrel}");
     let db_dir = std::env::var_os(FIXTURE_PACMAN_DB_ENV)
         .map(PathBuf::from)
-        .expect("fake helper needs AUR_SAFE_PACMAN_DB");
+        .expect("fake helper needs AUR_GATE_PACMAN_DB");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -1235,23 +1235,23 @@ fn fake_pacman() {
 // --- utility accessors -----------------------------------------------------
 
 fn aur_url() -> String {
-    std::env::var("AUR_SAFE_AUR_URL").unwrap_or_default()
+    std::env::var("AUR_GATE_AUR_URL").unwrap_or_default()
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("AUR_SAFE_STATE_DIR")
+    std::env::var_os("AUR_GATE_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_default()
 }
 
 fn yay_cache() -> PathBuf {
-    std::env::var_os("AUR_SAFE_YAY_CACHE")
+    std::env::var_os("AUR_GATE_YAY_CACHE")
         .map(PathBuf::from)
         .unwrap_or_default()
 }
 
 fn paru_cache() -> PathBuf {
-    std::env::var_os("AUR_SAFE_PARU_CACHE")
+    std::env::var_os("AUR_GATE_PARU_CACHE")
         .map(PathBuf::from)
         .unwrap_or_default()
 }

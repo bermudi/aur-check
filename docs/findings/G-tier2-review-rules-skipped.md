@@ -3,7 +3,7 @@
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
 **Status:** fixed (2026-07-23)
 **Severity:** high  
-**Lines:** `_scan_whole_pkg()` at aur-safe:380-388, `missing_cache_gate()` at aur-safe:964-976
+**Lines:** `_scan_whole_pkg()` at aur-gate:380-388, `missing_cache_gate()` at aur-gate:964-976
 
 ## What happens
 

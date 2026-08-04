@@ -1,4 +1,4 @@
-# aur-safe
+# aur-gate
 
 A deterministic pre-install gate for Arch Linux AUR updates, implemented in
 Rust. It was created during the May–June 2026 AUR supply-chain attack to stop a
@@ -10,7 +10,7 @@ Rust is the supported implementation and policy oracle.
 ## Trust model
 
 ```text
-~/.cache/aur-safe/
+~/.cache/aur-gate/
   accepted/<pkgbase>   last exact commit audited and freshly installed
   staged/<pkgbase>     audited candidate awaiting install confirmation
   last-gate            active transaction manifest
@@ -19,7 +19,7 @@ Rust is the supported implementation and policy oracle.
 
 The generated shell wrapper intercepts yay/paru and holds one lock across the
 complete transaction. The gate captures one immutable candidate SHA. At the
-makepkg seam, aur-safe requires the helper checkout to equal that staged SHA,
+makepkg seam, aur-gate requires the helper checkout to equal that staged SHA,
 checks committed regular-file surfaces, rejects dirty or untracked files, and
 forces a fresh build. `accept` advances the anchor only when pacman's root-owned
 local database confirms the staged version, pkgbase identity, build time, and
@@ -53,7 +53,7 @@ See [`docs/design-ledger.md`](docs/design-ledger.md) and
 
 ```sh
 cargo build --release
-install -Dm755 target/release/aur-safe ~/.local/bin/aur-safe
+install -Dm755 target/release/aur-gate ~/.local/bin/aur-gate
 ```
 
 Runtime dependencies: `/usr/bin/git`, `/usr/bin/curl`, `/usr/bin/less`,
@@ -65,8 +65,8 @@ Pi is not used; advisory LLM support uses the Rust `llm` crate directly.
 Generate and source a fresh wrapper after every upgrade:
 
 ```sh
-aur-safe wrapper > ~/.config/aur-safe-wrapper.sh
-printf '\nsource ~/.config/aur-safe-wrapper.sh\n' >> ~/.bashrc  # or ~/.zshrc
+aur-gate wrapper > ~/.config/aur-gate-wrapper.sh
+printf '\nsource ~/.config/aur-gate-wrapper.sh\n' >> ~/.bashrc  # or ~/.zshrc
 exec "$SHELL"
 ```
 
@@ -81,15 +81,15 @@ The wrapper is required for the full exact-SHA build-time guarantee.
 ## Commands
 
 ```text
-aur-safe gate                gate pending AUR updates
-aur-safe check <pkg> ...     check named package candidates
-aur-safe audit <pkg>         whole-candidate audit for explicit install
-aur-safe scan                report suspicious installed hook surfaces
-aur-safe explain [pkg]       advisory LLM analysis of stashed evidence
-aur-safe accept              promote freshly installed staged refs
-aur-safe rules               list deterministic rules
-aur-safe wrapper             print the Bash/Zsh wrapper
-aur-safe selftest            run embedded deterministic assertions
+aur-gate gate                gate pending AUR updates
+aur-gate check <pkg> ...     check named package candidates
+aur-gate audit <pkg>         whole-candidate audit for explicit install
+aur-gate scan                report suspicious installed hook surfaces
+aur-gate explain [pkg]       advisory LLM analysis of stashed evidence
+aur-gate accept              promote freshly installed staged refs
+aur-gate rules               list deterministic rules
+aur-gate wrapper             print the Bash/Zsh wrapper
+aur-gate selftest            run embedded deterministic assertions
 ```
 
 Exit codes: `0` clean/complete, `1` blocked or audit-unavailable, `2` review,
@@ -98,26 +98,26 @@ Exit codes: `0` clean/complete, `1` blocked or audit-unavailable, `2` review,
 ## Configuration
 
 Non-secret settings use environment > config file > default. The default config
-file is `~/.config/aur-safe/config`.
+file is `~/.config/aur-gate/config`.
 
 | Variable | Default |
 |---|---|
-| `AUR_SAFE_YAY_CACHE` | `~/.cache/yay` |
-| `AUR_SAFE_PARU_CACHE` | `~/.cache/paru/clone` |
-| `AUR_SAFE_STATE_DIR` | `~/.cache/aur-safe` |
-| `AUR_SAFE_BRANCH` | `master` |
-| `AUR_SAFE_AUR_URL` | `https://aur.archlinux.org` |
-| `AUR_SAFE_LLM_BACKEND` | `openrouter` |
-| `AUR_SAFE_MODEL` | `z-ai/glm-5.2` |
-| `AUR_SAFE_LLM_TIMEOUT_SECONDS` | `120` |
-| `AUR_SAFE_EXPLAIN_MAXLINES` | `1000` |
-| `AUR_SAFE_LLM_AUTO_BORING` | `0` |
+| `AUR_GATE_YAY_CACHE` | `~/.cache/yay` |
+| `AUR_GATE_PARU_CACHE` | `~/.cache/paru/clone` |
+| `AUR_GATE_STATE_DIR` | `~/.cache/aur-gate` |
+| `AUR_GATE_BRANCH` | `master` |
+| `AUR_GATE_AUR_URL` | `https://aur.archlinux.org` |
+| `AUR_GATE_LLM_BACKEND` | `openrouter` |
+| `AUR_GATE_MODEL` | `z-ai/glm-5.2` |
+| `AUR_GATE_LLM_TIMEOUT_SECONDS` | `120` |
+| `AUR_GATE_EXPLAIN_MAXLINES` | `1000` |
+| `AUR_GATE_LLM_AUTO_BORING` | `0` |
 
 Supported LLM backends are OpenAI, Anthropic, Ollama, DeepSeek, and OpenRouter.
-API keys are environment-only. `AUR_SAFE_LLM_AUTO_BORING=1` is opt-in and does
+API keys are environment-only. `AUR_GATE_LLM_AUTO_BORING=1` is opt-in and does
 not expand LLM authority beyond deterministic boring-edge candidates.
 
-`AUR_SAFE_ALLOW_REVIEW=1` permits reviewed candidates to proceed in
+`AUR_GATE_ALLOW_REVIEW=1` permits reviewed candidates to proceed in
 non-interactive wrapper runs. It cannot consent past an audit failure or hard
 block.
 

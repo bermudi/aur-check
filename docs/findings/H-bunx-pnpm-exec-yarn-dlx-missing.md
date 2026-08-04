@@ -3,7 +3,7 @@
 **Source:** glm-5.1 red-team review, session `019f0517-d737-732f-b8d6-6ae4c3208309`  
 **Status:** fixed (2026-07-23)
 **Severity:** high  
-**Lines:** `add_rule pnpm` at aur-safe:135, `add_rule bun` at aur-safe:136, `add_rule yarn` at aur-safe:137
+**Lines:** `add_rule pnpm` at aur-gate:135, `add_rule bun` at aur-gate:136, `add_rule yarn` at aur-gate:137
 
 ## What happens
 
