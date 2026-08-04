@@ -378,6 +378,38 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
     );
 }
 
+fn wrapper_dispatch_rejects_pacman_context_dirs() {
+    // Issue #30: --hookdir/--cachedir/--gpgdir/--logfile reach pacman as root
+    // during `pacman -U` and would let attacker-controlled ALPM hooks / gpg
+    // state / logs override the auditor. The wrapper dispatch must reject them
+    // (and their --opt=value forms) before any helper runs.
+    let fixture = Fixture::new("gatepkg", r#"{"resultcount":0,"results":[]}"#);
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        for args in [
+            &["-Syu", "--hookdir", "/tmp/evil"][..],
+            &["-Syu", "--hookdir=/tmp/evil"][..],
+            &["-Syu", "--cachedir", "/tmp/evil"][..],
+            &["-Syu", "--cachedir=/tmp/evil"][..],
+            &["-Syu", "--gpgdir", "/tmp/evil"][..],
+            &["-Syu", "--gpgdir=/tmp/evil"][..],
+            &["-Syu", "--logfile", "/tmp/evil"][..],
+            &["-Syu", "--logfile=/tmp/evil"][..],
+        ] {
+            let (rc, _out, err) = fixture.run_wrapper_shell(shell, "yay", args, &[]);
+            assert_ne!(rc, 0, "{shell} wrapper must reject {args:?} (returned 0)");
+            assert!(
+                err.contains("custom helper/build trust context is unsupported"),
+                "{shell} wrapper reject message missing for {args:?}: {err}"
+            );
+        }
+    }
+    // No helper invocation should have been logged across any case.
+    assert!(
+        fixture.helper_log().is_none(),
+        "helper must not run when dispatch rejects pacman context dirs"
+    );
+}
+
 fn wrapper_resourcing_replaces_existing_helper_functions() {
     let fixture = Fixture::new("gatepkg", r#"{"resultcount":0,"results":[]}"#);
     let expected_yay = fixture.bin.join("yay");
@@ -426,6 +458,10 @@ static TESTS: &[(&str, fn())] = &[
     (
         "wrapper_window_commit_never_executes_makepkg_or_advances_anchor",
         wrapper_window_commit_never_executes_makepkg_or_advances_anchor,
+    ),
+    (
+        "wrapper_dispatch_rejects_pacman_context_dirs",
+        wrapper_dispatch_rejects_pacman_context_dirs,
     ),
     (
         "wrapper_resourcing_replaces_existing_helper_functions",
