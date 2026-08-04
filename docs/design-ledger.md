@@ -16,6 +16,14 @@ The live smoke used isolated state and helper caches while retaining production
 AUR and returned mandatory review (`2`); empty-state `accept` returned `0`; the
 generated wrapper parsed in Bash and Zsh. No package was built or installed.
 
+The installation smoke then exposed two shell-integration bugs hidden by fake
+helpers: re-sourcing over the retired wrapper resolved its `yay`/`paru` functions
+instead of the external binaries, and yay 13 rejects the removed
+`--nodiffmenu`/`--noeditmenu` options. The wrapper now resolves external helper
+paths explicitly in both shells and uses `--diffmenu=false --editmenu=false`.
+Fresh Bash and Zsh sessions confirmed pinned `/usr/bin/yay` and `/usr/bin/paru`,
+gated bare/`-Syu` classification, and successful helper version dispatch.
+
 ## Threat model
 
 An attacker controls an AUR candidate repository, including history, blobs,

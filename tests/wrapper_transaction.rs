@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::process::Command;
 
 use support::{build_http_repo, Fixture, FixturePacman};
 
@@ -129,8 +130,14 @@ fn wrapper_yay_gate_build_accepts_exact_audited_tip() {
     assert_flag_once(&args, "-Syu");
     assert_flag_once(&args, "--rebuildall");
     assert_flag_once(&args, "--nomakepkgconf");
-    assert_flag_once(&args, "--nodiffmenu");
-    assert_flag_once(&args, "--noeditmenu");
+    assert_flag_once(&args, "--diffmenu=false");
+    assert_flag_once(&args, "--editmenu=false");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg == "--nodiffmenu" || arg == "--noeditmenu"),
+        "removed yay options must never reach a production helper: {args:?}"
+    );
     assert_pair(&args, "--pacman", "/usr/bin/pacman");
     assert_pair(&args, "--git", "/usr/bin/git");
     assert_pair(&args, "--gitflags", "");
@@ -371,6 +378,34 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
     );
 }
 
+fn wrapper_resourcing_replaces_existing_helper_functions() {
+    let fixture = Fixture::new("gatepkg", r#"{"resultcount":0,"results":[]}"#);
+    let expected_yay = fixture.bin.join("yay");
+    let expected_paru = fixture.bin.join("paru");
+
+    for shell in ["/bin/bash", "/bin/zsh"] {
+        let script = format!(
+            "source '{}'\nsource '{}'\n[ \"$_AUR_SAFE_YAY_BIN\" = '{}' ] || exit 41\n[ \"$_AUR_SAFE_PARU_BIN\" = '{}' ] || exit 42\ntype yay >/dev/null 2>&1 || exit 43\ntype paru >/dev/null 2>&1 || exit 44\n",
+            fixture.wrapper_sh.display(),
+            fixture.wrapper_sh.display(),
+            expected_yay.display(),
+            expected_paru.display(),
+        );
+        let mut command = Command::new(shell);
+        command.arg("-c").arg(script);
+        for (key, value) in fixture.base_env() {
+            command.env(key, value);
+        }
+        let output = command.output().expect("run re-sourced wrapper");
+        assert!(
+            output.status.success(),
+            "{shell} wrapper re-source lost its pinned helper: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
 static TESTS: &[(&str, fn())] = &[
     (
         "wrapper_yay_gate_build_accepts_exact_audited_tip",
@@ -391,6 +426,10 @@ static TESTS: &[(&str, fn())] = &[
     (
         "wrapper_window_commit_never_executes_makepkg_or_advances_anchor",
         wrapper_window_commit_never_executes_makepkg_or_advances_anchor,
+    ),
+    (
+        "wrapper_resourcing_replaces_existing_helper_functions",
+        wrapper_resourcing_replaces_existing_helper_functions,
     ),
 ];
 

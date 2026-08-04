@@ -8,10 +8,17 @@
 # blocks unless AUR_SAFE_ALLOW_REVIEW=1 was explicitly set.
 
 if command -v aur-safe >/dev/null 2>&1; then
-  # Resolve helper executables before defining the shadowing shell functions;
-  # later dispatch must not re-enter a function or honor a changed PATH.
-  _AUR_SAFE_YAY_BIN=$(command -v yay 2>/dev/null || true)
-  _AUR_SAFE_PARU_BIN=$(command -v paru 2>/dev/null || true)
+  # Resolve external helper executables even when an older sourced wrapper
+  # already shadows their names with functions. This keeps wrapper updates
+  # idempotent and ensures later dispatch cannot re-enter a function or honor a
+  # changed PATH.
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    _AUR_SAFE_YAY_BIN=$(whence -p -- yay 2>/dev/null || true)
+    _AUR_SAFE_PARU_BIN=$(whence -p -- paru 2>/dev/null || true)
+  else
+    _AUR_SAFE_YAY_BIN=$(type -P -- yay 2>/dev/null || true)
+    _AUR_SAFE_PARU_BIN=$(type -P -- paru 2>/dev/null || true)
+  fi
   case "$_AUR_SAFE_YAY_BIN" in */*) ;; *) _AUR_SAFE_YAY_BIN= ;; esac
   case "$_AUR_SAFE_PARU_BIN" in */*) ;; *) _AUR_SAFE_PARU_BIN= ;; esac
 
@@ -100,8 +107,8 @@ if command -v aur-safe >/dev/null 2>&1; then
         _rebuild_opt=--rebuildall
         _context_opt1=--nomakepkgconf
         _context_opt2=
-        _review_opt1=--nodiffmenu
-        _review_opt2=--noeditmenu
+        _review_opt1=--diffmenu=false
+        _review_opt2=--editmenu=false
         ;;
       paru)
         _rebuild_opt=--rebuild=all

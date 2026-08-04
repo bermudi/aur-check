@@ -44,7 +44,10 @@ cross-shell wrapper is `assets/wrapper.sh`. Runtime state is
   never overrides hard, review, or audit-unavailable outcomes.
 - State directories are current-user-owned real directories with mode `0700`.
 - The wrapper owns the complete gate → helper → accept lock transaction and strips
-  lock/staging capabilities before untrusted build code runs.
+  lock/staging capabilities before untrusted build code runs. Re-sourcing must
+  recover pinned external helper paths even when an older wrapper already defines
+  `yay`/`paru`; yay review suppression uses the supported boolean forms
+  `--diffmenu=false --editmenu=false`.
 
 ## Verification
 
