@@ -79,6 +79,69 @@ fn missing_cache_http_baseline_hard_delta_blocks_without_staging() {
     );
 }
 
+fn missing_cache_http_baseline_whole_candidate_hard_blocks_without_staging() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[
+            ("1".into(), "npm install evil\n".into()),
+            ("2".into(), "npm install evil\n".into()),
+        ],
+    );
+
+    let pacman = FixturePacman::new(fixture.pacman_db.clone());
+    pacman.seed_installed(pkgbase, "1-1", pkgbase, 1000, 1001);
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
+    assert_eq!(
+        rc, 1,
+        "whole-candidate hard hit must block after baseline recovery"
+    );
+    assert!(fixture.read_staged(pkgbase).is_none());
+    assert!(fixture.read_manifest().trim().is_empty());
+    assert_eq!(fixture.read_accepted(pkgbase).unwrap().trim(), shas[0]);
+    assert!(
+        fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.diff")))
+            .unwrap()
+            .contains("npm install evil")
+    );
+}
+
+fn missing_cache_http_no_baseline_hard_blocks_without_staging() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+    build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[
+            ("1".into(), "".into()),
+            ("2".into(), "npm install evil\n".into()),
+        ],
+    );
+
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
+    assert_eq!(
+        rc, 1,
+        "whole-candidate hard hit must block without a baseline"
+    );
+    assert!(fixture.read_staged(pkgbase).is_none());
+    assert!(fixture.read_manifest().trim().is_empty());
+    assert!(
+        fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.diff")))
+            .unwrap()
+            .contains("npm install evil")
+    );
+}
+
 fn missing_cache_http_clone_failure_blocks_without_staging() {
     let pkgbase = "gatepkg";
     let rpc_json = format!(
@@ -108,6 +171,14 @@ static TESTS: &[(&str, fn())] = &[
     (
         "missing_cache_http_baseline_hard_delta_blocks_without_staging",
         missing_cache_http_baseline_hard_delta_blocks_without_staging,
+    ),
+    (
+        "missing_cache_http_baseline_whole_candidate_hard_blocks_without_staging",
+        missing_cache_http_baseline_whole_candidate_hard_blocks_without_staging,
+    ),
+    (
+        "missing_cache_http_no_baseline_hard_blocks_without_staging",
+        missing_cache_http_no_baseline_hard_blocks_without_staging,
     ),
     (
         "missing_cache_http_clone_failure_blocks_without_staging",

@@ -67,9 +67,11 @@ surfaces, a clean index/worktree, and zero untracked files.
 
 ### Cached
 
-Validate canonical origin, fetch an explicit HTTP(S) URL/refspec, capture the
-candidate SHA once, and diff `accepted..candidate`. An invalid/missing anchor,
-fetch failure, malformed Git output, or unsafe local config blocks.
+Derive the canonical origin from validated application configuration, replace
+repo-local `.git/config` with the fixed generated checkout config, fetch an
+explicit HTTP(S) URL/refspec, capture the candidate SHA once, and diff
+`accepted..candidate`. A config-reset failure, invalid/missing anchor, fetch
+failure, or malformed Git output blocks.
 
 ### Missing cache
 
@@ -98,7 +100,9 @@ inheritance.
 ## External boundaries
 
 - Git: absolute `/usr/bin/git`, isolated `GIT_*` and config, safe rendering
-  options, HTTP(S)-only transport, unsafe local config rejection.
+  options, HTTP(S)-only transport, generated repo-local config with an exact
+  fail-closed contract, private command-scoped Git metadata views, and purge
+  of replacement/graft state before helper-facing resets.
 - RPC: typed JSON, exact pkgname match, validated pkgbase, bounded curl timeout.
 - Pacman: installed version, pkgname, pkgbase, build time, and install time must
   match staged `.SRCINFO` claims and freshness threshold.

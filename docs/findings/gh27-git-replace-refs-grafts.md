@@ -3,7 +3,7 @@
 **Source:** adversarial review (Review 2 H7; Cohort 3), GitHub issue #27
 **Status:** fixed (2026-08-04)
 **Severity:** high
-**Lines:** `src/git.rs` (`safe_git_command`, `isolate_git_env`, `purge_replace_artifacts`), `src/engine.rs` (post-fetch purge), `src/main.rs` (`isolate_process_environment`), `assets/wrapper.sh` (`_aur_gate_run_helper`)
+**Lines:** `src/git.rs` (`safe_git_command`, `isolate_git_env`), `src/main.rs` (`isolate_process_environment`), `assets/wrapper.sh` (`_aur_gate_run_helper`)
 
 ## What happens
 
@@ -46,20 +46,23 @@ that protection and had no graft isolation.
 2. **Propagate the isolation to the helper.** `_aur_gate_run_helper` in
    `assets/wrapper.sh` exports both fixed values, and the Rust process
    environment (`src/main.rs::isolate_process_environment`) does the same.
-3. **Purge cached artifacts after fetch.**
-   `git::purge_replace_artifacts()` (called from `src/engine.rs` immediately
-   after a successful cache fetch) deletes every `refs/replace/*` ref with
-   `git update-ref -d` and removes any `info/grafts` file. This is a second line
-   of defence for helper checkouts that reuse the cache, not a substitute for
-   per-process isolation.
+3. **Purge repository-local state at every trust reset.** `reset_local_config()`
+   now removes loose `refs/replace/*`, replacement entries in `packed-refs`, and
+   `.git/info/grafts`, rejecting symlinked/nonregular or malformed packed
+   state rather than following it. The reset is used before cached fetch/helper
+   handoff, at the
+   makepkg guard, and before accept. This is hygiene, not the sole boundary:
+   Rust Git still uses `--no-replace-objects` plus `GIT_GRAFT_FILE=/dev/null`,
+   and the helper still receives the fixed environment because same-user build
+   code can create new artifacts after any purge.
 
 ## Verification
 
 - `cargo test --all-targets` —
   `git::tests::replace_objects_are_disabled_by_git_command` verifies replace
-  refs, `git::tests::grafts_are_disabled_by_safe_git` verifies that a forged
-  parent is ignored, and `git::tests::replace_artifacts_are_purged_from_cache`
-  verifies removal of both artifacts.
+  refs and `git::tests::grafts_are_disabled_by_safe_git` verifies that a forged
+  parent is ignored; purge tests cover loose/packed refs, grafts, and symlink
+  rejection.
 - `cargo clippy --all-targets -- -D warnings` clean.
 - `cargo run --quiet -- selftest` passes.
 - `bash -n assets/wrapper.sh` and `zsh -n assets/wrapper.sh` clean.
@@ -69,6 +72,6 @@ that protection and had no graft isolation.
 Git replacement and graft mechanisms are first-class repository state, not
 obscure corners. A gate that audits immutable SHA-anchored evidence must disable
 them at every process boundary: its own Git wrapper, the helper's runtime
-environment, and the cached clone itself. Defence in depth matters because the
-attacker can write to the same `.git` directory that both the auditor and the
-builder later read.
+environment, and the Rust process environment. Purging stale repository state
+reduces accidental view splits, but flags and the fresh makepkg/accept resets
+remain the structural controls because attacker-writable files can reappear.

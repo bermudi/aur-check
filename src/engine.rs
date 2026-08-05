@@ -134,8 +134,17 @@ impl<'a> App<'a> {
         if !clone.status.success() {
             bail!("clone failed for {pkgbase}");
         }
+        // Do not inspect the clone's config: replace it with the exact values
+        // this gate requested before the first repo-bound Git call.
+        git::reset_local_config(&dir, Some(&url), Some(&self.branch))
+            .with_context(|| format!("reset generated Git config for {pkgbase}"))?;
         let rev = format!("origin/{}", self.branch);
-        let out = git::safe_git(Some(&dir), &["rev-parse", "--verify", &rev])?;
+        let out = git::safe_git_with_origin(
+            Some(&dir),
+            &["rev-parse", "--verify", &rev],
+            &url,
+            &self.branch,
+        )?;
         if !out.status.success() {
             bail!("cannot resolve {rev}");
         }
@@ -143,6 +152,10 @@ impl<'a> App<'a> {
         if !is_object_id(&sha) {
             bail!("origin tip is not a valid object id");
         }
+        // No later clone operation needs the remote section. Removing it keeps
+        // every ordinary safe_git caller on the static no-remote contract.
+        git::reset_local_config(&dir, None, None)
+            .with_context(|| format!("remove transient remote config for {pkgbase}"))?;
         let pkgbuild = git::safe_git(Some(&dir), &["ls-tree", &sha, "--", "PKGBUILD"])?;
         let pkgbuild_record = std::str::from_utf8(&pkgbuild.stdout)?.trim();
         if !pkgbuild.status.success()
@@ -152,19 +165,11 @@ impl<'a> App<'a> {
         {
             bail!("no regular PKGBUILD blob in {pkgbase}");
         }
-        let url_out = git::safe_git(Some(&dir), &["config", "--get", "remote.origin.url"])?;
-        if !url_out.status.success() {
-            bail!("cannot read origin URL for {pkgbase}");
-        }
-        let remote_url = String::from_utf8_lossy(&url_out.stdout).trim().to_string();
-        if remote_url != url {
-            bail!("clone recorded an unexpected origin URL for {pkgbase}");
-        }
         Ok(CloneResult {
             dir,
             temp_root,
             sha,
-            url: remote_url,
+            url,
             pkgbase,
         })
     }
@@ -240,7 +245,7 @@ impl<'a> App<'a> {
         for rule in &self.hard {
             let hits = classifier::rule_hit_lines_pub(&rule.re, &content);
             if !hits.is_empty() {
-                self.reporter.review_hits(rule.name, &hits, 4);
+                self.reporter.block_hits(rule.name, &hits, 4);
                 scan.hard_hits = true;
             }
         }
@@ -313,20 +318,15 @@ impl<'a> App<'a> {
             return self.missing_cache_gate(pkg);
         }
 
-        // The cache's remote config is attacker-writable state. Require the
-        // canonical URL for provenance, then fetch that explicit HTTP(S) URL
-        // and explicit branch refspec rather than letting remote.* select a
-        // transport, helper, or alternate ref.
+        // The cache's config is attacker-writable state, not provenance. The
+        // canonical URL comes from validated application config and the
+        // refspec is generated from the validated branch; replace the whole
+        // local config before Git parses it, then fetch that explicit URL and
+        // refspec.
         let expected_url = format!("{}/{pkgbase}.git", self.aur_url);
-        let origin = git::safe_git(Some(&dir), &["config", "--get-all", "remote.origin.url"]);
-        let origin_is_expected = origin
-            .map(|output| {
-                output.status.success() && output.stdout == format!("{expected_url}\n").as_bytes()
-            })
-            .unwrap_or(false);
-        if !origin_is_expected {
+        if let Err(error) = git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch)) {
             self.reporter.review_msg(&format!(
-                "{pkg} — cache origin URL is missing or non-canonical; refusing fetch"
+                "{pkg} — cannot reset cached Git config; refusing fetch: {error}"
             ));
             return 1;
         }
@@ -334,7 +334,7 @@ impl<'a> App<'a> {
             "+refs/heads/{}:refs/remotes/origin/{}",
             self.branch, self.branch
         );
-        let fetch = git::safe_git(
+        let fetch = git::safe_git_with_origin(
             Some(&dir),
             &[
                 "fetch",
@@ -344,6 +344,8 @@ impl<'a> App<'a> {
                 &expected_url,
                 &fetch_ref,
             ],
+            &expected_url,
+            &self.branch,
         );
         if fetch.map(|o| !o.status.success()).unwrap_or(true) {
             self.reporter.review_msg(&format!(
@@ -351,15 +353,16 @@ impl<'a> App<'a> {
             ));
             return 1;
         }
-        // Issue #27: a malicious build may have left `refs/replace/*` or
-        // `info/grafts` in the cached clone; remove them before any object
-        // resolution that could be influenced by stale state.
-        if let Err(error) = git::purge_replace_artifacts(&dir) {
+        if let Err(error) = git::reset_local_config(&dir, None, None) {
             self.reporter.review_msg(&format!(
-                "{pkg} — cannot purge replace refs/grafts: {error}"
+                "{pkg} — cannot remove transient remote config; refusing audit: {error}"
             ));
             return 1;
         }
+        // Every reset purges stale replacement refs and grafts before this
+        // helper-facing handoff; safe_git and the helper environment retain
+        // their independent replacement/graft isolation for artifacts created
+        // after the reset.
         let rev = format!("origin/{}", self.branch);
         let candidate_sha = match git::safe_git(
             Some(&dir),
@@ -400,6 +403,14 @@ impl<'a> App<'a> {
             return 1;
         }
         if String::from_utf8_lossy(&changes.stdout).trim().is_empty() {
+            if let Err(error) =
+                git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
+            {
+                self.reporter.review_msg(&format!(
+                    "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
+                ));
+                return 1;
+            }
             self.reporter.dim(&format!(
                 "ok    {pkg} — no source changes (version bump only?)"
             ));
@@ -413,6 +424,14 @@ impl<'a> App<'a> {
         });
         match rc {
             2 => {
+                if let Err(error) =
+                    git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
+                {
+                    self.reporter.review_msg(&format!(
+                        "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
+                    ));
+                    return 1;
+                }
                 if self.paths.flag_diff(pkg).is_file()
                     && state::stage_scan_if_gating(
                         &self.paths,
@@ -430,6 +449,14 @@ impl<'a> App<'a> {
                 2
             }
             0 => {
+                if let Err(error) =
+                    git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
+                {
+                    self.reporter.review_msg(&format!(
+                        "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
+                    ));
+                    return 1;
+                }
                 if state::stage_scan_if_gating(
                     &self.paths,
                     self.staging,
@@ -500,14 +527,15 @@ impl<'a> App<'a> {
                 }
                 // rc 0 or 2: retained history is attacker-controlled → replace the
                 // delta stash with whole-candidate evidence before consent.
-                let review_result = (|| -> Result<()> {
+                let review_result = (|| -> Result<WholeScan> {
                     let scan = self.scan_whole_pkg(&dir, &scan_sha)?;
                     state::stash_content(
                         &self.paths,
                         pkg,
                         "baseline-recovery-whole-review",
                         &scan.content,
-                    )
+                    )?;
+                    Ok(scan)
                 })();
                 if let Err(error) = fs::remove_dir_all(&temp_root) {
                     self.reporter.dim(&format!(
@@ -515,9 +543,18 @@ impl<'a> App<'a> {
                         temp_root.display()
                     ));
                 }
-                if let Err(error) = review_result {
+                let scan = match review_result {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        self.reporter.review_msg(&format!(
+                            "{pkg} — could not persist whole-candidate review: {error:#}"
+                        ));
+                        return 1;
+                    }
+                };
+                if scan.hard_hits {
                     self.reporter.review_msg(&format!(
-                        "{pkg} — could not persist whole-candidate review: {error:#}"
+                        "{pkg} — hard rule hit(s) in whole candidate; refusing candidate"
                     ));
                     return 1;
                 }
@@ -568,7 +605,13 @@ impl<'a> App<'a> {
                 .review_msg(&format!("{pkg} — could not persist the review scan"));
             return 1;
         }
-        if scan.hard_hits || scan.review_hits {
+        if scan.hard_hits {
+            self.reporter.review_msg(&format!(
+                "{pkg} — hard rule hit(s) in uncached PKGBUILD; refusing candidate"
+            ));
+            return 1;
+        }
+        if scan.review_hits {
             self.reporter.review_msg(&format!(
                 "{pkg} — rule hit(s) in uncached PKGBUILD; consent required"
             ));
@@ -675,6 +718,7 @@ mod tests {
             "candidate",
         ]);
         let sha = git(&["rev-parse", "HEAD"]);
+        crate::git::reset_local_config(temp.path(), None, None).unwrap();
         (temp, sha)
     }
 
@@ -727,6 +771,12 @@ mod tests {
         assert!(scan.review_hits);
         assert!(scan.content.contains("patches/fix.patch"));
 
+        let (empty, empty_sha) = candidate_repo(&[
+            ("PKGBUILD", b""),
+            (".SRCINFO", b"pkgbase = x\npkgname = x\n"),
+        ]);
+        assert!(app.scan_whole_pkg(empty.path(), &empty_sha).is_err());
+
         let (hard, hard_sha) = candidate_repo(&[
             (
                 "PKGBUILD",
@@ -737,17 +787,17 @@ mod tests {
                 b"pkgbase = x\n\tpkgver = 1\n\tpkgrel = 1\npkgname = x\n",
             ),
         ]);
-        assert!(
-            app.scan_whole_pkg(hard.path(), &hard_sha)
-                .unwrap()
-                .hard_hits
-        );
-
-        let (empty, empty_sha) = candidate_repo(&[
-            ("PKGBUILD", b""),
-            (".SRCINFO", b"pkgbase = x\npkgname = x\n"),
-        ]);
-        assert!(app.scan_whole_pkg(empty.path(), &empty_sha).is_err());
+        let hard_scan = app.scan_whole_pkg(hard.path(), &hard_sha).unwrap();
+        assert!(hard_scan.hard_hits);
+        drop(app);
+        assert!(reporter
+            .blocks
+            .iter()
+            .any(|(tag, _)| tag == "install-hook-ref"));
+        assert!(!reporter
+            .reviews
+            .iter()
+            .any(|(tag, _)| tag == "install-hook-ref"));
     }
 
     #[test]

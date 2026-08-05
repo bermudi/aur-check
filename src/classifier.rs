@@ -1435,6 +1435,7 @@ mod tests {
             dir,
             &["update-ref", "refs/remotes/origin/master", &candidate],
         );
+        crate::git::reset_local_config(dir, None, None).unwrap();
 
         FixtureRepo {
             temp,
@@ -1828,6 +1829,7 @@ mod tests {
         );
         let moved = run_git(dir, &["rev-parse", "HEAD"]);
         run_git(dir, &["update-ref", "refs/remotes/origin/master", &moved]);
+        crate::git::reset_local_config(dir, None, None).unwrap();
 
         assert_eq!(classify_repo_at(dir, &base, &candidate), DiffClass::Boring);
         assert_eq!(classify_repo(dir, &base), DiffClass::Hard);

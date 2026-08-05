@@ -422,19 +422,31 @@ fn cmd_accept_locked(app: &mut App) -> i32 {
             ));
             continue;
         };
+        let expected_url = format!("{}/{pkgbase}.git", app.aur_url);
+        if let Err(error) = git::reset_local_config(&dir, Some(&expected_url), Some(&app.branch)) {
+            skipped += 1;
+            app.reporter.review_msg(&format!(
+                "accept: cannot reset Git config for {pkgbase}: {error}; anchor unchanged"
+            ));
+            continue;
+        }
         // Install confirmation: the staged commit's .SRCINFO version must be
         // installed AND bind back to this pkgbase (Finding F).
-        let srcinfo_at_sha =
-            match git::safe_git(Some(&dir), &["show", &format!("{staged_sha}:.SRCINFO")]) {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-                _ => {
-                    skipped += 1;
-                    app.reporter.review_msg(&format!(
-                        "accept: cannot read staged .SRCINFO for {pkgbase}; anchor unchanged"
-                    ));
-                    continue;
-                }
-            };
+        let srcinfo_at_sha = match git::safe_git_with_origin(
+            Some(&dir),
+            &["show", &format!("{staged_sha}:.SRCINFO")],
+            &expected_url,
+            &app.branch,
+        ) {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => {
+                skipped += 1;
+                app.reporter.review_msg(&format!(
+                    "accept: cannot read staged .SRCINFO for {pkgbase}; anchor unchanged"
+                ));
+                continue;
+            }
+        };
         if srcinfo::installed_matches(app.pacman, &srcinfo_at_sha, pkgbase, not_before) {
             let accepted = app.paths.accepted_file(pkgbase);
             if fs::rename(&staged_file, &accepted).is_ok() {
@@ -730,6 +742,8 @@ fn prepare_makepkg(
     args: &[String],
     active_transaction: bool,
     makepkg: &Path,
+    aur_url: &str,
+    branch: &str,
 ) -> std::result::Result<MakepkgPlan, String> {
     if !active_transaction {
         return Err("no active audited transaction".into());
@@ -737,6 +751,11 @@ fn prepare_makepkg(
     if let Some(arg) = args.iter().find(|arg| unsafe_makepkg_arg(arg)) {
         return Err(format!("unsafe build mode/context '{arg}'"));
     }
+    // A helper/build may have poisoned this checkout after the audit. Reset
+    // before even asking Git for the worktree root; no old local config is
+    // evidence for that lookup.
+    git::reset_local_config(cwd, None, None)
+        .map_err(|error| format!("cannot reset checkout Git config: {error}"))?;
     let top_out = git::safe_git(Some(cwd), &["rev-parse", "--show-toplevel"])
         .map_err(|_| "build directory is not a git checkout".to_string())?;
     if !top_out.status.success() {
@@ -769,8 +788,16 @@ fn prepare_makepkg(
     if !is_object_id(staged_sha) {
         return Err(format!("malformed staged ref for {pkgbase}"));
     }
-    let head_out = git::safe_git(Some(&top), &["rev-parse", "--verify", "HEAD"])
-        .map_err(|_| format!("cannot resolve HEAD for {pkgbase}"))?;
+    let expected_url = format!("{aur_url}/{pkgbase}.git");
+    git::reset_local_config(&top, Some(&expected_url), Some(branch))
+        .map_err(|error| format!("cannot generate checkout Git config: {error}"))?;
+    let head_out = git::safe_git_with_origin(
+        Some(&top),
+        &["rev-parse", "--verify", "HEAD"],
+        &expected_url,
+        branch,
+    )
+    .map_err(|_| format!("cannot resolve HEAD for {pkgbase}"))?;
     if !head_out.status.success() {
         return Err(format!("cannot resolve HEAD for {pkgbase}"));
     }
@@ -780,6 +807,10 @@ fn prepare_makepkg(
             "{pkgbase} checkout changed after audit; rerun yay/paru"
         ));
     }
+    // The remote was needed only to validate this checkout's origin. The rest
+    // of the makepkg guard uses the static generated config contract.
+    git::reset_local_config(&top, None, None)
+        .map_err(|error| format!("cannot remove transient remote config: {error}"))?;
     if !matches!(
         crate::classifier::package_surfaces_are_regular(&top, "HEAD"),
         Ok(true)
@@ -812,6 +843,11 @@ fn prepare_makepkg(
         return Err("makepkg is unavailable or not executable".into());
     }
 
+    // Preserve the helper checkout's canonical remote after the guard's
+    // static-contract checks; yay/paru may still need it after makepkg.
+    git::reset_local_config(&top, Some(&expected_url), Some(branch))
+        .map_err(|error| format!("cannot restore helper Git remote: {error}"))?;
+
     let mut planned_args = vec!["--cleanbuild".to_owned(), "--force".to_owned()];
     planned_args.extend_from_slice(args);
     Ok(MakepkgPlan {
@@ -832,7 +868,15 @@ pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
             return 1;
         }
     };
-    let plan = match prepare_makepkg(&app.paths, &cwd, args, active, &app.makepkg_path) {
+    let plan = match prepare_makepkg(
+        &app.paths,
+        &cwd,
+        args,
+        active,
+        &app.makepkg_path,
+        &app.aur_url,
+        &app.branch,
+    ) {
         Ok(plan) => plan,
         Err(error) => {
             app.reporter.review_msg(&format!("makepkg guard: {error}"));
@@ -1373,6 +1417,8 @@ mod tests {
                 &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
                 true,
                 &self.makepkg,
+                "https://aur.archlinux.org",
+                "master",
             )
         }
 
@@ -1413,11 +1459,17 @@ mod tests {
     #[test]
     fn makepkg_guard_rejects_transaction_and_state_mismatches() {
         let fixture = GuardFixture::new();
-        assert!(
-            prepare_makepkg(&fixture.paths, &fixture.repo, &[], false, &fixture.makepkg)
-                .unwrap_err()
-                .contains("no active")
-        );
+        assert!(prepare_makepkg(
+            &fixture.paths,
+            &fixture.repo,
+            &[],
+            false,
+            &fixture.makepkg,
+            "https://aur.archlinux.org",
+            "master",
+        )
+        .unwrap_err()
+        .contains("no active"));
         assert!(fixture
             .prepare(&["--repackage"])
             .unwrap_err()
@@ -1437,7 +1489,10 @@ mod tests {
             .contains("malformed staged"));
         fs::write(
             fixture.paths.staged_file("guard-pkg"),
-            format!("{}\n", fixture.sha),
+            format!(
+                "{}\t2026-01-01T00:00:00Z\thttps://aur.archlinux.org/guard-pkg.git\n",
+                fixture.sha
+            ),
         )
         .unwrap();
         fs::remove_file(&fixture.makepkg).unwrap();
@@ -1516,7 +1571,11 @@ mod tests {
             "symlink",
         ]);
         let sha = fixture.git(&["rev-parse", "HEAD"]);
-        fs::write(fixture.paths.staged_file("guard-pkg"), format!("{sha}\n")).unwrap();
+        fs::write(
+            fixture.paths.staged_file("guard-pkg"),
+            format!("{sha}\t2026-01-01T00:00:00Z\thttps://aur.archlinux.org/guard-pkg.git\n"),
+        )
+        .unwrap();
         assert!(fixture
             .prepare(&[])
             .unwrap_err()

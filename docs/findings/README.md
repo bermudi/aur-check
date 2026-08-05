@@ -84,7 +84,10 @@ already resolved by the Rust migration or by existing fixes were not filed
 TOCTOU, helper config precedence, config/env mismatch, rule severity asymmetry,
 pacman -U boundary, line-continuation evasion). The new issues extend closed
 #5 (git config: `http.*` and `includeIf.*` gaps) and closed #4 (cmd_audit
-zero-hit first-contact). **#31 (H10) is resolved** — `cmd_audit` now requires
+zero-hit first-contact). The repo-local Git-config class is now structurally
+closed: cached/fresh checkouts regenerate a fixed config, exact-contract
+validation blocks unknown keys, and Rust Git children use private command-scoped
+metadata views. **#31 (H10) is resolved** — `cmd_audit` now requires
 whole-candidate review for first-contact packages even when the deterministic
 scan produces zero rule hits, matching `check_pkg`'s missing-cache gate. See
 <https://github.com/bermudi/aur-gate/issues>.
@@ -115,7 +118,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-gate/issues/6)
 - ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-gate/issues/8)
 - ✓ **gh27** — Git replace refs split auditor/builder views; grafts rewrite ancestry (Cohort 3 H7) → [doc](gh27-git-replace-refs-grafts.md) · [#27](https://github.com/bermudi/aur-gate/issues/27)
-- ◷ **#28** — Git `http.*` local config keys escape safety check — proxy/CA MITM (Cohort 3 H8, extends #5) · [#28](https://github.com/bermudi/aur-gate/issues/28)
+- ✓ **gh28** — Git `http.*` local config keys escape safety check — proxy/CA MITM (Cohort 3 H8, extends #5) → [doc](gh28-git-http-local-config-mitm.md) · [#28](https://github.com/bermudi/aur-gate/issues/28)
 - ◷ **#30** — Wrapper dispatch does not reject `--hookdir`/`--cachedir`/`--gpgdir`/`--logfile` (Cohort 3 H9) · [#30](https://github.com/bermudi/aur-gate/issues/30)
 - ✓ **#31** — `cmd_audit` auto-proceeds on first-time install with zero rule hits (Cohort 3 H10, extends #4) → [doc](gh31-cmd-audit-first-contact-zero-hit.md) · [#31](https://github.com/bermudi/aur-gate/issues/31)
 

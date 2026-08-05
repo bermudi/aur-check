@@ -1,9 +1,10 @@
 # GH #28 — Repo-local `http.*` git config escapes the safety check (proxy/CA MITM)
 
 **Source:** adversarial review (shared M2/H1; Review 2 H1), GitHub issue #28
-**Status:** fixed (2026-08-04)
+**Status:** fixed (2026-08-04; structural reset superseded the prefix fix 2026-08-05)
 **Severity:** high
-**Lines:** `src/git.rs` `UNSAFE_KEY_PREFIXES` (was lines 157-166), `local_config_is_safe()`
+**Lines:** current Rust boundary is `src/git.rs` `reset_local_config()` and
+its fail-closed exact generated-config contract.
 
 ## What happens
 
@@ -28,17 +29,22 @@ deterministic rules.
 
 ## Fix
 
-Add `"http."` to `UNSAFE_KEY_PREFIXES` in `src/git.rs`. Blocking the prefix
-wholesale in `local_config_is_safe()` is the only robust kill switch because
-URL-scoped `[http "..."]` sections override command-line `-c`. This covers
-`http.proxy`, `http.sslCAInfo`, `http.sslVerify`, and any future `http.*`
-knob that could weaken transport integrity.
+The durable fix is stronger than adding another prefix: cached and fresh
+checkouts now have `.git/config` atomically regenerated from the validated
+HTTP(S) origin and branch refspec before Git reads it. The fixed generated
+key/value contract contains no `http.*` namespace, while the fallback validator
+rejects any changed, duplicate, or future key if an untrusted build rewrites
+the file later. Each Rust Git child uses a private metadata view containing
+the validated config, so it does not reopen the
+mutable repository-local file. Fetches still use explicit validated HTTP(S)
+URL/refspec arguments.
 
 ## Verification
 
-- `cargo test --all-targets` — `repo_local_protocol_override_is_rejected`
-  now also asserts that `http.proxy`, `http.sslcainfo`, and a URL-scoped
-  `http.https://aur.archlinux.org.proxy` local config entry are all rejected.
+- `cargo test --all-targets` — `reset_local_config_discards_unknown_keys`
+  proves that `http.*`/include-style state is discarded, while
+  `unknown_repo_local_config_is_rejected` proves an unknown future namespace
+  fails closed if it appears after refresh.
 - `cargo clippy --all-targets -- -D warnings` clean.
 - `cargo run --quiet -- selftest` passes.
 
@@ -46,7 +52,7 @@ knob that could weaken transport integrity.
 
 `-c` overrides are not a complete defence against repo-local config. Any
 config namespace that admits URL-scoped subsections (`http.<url>.*`,
-`url.<base>.insteadOf`, etc.) can override a global `-c` value, so the
-repo-local config must be denylisted at the prefix level rather than
-overridden per-key. Extends #5, which hardened the git invocation but
-missed `http.*` specifically.
+`url.<base>.insteadOf`, etc.) can override a global `-c` value. Regenerating the
+small config namespace closes that class for known and future keys alike; the
+private command view closes the validation-to-execution race; `-c` remains
+defence in depth for rendering and transport defaults.

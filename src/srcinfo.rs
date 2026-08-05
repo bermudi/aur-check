@@ -323,11 +323,10 @@ pub fn find_baseline_commit(dir: &Path, want: &str, branch: &str) -> Result<Opti
 
     // Feed "<sha>:.SRCINFO\n" for each commit into cat-file --batch.
     let mut command = crate::git::safe_git_command(Some(dir), &["cat-file", "--batch"])?;
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+    let mut child = command.spawn()?;
     {
         let Some(stdin) = child.stdin.as_mut() else {
             bail!("cat-file stdin was not piped");
@@ -1128,6 +1127,7 @@ mod tests {
             "refs/remotes/origin/master",
             commits.last().unwrap(),
         ]);
+        crate::git::reset_local_config(dir, None, None).unwrap();
         assert_eq!(
             find_baseline_commit(dir, "1-1", "master").unwrap(),
             Some(commits[0].clone())

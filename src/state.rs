@@ -588,6 +588,7 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
+        crate::git::reset_local_config(temp.path(), None, None).unwrap();
         Some((
             temp,
             String::from_utf8(output.stdout).unwrap().trim().to_owned(),

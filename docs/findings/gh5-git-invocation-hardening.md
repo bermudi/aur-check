@@ -1,9 +1,10 @@
 # GH #5 — Repo-local git config is trusted; git invocation hardening is incomplete
 
 **Source:** Cohort 2 red-team review, GitHub issue #5
-**Status:** fixed (2026-07-28)
+**Status:** fixed (2026-07-28; local-config strategy superseded 2026-08-05)
 **Severity:** critical
-**Lines:** `git()` wrapper at `aur-gate:232-330`, environment sanitization at `aur-gate:38-65`, `_git_local_config_is_safe()` at `aur-gate:335-357`
+**Lines:** historical Bash implementation; current Rust boundary is `src/git.rs`
+(`safe_git_command`, `reset_local_config`, `isolate_git_env`).
 
 ## What happens
 
@@ -23,7 +24,14 @@ A single `git()` wrapper function shadows the external `git` binary for all git 
 - For **every** git call, prepend `--no-pager` and a short list of `-c` overrides that win over repo-local config: `core.pager=cat`, `pager.diff/show=cat`, `core.quotepath=false`, `core.attributesFile=`, `core.excludesFile=`, `core.hooksPath=`, `color.ui=false`, `color.diff=false`, `diff.wordDiff=none`, `diff.colorWords=false`, `diff.mnemonicPrefix=false`, `diff.noprefix=false`, `diff.colorMoved=false`, `http.sslVerify=true`.
 - For `diff` and `show`, add subcommand options `--no-ext-diff --no-textconv --word-diff=none --text`. `--text` defeats `.gitattributes` binary markers; `--no-ext-diff` and `--no-textconv` defeat external diff drivers and textconv filters.
 - Every git() call runs with `GIT_PROXY_COMMAND=` (empty), overriding `core.gitProxy`/`remote.*.proxy` and any inherited `GIT_PROXY_COMMAND` environment. Git's `core.gitProxy` cannot be reliably neutralised with a `-c` override because it is a multi-valued "first match wins" config, so the env var is the correct kill switch.
-- Before any non-`init`/`clone` git call, `_git_local_config_is_safe()` reads the repo's `.git/config` and fail-closes on `diff.*`, `url.*`, `filter.*`, `alias.*`, `include.*`, `credential.*`, `submodule.*`, `remote.*.proxy`, and dangerous `core.*` keys (`attributesFile`, `hooksPath`, `pager`, `sshCommand`, `askPass`, `editor`, `excludesFile`, `worktree`, `fsmonitor`, `gitProxy`).
+- The Rust implementation now atomically replaces repo-local `.git/config`
+  with the fixed values required by the checkout (plus the validated SHA-256
+  repository marker when present). Its fallback guard is an exact generated
+  key/value contract; changed, duplicate, unknown, and future keys fail
+  closed. Each repo-bound Rust Git child receives a private metadata view
+  containing that validated config, so it cannot reopen a mutable local file.
+  Cached clones, fresh clones, the makepkg seam, and accept all reset before
+  repo-bound Git work.
 
 ## Verification
 
@@ -37,4 +45,4 @@ A single `git()` wrapper function shadows the external `git` binary for all git 
 
 ## Lesson
 
-User/system config isolation is necessary but not sufficient. Any git call inside a security gate must also treat the repo's own `.git/config` and the caller's environment as untrusted. A wrapper is the lowest-friction place to centralise those guarantees rather than scattering `--no-pager`, `-c`, and `unset` at every call site.
+User/system config isolation is necessary but not sufficient. Any Git call inside a security gate must treat the repo's own `.git/config` and the caller's environment as untrusted. The durable Rust fix is to regenerate the small local-config namespace rather than grow a denylist; the exact-contract guard and private command view remain fail-closed tripwires for a missed refresh or a concurrent local-file swap.
