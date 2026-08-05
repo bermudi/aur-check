@@ -351,6 +351,15 @@ impl<'a> App<'a> {
             ));
             return 1;
         }
+        // Issue #27: a malicious build may have left `refs/replace/*` or
+        // `info/grafts` in the cached clone; remove them before any object
+        // resolution that could be influenced by stale state.
+        if let Err(error) = git::purge_replace_artifacts(&dir) {
+            self.reporter.review_msg(&format!(
+                "{pkg} — cannot purge replace refs/grafts: {error}"
+            ));
+            return 1;
+        }
         let rev = format!("origin/{}", self.branch);
         let candidate_sha = match git::safe_git(
             Some(&dir),

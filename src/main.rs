@@ -73,6 +73,11 @@ fn isolate_process_environment() {
     }
     std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
     std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+    // Issue #27: process-wide replacement-ref and graft disablement.
+    std::env::set_var("GIT_NO_REPLACE_OBJECTS", "1");
+    // Grafts have no command-line equivalent; force Git to ignore the
+    // deprecated repo-local info/grafts file as well.
+    std::env::set_var("GIT_GRAFT_FILE", "/dev/null");
     std::env::set_var("LC_ALL", "C");
     std::env::set_var("LANG", "C");
 }
@@ -123,6 +128,8 @@ mod tests {
             ("LANG", "en_US.UTF-8"),
             ("GIT_CONFIG_GLOBAL", "/tmp/other"),
             ("GIT_CONFIG_SYSTEM", "/tmp/system"),
+            ("GIT_NO_REPLACE_OBJECTS", "0"),
+            ("GIT_GRAFT_FILE", "/tmp/other-grafts"),
         ]);
         isolate_process_environment();
         assert!(
@@ -151,6 +158,14 @@ mod tests {
         );
         assert_eq!(
             std::env::var("GIT_CONFIG_SYSTEM").ok(),
+            Some("/dev/null".into())
+        );
+        assert_eq!(
+            std::env::var("GIT_NO_REPLACE_OBJECTS").ok(),
+            Some("1".into())
+        );
+        assert_eq!(
+            std::env::var("GIT_GRAFT_FILE").ok(),
             Some("/dev/null".into())
         );
         assert_eq!(std::env::var("LC_ALL").ok(), Some("C".into()));

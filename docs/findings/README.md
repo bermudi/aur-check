@@ -114,7 +114,7 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **W** — Maintainer-drift blind to orphan adoption (empty baseline) → [doc](W-maintainer-drift-blind-to-orphan-adoption.md) · [#24](https://github.com/bermudi/aur-gate/issues/24)
 - ✓ **gh6** — Hard rules are brittle and can be evaded into review (Cohort 2 H2, #6) → [doc](gh6-hard-rules-brittle.md) · [#6](https://github.com/bermudi/aur-gate/issues/6)
 - ✓ **gh8** — Deletion-only PKGBUILD changes classified boring (Cohort 2 H4, #8) → [doc](gh8-deletion-only-changes-classified-boring.md) · [#8](https://github.com/bermudi/aur-gate/issues/8)
-- ◷ **#27** — Git replace refs & grafts enable auditor/builder view split (Cohort 3 H7) · [#27](https://github.com/bermudi/aur-gate/issues/27)
+- ✓ **gh27** — Git replace refs split auditor/builder views; grafts rewrite ancestry (Cohort 3 H7) → [doc](gh27-git-replace-refs-grafts.md) · [#27](https://github.com/bermudi/aur-gate/issues/27)
 - ◷ **#28** — Git `http.*` local config keys escape safety check — proxy/CA MITM (Cohort 3 H8, extends #5) · [#28](https://github.com/bermudi/aur-gate/issues/28)
 - ◷ **#30** — Wrapper dispatch does not reject `--hookdir`/`--cachedir`/`--gpgdir`/`--logfile` (Cohort 3 H9) · [#30](https://github.com/bermudi/aur-gate/issues/30)
 - ✓ **#31** — `cmd_audit` auto-proceeds on first-time install with zero rule hits (Cohort 3 H10, extends #4) → [doc](gh31-cmd-audit-first-contact-zero-hit.md) · [#31](https://github.com/bermudi/aur-gate/issues/31)
