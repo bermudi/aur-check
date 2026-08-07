@@ -102,9 +102,10 @@ mod tests {
             "--cachedir|--cachedir=*",
             "--gpgdir|--gpgdir=*",
             "--logfile|--logfile=*",
-            "GIT_CONFIG_COUNT=8",
+            "GIT_CONFIG_COUNT=9",
             "GIT_CONFIG_KEY_0=core.hooksPath",
             "GIT_CONFIG_KEY_4=protocol.allow",
+            "GIT_CONFIG_KEY_8=core.commitGraph",
             "-u GIT_EXEC_PATH",
             "-u GIT_CONFIG_PARAMETERS",
         ] {

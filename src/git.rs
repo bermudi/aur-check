@@ -60,6 +60,10 @@ const SAFE_PRE: &[&str] = &[
     "protocol.https.allow=always",
     "-c",
     "protocol.ext.allow=never",
+    // Issue #38: commit graphs can replace the tree/parent view for a validly
+    // checksummed commit; force Git to resolve through the commit object.
+    "-c",
+    "core.commitGraph=false",
 ];
 
 /// Subcommand guards for diff/show (the commands that render diffs).
@@ -538,11 +542,17 @@ pub(crate) fn reset_local_config(
     purge_git_artifacts(git_dir)
 }
 
-/// Remove repository-local replacement and graft state before a checkout is
-/// handed to any process that might invoke ordinary Git. Rust's Git calls also
-/// disable these mechanisms in-process, but cleanup closes the same-user gap
-/// if a helper or build unsets those environment protections.
+/// Remove repository-local replacement, graft, commit-graph, and object
+/// alternates state before a checkout is handed to any process that might
+/// invoke ordinary Git. Rust's Git calls also disable these mechanisms
+/// in-process, but cleanup closes the same-user gap if a helper or build
+/// unsets those environment protections.
 fn purge_git_artifacts(git_dir: &Path) -> Result<()> {
+    // Issue #38: commit graphs and object alternates can both substitute the
+    // tree/parent view for a validly checksummed commit. Purge them with the
+    // same symlink/real-directory hygiene as refs/replace.
+    purge_objects_info_artifacts(git_dir)?;
+
     let info = git_dir.join("info");
     if real_directory_if_present(&info)? {
         remove_regular_file_if_present(&info.join("grafts"))?;
@@ -553,6 +563,29 @@ fn purge_git_artifacts(git_dir: &Path) -> Result<()> {
         purge_replace_directory(&refs.join("replace"))?;
     }
     purge_packed_replace_refs(&git_dir.join("packed-refs"))?;
+    Ok(())
+}
+
+fn purge_objects_info_artifacts(git_dir: &Path) -> Result<()> {
+    let objects = git_dir.join("objects");
+    if !real_directory_if_present(&objects)? {
+        return Ok(());
+    }
+    let objects_info = objects.join("info");
+    if !real_directory_if_present(&objects_info)? {
+        return Ok(());
+    }
+
+    remove_regular_file_if_present(&objects_info.join("commit-graph"))?;
+    remove_regular_file_if_present(&objects_info.join("alternates"))?;
+
+    let commit_graphs = objects_info.join("commit-graphs");
+    if real_directory_if_present(&commit_graphs)? {
+        validate_real_tree(&commit_graphs)
+            .with_context(|| format!("validate {}", commit_graphs.display()))?;
+        fs::remove_dir_all(&commit_graphs)
+            .with_context(|| format!("remove {}", commit_graphs.display()))?;
+    }
     Ok(())
 }
 
@@ -1007,6 +1040,9 @@ fn validated_local_config(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
 
     #[test]
     fn git_environment_namespace_is_removed() {
@@ -1712,5 +1748,190 @@ mod tests {
             second,
             "safe_git must use the committed parent, not info/grafts"
         );
+    }
+
+    #[test]
+    fn reset_local_config_purges_commit_graph_and_alternates() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .arg(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        let git_dir = temp.path().join(".git");
+        let objects_info = git_dir.join("objects/info");
+        std::fs::create_dir_all(&objects_info).unwrap();
+        std::fs::write(objects_info.join("commit-graph"), b"CGPH\x01fake\n").unwrap();
+        std::fs::write(objects_info.join("alternates"), b"/tmp/other-objects\n").unwrap();
+        let commit_graphs = objects_info.join("commit-graphs");
+        std::fs::create_dir_all(&commit_graphs).unwrap();
+        std::fs::write(commit_graphs.join("graph-1"), b"graph").unwrap();
+
+        reset_local_config(temp.path(), None, None).unwrap();
+
+        assert!(!objects_info.join("commit-graph").exists());
+        assert!(!objects_info.join("alternates").exists());
+        assert!(!commit_graphs.exists());
+    }
+
+    #[test]
+    fn safe_git_ignores_poisoned_commit_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        assert!(Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .arg(repo)
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [("user.name", "t"), ("user.email", "t@example.invalid")] {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(repo)
+                .args(["config", k, v])
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        std::fs::write(repo.join("PKGBUILD"), b"pkg\n").unwrap();
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "PKGBUILD"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-qm", "initial"])
+            .status()
+            .unwrap()
+            .success());
+
+        // Normalize the generated config so safe_git accepts the repo, then
+        // write a real commit-graph. (reset purges any stale graph.)
+        reset_local_config(repo, None, None).unwrap();
+
+        let true_tree = String::from_utf8(
+            Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(repo)
+                .args(["log", "--format=%T", "-n1", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let empty_tree = String::from_utf8(
+            Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(repo)
+                .args(["mktree"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert!(crate::state::is_object_id(&true_tree));
+        assert!(crate::state::is_object_id(&empty_tree));
+        assert_ne!(true_tree, empty_tree);
+
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit-graph", "write", "--reachable"])
+            .status()
+            .unwrap()
+            .success());
+
+        let graph = repo.join(".git/objects/info/commit-graph");
+        let mut bytes = std::fs::read(&graph).unwrap();
+        // SHA-1 hash version 1: the final 20 bytes are the checksum.
+        let checksum_len = 20;
+        assert!(bytes.len() > checksum_len);
+
+        let true_tree_bytes = hex_to_bytes(&true_tree);
+        let empty_tree_bytes = hex_to_bytes(&empty_tree);
+        let pos = bytes
+            .windows(true_tree_bytes.len())
+            .position(|window| window == true_tree_bytes.as_slice())
+            .expect("true tree OID not found in commit-graph");
+        bytes[pos..pos + true_tree_bytes.len()].copy_from_slice(&empty_tree_bytes);
+
+        // Recompute the SHA-1 checksum for the bytes before the existing one.
+        let new_checksum = sha1_bytes(&bytes[..bytes.len() - checksum_len]);
+        bytes.truncate(bytes.len() - checksum_len);
+        bytes.extend_from_slice(&new_checksum);
+        // Git writes the graph read-only; make it writable for the fixture.
+        std::fs::set_permissions(&graph, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&graph, &bytes).unwrap();
+
+        // Plain git with the graph enabled must see the poisoned tree. Use
+        // `git log`, not `rev-parse HEAD^{tree}`, because the latter parses the
+        // commit object directly and does not consult the graph.
+        let poisoned = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "-c",
+                "core.commitGraph=true",
+                "log",
+                "--format=%T",
+                "-n1",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            poisoned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&poisoned.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&poisoned.stdout).trim(),
+            empty_tree,
+            "fixture: poisoned graph should win when commitGraph is enabled"
+        );
+
+        // safe_git forces core.commitGraph=false and resolves the real tree.
+        let safe = safe_git(Some(repo), &["log", "--format=%T", "-n1", "HEAD"]).unwrap();
+        assert!(
+            safe.status.success(),
+            "safe git failed: {}",
+            String::from_utf8_lossy(&safe.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&safe.stdout).trim(),
+            true_tree,
+            "safe_git must ignore the commit-graph and use the commit object"
+        );
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn sha1_bytes(data: &[u8]) -> Vec<u8> {
+        let mut child = Command::new("/usr/bin/sha1sum")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let hex = text.split_whitespace().next().unwrap();
+        hex_to_bytes(hex)
     }
 }
