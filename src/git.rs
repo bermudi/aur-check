@@ -88,6 +88,52 @@ pub fn safe_git(repo: Option<&Path>, args: &[&str]) -> Result<Output> {
     Ok(safe_git_command(repo, args)?.output()?)
 }
 
+/// Compute git blob hashes for a set of files using `git hash-object
+/// --stdin-paths`. Unlike `safe_git`, this does not require a repository — it
+/// is a pure hashing operation. The hardened environment (SAFE_PRE, env
+/// isolation, no-replace-objects) is still applied so a poisoned global config
+/// or environment cannot redirect the hash. Paths are interpreted relative to
+/// `cwd`. Returns one SHA-1 hex string per input path, in order.
+pub(crate) fn hash_objects(cwd: &Path, paths: &[String]) -> Result<Vec<String>> {
+    let mut cmd = Command::new("/usr/bin/git");
+    cmd.arg("--no-pager")
+        .arg("--no-replace-objects")
+        .args(SAFE_PRE);
+    isolate_git_env(&mut cmd);
+    cmd.arg("hash-object")
+        .arg("--stdin-paths")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("spawn git hash-object")?;
+    {
+        let stdin = child.stdin.take().context("hash-object stdin")?;
+        let mut writer = std::io::BufWriter::new(stdin);
+        for path in paths {
+            writeln!(writer, "{path}")?;
+        }
+    }
+    let out = child.wait_with_output().context("git hash-object")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("git hash-object failed: {err}");
+    }
+    let hashes: Vec<String> = std::str::from_utf8(&out.stdout)
+        .context("hash-object output is not UTF-8")?
+        .lines()
+        .map(String::from)
+        .collect();
+    if hashes.len() != paths.len() {
+        bail!(
+            "git hash-object returned {} hashes for {} paths",
+            hashes.len(),
+            paths.len()
+        );
+    }
+    Ok(hashes)
+}
+
 /// Run one hardened Git command while checking the generated remote section
 /// against the trusted origin and branch used to create it.
 pub(crate) fn safe_git_with_origin(

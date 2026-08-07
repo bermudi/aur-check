@@ -1,7 +1,7 @@
-# Finding 6 — live refs and symbolic HEAD re-resolve to a moved branch
+# Finding p2-6 — live refs and symbolic HEAD re-resolve to a moved branch
 
 **Source:** 2026-08-04 trust-path review (Phase 2, private build checkout)
-**Status:** fixed by private build checkout
+**Status:** fixed by private build checkout with post-extraction verification
 **Severity:** critical
 **Surface:** helper checkout refs, makepkg guard
 

@@ -702,6 +702,7 @@ fn unsafe_makepkg_arg(arg: &str) -> bool {
         "--skippgpcheck",
         "--dir",
         "--config",
+        "--install",
     ];
     for l in long {
         if arg == l || arg.starts_with(&format!("{l}=")) {
@@ -750,12 +751,15 @@ impl MakepkgPlan {
     }
 }
 
-const BUILD_SHA_SENTINEL: &str = ".aur-gate-build-sha";
-
 /// Materialize the exact audited tree into a private build directory. Git
 /// `archive` emits a tar stream from the content-addressed object store, and
 /// `tar -x` expands it into `build_dir`. The helper's index, worktree, refs, and
 /// local config are not consulted; only the immutable objects at `sha` are.
+///
+/// `git archive` honors `export-subst` and `export-ignore` attributes from the
+/// tree's own `.gitattributes`, so the extracted bytes may differ from the
+/// audited blobs. [`verify_build_dir`] closes this gap by re-hashing every
+/// extracted file and comparing it to the `git ls-tree` record for `sha`.
 fn materialize_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Result<()> {
     if build_dir.exists() {
         fs::remove_dir_all(build_dir).context("remove stale build directory")?;
@@ -794,18 +798,108 @@ fn materialize_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Res
         let err = String::from_utf8_lossy(&tar_out.stderr);
         bail!("tar extraction failed: {err}");
     }
+
+    verify_build_dir(source_repo, sha, build_dir)
+        .context("build directory does not match the audited tree")?;
     Ok(())
 }
 
-fn read_build_sha(build_dir: &Path) -> Option<String> {
-    fs::read_to_string(build_dir.join(BUILD_SHA_SENTINEL))
-        .ok()
-        .map(|s| s.trim().to_string())
+/// Walk `build_dir` recursively and return every file path relative to
+/// `build_dir`, in lexicographic order for deterministic comparison.
+fn list_build_dir_files(build_dir: &Path) -> Result<Vec<String>> {
+    let mut files: Vec<String> = Vec::new();
+    collect_files(build_dir, build_dir, &mut files)?;
+    files.sort();
+    Ok(files)
 }
 
-fn write_build_sha(build_dir: &Path, sha: &str) -> Result<()> {
-    let path = build_dir.join(BUILD_SHA_SENTINEL);
-    fs::write(&path, format!("{sha}\n")).context("write build sha sentinel")?;
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(dir).context("read build directory")? {
+        let entry = entry.context("read directory entry")?;
+        let path = entry.path();
+        let file_type = entry.file_type().context("stat directory entry")?;
+        if file_type.is_dir() {
+            collect_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            let rel = path.strip_prefix(root).context("strip build dir prefix")?;
+            files.push(rel.to_string_lossy().into_owned());
+        } else {
+            bail!("build directory contains non-regular non-directory entry");
+        }
+    }
+    Ok(())
+}
+
+/// Verify that every file in `build_dir` exactly matches the tree at `sha`:
+/// no extra files, no missing files, and every blob hash matches. This closes
+/// the `export-subst`/`export-ignore`/tar-quirk class that `git archive` alone
+/// cannot prevent.
+fn verify_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Result<()> {
+    let tree = git::safe_git(Some(source_repo), &["ls-tree", "-r", "-z", sha])?;
+    if !tree.status.success() {
+        bail!("cannot enumerate staged tree for verification");
+    }
+
+    // Parse expected entries: path -> blob hash.
+    let mut expected: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for record in tree
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("malformed ls-tree record")?;
+        let metadata = std::str::from_utf8(&record[..tab])?;
+        let path = std::str::from_utf8(&record[tab + 1..])?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().unwrap_or("");
+        let kind = fields.next().unwrap_or("");
+        let object = fields.next().unwrap_or("");
+        if !matches!(mode, "100644" | "100755")
+            || kind != "blob"
+            || !is_object_id(object)
+            || fields.next().is_some()
+        {
+            bail!("staged tree has non-regular-blob entry: {path}");
+        }
+        expected.insert(path.to_string(), object.to_string());
+    }
+
+    let actual_paths = list_build_dir_files(build_dir)?;
+
+    // No extra files (e.g. export-ignored files that somehow appeared, or
+    // same-user poisoning of the build directory between transactions).
+    for path in &actual_paths {
+        if !expected.contains_key(path) {
+            bail!("build directory contains unaudited file: {path}");
+        }
+    }
+
+    // No missing files (e.g. export-ignore silently dropped a tracked file).
+    for path in expected.keys() {
+        if !actual_paths.iter().any(|a| a == path) {
+            bail!("build directory missing audited file: {path}");
+        }
+    }
+
+    // Verify blob hashes: re-hash every extracted file and compare to the
+    // tree's blob hash. This catches export-subst substitution, tar quirks,
+    // and any other divergence between the archive and the true tree.
+    let hashes = git::hash_objects(build_dir, &actual_paths)?;
+    for (path, hash) in actual_paths.iter().zip(hashes.iter()) {
+        let expected_hash = expected
+            .get(path)
+            .with_context(|| format!("missing expected hash for {path}"))?;
+        if hash != expected_hash {
+            bail!(
+                "build directory file {path} hash mismatch: expected {expected_hash}, got {hash}"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -872,12 +966,14 @@ fn plan_makepkg(
     }
 
     let build_dir = paths.build_dir(pkgbase);
-    if read_build_sha(&build_dir).as_deref() != Some(staged_sha) {
-        materialize_build_dir(&source_repo, staged_sha, &build_dir)
-            .map_err(|error| format!("cannot materialize build tree for {pkgbase}: {error}"))?;
-        write_build_sha(&build_dir, staged_sha)
-            .map_err(|error| format!("cannot record build tree sha: {error}"))?;
-    }
+    // Always re-materialize. AUR trees are tiny (extraction is milliseconds),
+    // and re-materialization on every invocation prevents cross-package
+    // poisoning in a multi-package transaction: package A's PKGBUILD runs at
+    // source time and could pre-create B's build directory with a forged
+    // sentinel and poisoned PKGBUILD. The old sentinel-reuse path trusted
+    // a user-readable file without re-verifying the directory's contents.
+    materialize_build_dir(&source_repo, staged_sha, &build_dir)
+        .map_err(|error| format!("cannot materialize build tree for {pkgbase}: {error}"))?;
 
     let metadata = fs::metadata(makepkg).map_err(|_| "makepkg is unavailable".to_string())?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
@@ -1656,6 +1752,109 @@ mod tests {
     }
 
     #[test]
+    fn makepkg_guard_rejects_export_subst_divergence() {
+        // `git archive` honors `export-subst` from the tree's own .gitattributes,
+        // substituting $Format:...$ placeholders with commit metadata. The
+        // audited blob sees the raw placeholder; the extracted build dir sees
+        // substituted text. Post-extraction hash verification must catch this.
+        let fixture = GuardFixture::new();
+        fs::write(
+            fixture.repo.join(".gitattributes"),
+            "PKGBUILD export-subst\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.repo.join("PKGBUILD"),
+            "pkgname=guard-pkg\npkgver=1\npkgrel=1\n# $Format:%H$\n",
+        )
+        .unwrap();
+        fixture.git(&["add", ".gitattributes", "PKGBUILD"]);
+        fixture.git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "export-subst",
+        ]);
+        let sha = fixture.git(&["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.paths.staged_file("guard-pkg"),
+            format!("{sha}\t2026-01-01T00:00:00Z\thttps://aur.archlinux.org/guard-pkg.git\n"),
+        )
+        .unwrap();
+        let err = fixture.prepare(&[]).unwrap_err();
+        assert!(
+            err.contains("does not match the audited tree")
+                || err.contains("hash mismatch")
+                || err.contains("unaudited file"),
+            "export-subst divergence must be caught: {err}"
+        );
+    }
+
+    #[test]
+    fn makepkg_guard_rejects_export_ignore_missing_files() {
+        // `git archive` honors `export-ignore` from .gitattributes, silently
+        // dropping files from the archive. The ls-tree check passes (all
+        // regular blobs), but the build dir is missing a file. Post-extraction
+        // verification must catch this.
+        let fixture = GuardFixture::new();
+        fs::write(fixture.repo.join("helper.sh"), "payload\n").unwrap();
+        fs::write(
+            fixture.repo.join(".gitattributes"),
+            "helper.sh export-ignore\n",
+        )
+        .unwrap();
+        fixture.git(&["add", "helper.sh", ".gitattributes", "PKGBUILD", ".SRCINFO"]);
+        fixture.git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "export-ignore",
+        ]);
+        let sha = fixture.git(&["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.paths.staged_file("guard-pkg"),
+            format!("{sha}\t2026-01-01T00:00:00Z\thttps://aur.archlinux.org/guard-pkg.git\n"),
+        )
+        .unwrap();
+        let err = fixture.prepare(&[]).unwrap_err();
+        assert!(
+            err.contains("does not match the audited tree")
+                || err.contains("missing audited file")
+                || err.contains("unaudited file"),
+            "export-ignore divergence must be caught: {err}"
+        );
+    }
+
+    #[test]
+    fn makepkg_guard_rejects_poisoned_build_dir() {
+        // In a multi-package transaction, package A's PKGBUILD (arbitrary user
+        // code at source time) can pre-create B's build directory with a
+        // poisoned PKGBUILD. Always re-materializing and verifying blob hashes
+        // must catch this, even if the sentinel matches.
+        let fixture = GuardFixture::new();
+        let build_dir = fixture.paths.build_dir("guard-pkg");
+        fs::create_dir_all(&build_dir).unwrap();
+        fs::write(
+            build_dir.join("PKGBUILD"),
+            "pkgname=guard-pkg\npkgver=1\npkgrel=1\n# POISONED\n",
+        )
+        .unwrap();
+        fs::write(build_dir.join(".SRCINFO"), "pkgbase = guard-pkg\n").unwrap();
+        let plan = fixture.prepare(&[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(plan.build_dir.join("PKGBUILD")).unwrap(),
+            "pkgname=guard-pkg\npkgver=1\npkgrel=1\n",
+            "poisoned build dir must be overwritten by fresh materialization"
+        );
+    }
+
+    #[test]
     fn makepkg_guard_packagelist_does_not_force_build_flags() {
         let fixture = GuardFixture::new();
         let plan = fixture.prepare(&["--packagelist"]).unwrap();
@@ -1676,6 +1875,7 @@ mod tests {
         assert!(unsafe_makepkg_arg("--skipchecksums"));
         assert!(unsafe_makepkg_arg("--dir=/tmp"));
         assert!(unsafe_makepkg_arg("--config=x"));
+        assert!(unsafe_makepkg_arg("--install"));
         assert!(unsafe_makepkg_arg("-De")); // cluster with e
         assert!(unsafe_makepkg_arg("-R"));
         assert!(unsafe_makepkg_arg("-i")); // install with pacman

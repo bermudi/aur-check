@@ -56,23 +56,51 @@ impl RpcClient for CurlRpc {
     fn info(&self, pkg: &str) -> Result<String> {
         let endpoint = format!("{}/rpc/v5/info", self.aur_url);
         let arg = format!("arg[]={pkg}");
-        let out = std::process::Command::new(&self.curl_path)
-            .args([
-                "-sG",
-                "--connect-timeout",
-                "3",
-                "--max-time",
-                "8",
-                &endpoint,
-                "--data-urlencode",
-                &arg,
-            ])
-            .output()?;
+        // ETXTBSY can occur when a test fixture writes a script and execs it
+        // immediately, or when the curl binary is being replaced on disk
+        // (e.g. a parallel package update). Retry a few times before failing.
+        let out = retry_on_textfilebusy(|| {
+            std::process::Command::new(&self.curl_path)
+                .args([
+                    "-sG",
+                    "--connect-timeout",
+                    "3",
+                    "--max-time",
+                    "8",
+                    &endpoint,
+                    "--data-urlencode",
+                    &arg,
+                ])
+                .output()
+        })?;
         if !out.status.success() {
             bail!("AUR RPC request failed");
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+fn retry_on_textfilebusy<F>(mut f: F) -> std::io::Result<std::process::Output>
+where
+    F: FnMut() -> std::io::Result<std::process::Output>,
+{
+    // ETXTBSY (raw OS error 26 on Linux) occurs when a test fixture writes a
+    // script and execs it immediately, or when the curl binary is being
+    // replaced on disk. `ErrorKind::TextFileBusy` is not stable, so check the
+    // raw error code.
+    const ETXTBSY: i32 = 26;
+    let mut last_err = None;
+    for _ in 0..5 {
+        match f() {
+            Ok(out) => return Ok(out),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("retry loop exhausted")))
 }
 
 /// Resolve pkgname → pkgbase. Returns the pkgbase on success; errors on RPC

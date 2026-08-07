@@ -62,10 +62,14 @@ pinned pacman/git/gpg/sudo programs, fixed fresh-build flags, and the aur-gate
 binary as `--makepkg`. `cmd_makepkg` requires manifest membership and a valid
 staged SHA, then materializes the exact audited tree into a private build
 directory (`~/.cache/aur-gate/build/<pkgbase>/`) using `git archive <staged_sha>`
-and `tar -x`. It runs real `makepkg` in that directory with `PKGDEST` pointing
-back at the helper checkout, so package discovery via `makepkg --packagelist`
-finds the built artifacts. The helper checkout's index, worktree, refs, and HEAD
-are not used for the build surface.
+and `tar -x`. The build directory is re-materialized on every invocation (no
+sentinel reuse). Post-extraction verification re-hashes every file with
+`git hash-object` and compares to `git ls-tree -r -z <staged_sha>`, catching
+`export-subst`/`export-ignore` divergence and any extra or missing files. It
+runs real `makepkg` in that directory with `PKGDEST` pointing back at the helper
+checkout, so package discovery via `makepkg --packagelist` finds the built
+artifacts. The helper checkout's index, worktree, refs, and HEAD are not used
+for the build surface.
 
 ## Gate paths
 

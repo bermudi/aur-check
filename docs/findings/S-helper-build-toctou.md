@@ -37,19 +37,23 @@ directory at `~/.cache/aur-gate/build/<pkgbase>/` using `git archive <staged_sha
 helper checkout. The helper checkout's `HEAD`, index, worktree, and refs are not
 used as the build surface, so a moved branch, dirty tree, staged changes,
 `skip-worktree`/`assume-unchanged` flags, or untracked files cannot influence the
-build. The build directory is private to the current transaction and swept at
-`begin`, `accept`, and `abort` boundaries.
+build. The build directory is re-materialized on every invocation (no sentinel
+reuse, preventing cross-package poisoning in multi-package transactions) and is
+swept at `begin`, `accept`, and `abort` boundaries. Post-extraction verification
+re-hashes every file with `git hash-object` and compares to `git ls-tree -r -z
+<staged_sha>`, catching `export-subst`/`export-ignore` divergence and any extra
+or missing files.
 
 The wrapper injects yay `--rebuildall --nomakepkgconf` or paru
 `--rebuild=all --nochroot --nolocalrepo`, replaces persisted helper mflags with
 the fixed safe set `--cleanbuild --force`, and rejects caller-supplied
 rebuild/custom makepkg/mflags/build-context options. The adapter rejects
 artifact-reuse, integrity-skip, alternate-directory, PKGBUILD, and config modes.
-`--cleanbuild --force` are still enforced for build calls, while read-only
-metadata calls such as `makepkg --packagelist` pass through without the build
-flags. Package discovery works because `PKGDEST` points at the helper checkout,
-so `makepkg --packagelist` returns the absolute paths where the built packages
-will land. Missing state also prevents a helper-discovered transitive AUR
+`--cleanbuild --force` are enforced for build calls; `makepkg --packagelist` (the
+only read-only metadata call the helpers use for package discovery) passes
+through without the build flags. Package discovery works because `PKGDEST` points
+at the helper checkout, so `makepkg --packagelist` returns the absolute paths
+where the built packages will land. Missing state also prevents a helper-discovered transitive AUR
 dependency from building without an audit. The transaction lock remains in the
 parent wrapper, but its fd and capability environment are removed from the
 untrusted helper.

@@ -157,7 +157,8 @@ impl Paths {
             if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let _ = fs::remove_dir_all(e.path());
+            fs::remove_dir_all(e.path())
+                .with_context(|| format!("remove stale build directory {}", e.path().display()))?;
         }
         Ok(())
     }
