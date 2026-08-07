@@ -604,7 +604,13 @@ pub fn cmd_explain(app: &mut App, pkg_arg: Option<&str>) -> i32 {
         "whole-file-review" => {
             "The missing-cache fallback stashed whole-file scan content for human review."
         }
+        "whole-file-hard" => {
+            "The missing-cache whole-file fallback matched a hard block."
+        }
         "baseline-recovery-whole-review" => "The missing-cache gate reconstructed an attacker-retained history baseline; this is the whole candidate, required for human review.",
+        "baseline-recovery-whole-hard" => {
+            "The missing-cache gate reconstructed an attacker-retained history baseline and the whole candidate matched a hard block."
+        }
         "audit-hard" => "The explicit-install audit hard-blocked this whole candidate before staging.",
         "audit-review" => {
             "The explicit-install audit scanned the whole candidate and stashed it for human review."

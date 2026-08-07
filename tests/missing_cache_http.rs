@@ -77,6 +77,13 @@ fn missing_cache_http_baseline_hard_delta_blocks_without_staging() {
         shas[0],
         "accepted must remain A"
     );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.context")))
+            .unwrap()
+            .trim(),
+        "hard",
+        "delta hard-fail must be stashed with the hard context"
+    );
 }
 
 fn missing_cache_http_baseline_whole_candidate_hard_blocks_without_staging() {
@@ -111,6 +118,13 @@ fn missing_cache_http_baseline_whole_candidate_hard_blocks_without_staging() {
             .unwrap()
             .contains("npm install evil")
     );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.context")))
+            .unwrap()
+            .trim(),
+        "baseline-recovery-whole-hard",
+        "baseline-recovery hard-fail must use the hard-specific context"
+    );
 }
 
 fn missing_cache_http_no_baseline_hard_blocks_without_staging() {
@@ -139,6 +153,13 @@ fn missing_cache_http_no_baseline_hard_blocks_without_staging() {
         fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.diff")))
             .unwrap()
             .contains("npm install evil")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.state.join(format!("flag.{pkgbase}.context")))
+            .unwrap()
+            .trim(),
+        "whole-file-hard",
+        "whole-file hard-fail must use the hard-specific context"
     );
 }
 

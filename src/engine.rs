@@ -498,31 +498,33 @@ impl<'a> App<'a> {
                 }
                 // rc 0 or 2: retained history is attacker-controlled → replace the
                 // delta stash with whole-candidate evidence before consent.
-                let review_result = (|| -> Result<WholeScan> {
-                    let scan = self.scan_whole_pkg(&dir, &scan_sha)?;
-                    state::stash_content(
-                        &self.paths,
-                        pkg,
-                        "baseline-recovery-whole-review",
-                        &scan.content,
-                    )?;
-                    Ok(scan)
-                })();
-                if let Err(error) = fs::remove_dir_all(&temp_root) {
-                    self.reporter.dim(&format!(
-                        "(could not remove temporary clone {}: {error})",
-                        temp_root.display()
-                    ));
-                }
-                let scan = match review_result {
-                    Ok(scan) => scan,
+                let scan = match self.scan_whole_pkg(&dir, &scan_sha) {
+                    Ok(s) => s,
                     Err(error) => {
+                        let _ = fs::remove_dir_all(&temp_root);
                         self.reporter.review_msg(&format!(
                             "{pkg} — could not persist whole-candidate review: {error:#}"
                         ));
                         return 1;
                     }
                 };
+                let whole_context = if scan.hard_hits {
+                    "baseline-recovery-whole-hard"
+                } else {
+                    "baseline-recovery-whole-review"
+                };
+                if state::stash_content(&self.paths, pkg, whole_context, &scan.content).is_err() {
+                    let _ = fs::remove_dir_all(&temp_root);
+                    self.reporter
+                        .review_msg(&format!("{pkg} — could not persist whole-candidate review"));
+                    return 1;
+                }
+                if let Err(error) = fs::remove_dir_all(&temp_root) {
+                    self.reporter.dim(&format!(
+                        "(could not remove temporary clone {}: {error})",
+                        temp_root.display()
+                    ));
+                }
                 if scan.hard_hits {
                     self.reporter.review_msg(&format!(
                         "{pkg} — hard rule hit(s) in whole candidate; refusing candidate"
@@ -570,8 +572,13 @@ impl<'a> App<'a> {
                 return 1;
             }
         };
+        let whole_context = if scan.hard_hits {
+            "whole-file-hard"
+        } else {
+            "whole-file-review"
+        };
         let _ = fs::remove_dir_all(&temp_root);
-        if state::stash_content(&self.paths, pkg, "whole-file-review", &scan.content).is_err() {
+        if state::stash_content(&self.paths, pkg, whole_context, &scan.content).is_err() {
             self.reporter
                 .review_msg(&format!("{pkg} — could not persist the review scan"));
             return 1;
