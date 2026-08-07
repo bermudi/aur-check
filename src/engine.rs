@@ -388,37 +388,10 @@ impl<'a> App<'a> {
             return 1;
         };
 
-        // No changes vs accepted ref => clean (assert git exit code).
-        let range = format!("{base_ref}..{candidate_sha}");
-        let Ok(changes) = git::safe_git(Some(&dir), &["diff", "--name-only", &range]) else {
-            self.reporter.review_msg(&format!(
-                "{pkg} — could not diff vs accepted ref (corrupt baseline?)"
-            ));
-            return 1;
-        };
-        if !changes.status.success() {
-            self.reporter.review_msg(&format!(
-                "{pkg} — could not diff vs accepted ref (corrupt baseline?)"
-            ));
-            return 1;
-        }
-        if String::from_utf8_lossy(&changes.stdout).trim().is_empty() {
-            if let Err(error) =
-                git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
-            {
-                self.reporter.review_msg(&format!(
-                    "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
-                ));
-                return 1;
-            }
-            self.reporter.dim(&format!(
-                "ok    {pkg} — no source changes (version bump only?)"
-            ));
-            return 0;
-        }
-
-        // Shared diff pipeline. Staging stays HERE (cached path stages via the
-        // cache dir). On hard-fail (1) do NOT stage.
+        // Shared diff pipeline. Empty diffs are classified as boring but still
+        // run through the normal staging path so the makepkg guard has a record
+        // to bind against; this also runs candidate-surface validation, which
+        // the previous early-return path used to skip.
         let rc = self.with_ctx(&candidate_sha, |ctx| {
             classifier::scan_diff_rules(ctx, pkg, &dir, &base_ref)
         });
