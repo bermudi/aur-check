@@ -104,6 +104,7 @@ pub struct Paths {
     pub state_dir: PathBuf,
     pub accepted_dir: PathBuf,
     pub staged_dir: PathBuf,
+    pub build_base: PathBuf,
     pub manifest_file: PathBuf,
 }
 
@@ -112,6 +113,7 @@ impl Paths {
         Paths {
             accepted_dir: state_dir.join("accepted"),
             staged_dir: state_dir.join("staged"),
+            build_base: state_dir.join("build"),
             manifest_file: state_dir.join("last-gate"),
             state_dir,
         }
@@ -121,6 +123,7 @@ impl Paths {
         secure_private_dir(&self.state_dir)?;
         secure_private_dir(&self.accepted_dir)?;
         secure_private_dir(&self.staged_dir)?;
+        secure_private_dir(&self.build_base)?;
         for file in [&self.manifest_file, &self.state_dir.join("run.lock")] {
             reject_unsafe_existing_file(file)?;
         }
@@ -133,6 +136,9 @@ impl Paths {
     pub fn staged_file(&self, pkgbase: &str) -> PathBuf {
         self.staged_dir.join(pkgbase)
     }
+    pub fn build_dir(&self, pkgbase: &str) -> PathBuf {
+        self.build_base.join(pkgbase)
+    }
     pub fn flag_diff(&self, pkg: &str) -> PathBuf {
         self.state_dir.join(format!("flag.{pkg}.diff"))
     }
@@ -140,7 +146,25 @@ impl Paths {
         self.state_dir.join(format!("flag.{pkg}.context"))
     }
 
+    /// Remove all per-pkgbase build directories. Called at transaction
+    /// boundaries so a stale or crashed transaction's private build trees do
+    /// not leak into the next transaction.
+    pub fn sweep_build_dirs(&self) -> Result<()> {
+        let Ok(entries) = fs::read_dir(&self.build_base) else {
+            return Ok(());
+        };
+        for e in entries.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let _ = fs::remove_dir_all(e.path());
+        }
+        Ok(())
+    }
+
     pub fn reset_manifest(&self) -> Result<()> {
+        self.sweep_build_dirs()
+            .context("sweep stale build directories")?;
         reject_unsafe_existing_file(&self.manifest_file)?;
         let file = OpenOptions::new()
             .create(true)
@@ -517,7 +541,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(temp.path().join("state"));
         paths.ensure_dirs().unwrap();
-        for dir in [&paths.state_dir, &paths.accepted_dir, &paths.staged_dir] {
+        for dir in [
+            &paths.state_dir,
+            &paths.accepted_dir,
+            &paths.staged_dir,
+            &paths.build_base,
+        ] {
             assert_eq!(fs::symlink_metadata(dir).unwrap().mode() & 0o777, 0o700);
         }
 

@@ -58,6 +58,7 @@ fn assert_transaction_events(fixture: &Fixture, helper: &str) {
             &format!("helper:{helper}:start"),
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
             &format!("helper:{helper}:install"),
             &format!("helper:{helper}:end:0"),
             "cli:accept:start",
@@ -297,7 +298,7 @@ fn wrapper_zsh_paru_transaction_accepts_exact_audited_tip() {
     assert_transaction_events(&fixture, "paru");
 }
 
-fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
+fn wrapper_window_commit_builds_staged_sha_not_helper_head() {
     let pkgbase = "gatepkg";
     let rpc_json = format!(
         r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
@@ -322,21 +323,25 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
             ("AUR_GATE_WINDOW_COMMIT", "1"),
         ],
     );
-    assert_ne!(rc, 0, "window-commit must fail the wrapper transaction");
+    assert_eq!(rc, 0, "window-commit must not fail the wrapper transaction");
 
-    // Accepted must remain A.
+    // Accepted advances to the staged SHA, not the helper's moved HEAD.
     assert_eq!(
-        fixture.read_accepted(pkgbase).unwrap().trim(),
-        shas[0],
-        "accepted must not advance after window commit"
+        fixture
+            .read_accepted(pkgbase)
+            .unwrap()
+            .trim()
+            .split('\t')
+            .next()
+            .unwrap(),
+        shas[1],
+        "accepted must advance to the staged SHA"
     );
 
-    // Staged SHA remains B (accept skipped promotion, only rotated manifest).
-    let staged = fixture
-        .read_staged(pkgbase)
-        .expect("staged must remain after failed helper");
-    let staged_sha = staged.lines().next().unwrap().split('\t').next().unwrap();
-    assert_eq!(staged_sha, shas[1]);
+    assert!(
+        fixture.read_staged(pkgbase).is_none(),
+        "staged must be removed after accept"
+    );
     assert!(
         fixture.read_manifest().trim().is_empty(),
         "manifest rotated"
@@ -344,20 +349,27 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
 
     let helper = fixture.helper_log().expect("helper log");
     assert!(helper.get("window_commit").is_some());
-    assert!(
-        helper["guard_exit"].as_i64().unwrap() != 0,
-        "guard must fail on checkout mismatch"
+    assert_eq!(
+        helper["guard_exit"].as_i64().unwrap(),
+        0,
+        "guard must succeed despite a moved HEAD"
     );
+
+    let makepkg = fixture.makepkg_log().expect("makepkg log");
+    let pkgbuild = makepkg["pkgbuild"].as_str().expect("makepkg pkgbuild");
     assert!(
-        fixture.makepkg_log().is_none(),
-        "makepkg must not run when guard rejects the checkout"
+        !pkgbuild.contains("window commit marker"),
+        "private build tree must be the staged commit, not the helper's moved HEAD"
     );
 
     assert_helper_caps(&helper);
 
-    // No fresh install evidence.
+    // Fresh install evidence reflects the staged package.
     let rec = pacman.find_record(pkgbase).expect("pacman record");
-    assert_eq!(rec.version, "1-1", "installed version must remain A");
+    assert_eq!(
+        rec.version, "2-1",
+        "installed version must match the staged package"
+    );
     assert_eq!(
         fixture.events(),
         [
@@ -369,12 +381,14 @@ fn wrapper_window_commit_never_executes_makepkg_or_advances_anchor() {
             "cli:gate:end:0",
             "helper:yay:start",
             "cli:makepkg-guard:start",
-            "cli:makepkg-guard:end:1",
-            "helper:yay:end:1",
-            "cli:abort:start",
-            "cli:abort:end:0",
+            "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
+            "helper:yay:install",
+            "helper:yay:end:0",
+            "cli:accept:start",
+            "cli:accept:end:0",
         ],
-        "a rejected checkout must skip real makepkg but still reach accept"
+        "a moved HEAD must not stop the staged SHA from being built and accepted"
     );
 }
 
@@ -456,8 +470,8 @@ static TESTS: &[(&str, fn())] = &[
         wrapper_zsh_paru_transaction_accepts_exact_audited_tip,
     ),
     (
-        "wrapper_window_commit_never_executes_makepkg_or_advances_anchor",
-        wrapper_window_commit_never_executes_makepkg_or_advances_anchor,
+        "wrapper_window_commit_builds_staged_sha_not_helper_head",
+        wrapper_window_commit_builds_staged_sha_not_helper_head,
     ),
     (
         "wrapper_dispatch_rejects_pacman_context_dirs",

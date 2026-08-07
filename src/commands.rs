@@ -5,11 +5,10 @@
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 
 use crate::engine::App;
 use crate::git;
@@ -709,9 +708,9 @@ fn unsafe_makepkg_arg(arg: &str) -> bool {
             return true;
         }
     }
-    // Short cluster containing D/R/e/o/p (context-switching flags).
+    // Short cluster containing D/R/e/i/o/p (context-switching flags).
     if let Some(rest) = arg.strip_prefix('-') {
-        if !rest.starts_with('-') && rest.chars().any(|c| "DReop".contains(c)) {
+        if !rest.starts_with('-') && rest.chars().any(|c| "DReiop".contains(c)) {
             return true;
         }
     }
@@ -729,27 +728,93 @@ const CAPABILITY_ENV: &[&str] = &[
 struct MakepkgPlan {
     program: PathBuf,
     args: Vec<String>,
+    build_dir: PathBuf,
+    pkgdest: PathBuf,
 }
 
 impl MakepkgPlan {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
-        command.args(&self.args);
+        command
+            .current_dir(&self.build_dir)
+            .env("PKGDEST", &self.pkgdest)
+            .args(&self.args);
         for variable in CAPABILITY_ENV {
             command.env_remove(variable);
         }
         command
     }
+
+    fn run(&self) -> std::io::Result<std::process::ExitStatus> {
+        self.command().status()
+    }
 }
 
-fn prepare_makepkg(
+const BUILD_SHA_SENTINEL: &str = ".aur-gate-build-sha";
+
+/// Materialize the exact audited tree into a private build directory. Git
+/// `archive` emits a tar stream from the content-addressed object store, and
+/// `tar -x` expands it into `build_dir`. The helper's index, worktree, refs, and
+/// local config are not consulted; only the immutable objects at `sha` are.
+fn materialize_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Result<()> {
+    if build_dir.exists() {
+        fs::remove_dir_all(build_dir).context("remove stale build directory")?;
+    }
+    fs::create_dir_all(build_dir).context("create build directory")?;
+    let mut permissions = fs::metadata(build_dir)
+        .context("stat build directory")?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(build_dir, permissions).context("set build directory permissions")?;
+
+    let mut git = git::safe_git_command(Some(source_repo), &["archive", "--format=tar", sha])
+        .context("prepare git archive")?
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn git archive")?;
+    let git_stdout = git.stdout.take().context("git archive stdout")?;
+
+    let tar = Command::new("/usr/bin/tar")
+        .arg("-x")
+        .arg("-C")
+        .arg(build_dir)
+        .stdin(git_stdout)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn tar extraction")?;
+
+    let tar_out = tar.wait_with_output().context("tar extraction")?;
+    let git_out = git.wait_with_output().context("git archive")?;
+
+    if !git_out.status.success() {
+        bail!("git archive failed for {sha}");
+    }
+    if !tar_out.status.success() {
+        let err = String::from_utf8_lossy(&tar_out.stderr);
+        bail!("tar extraction failed: {err}");
+    }
+    Ok(())
+}
+
+fn read_build_sha(build_dir: &Path) -> Option<String> {
+    fs::read_to_string(build_dir.join(BUILD_SHA_SENTINEL))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn write_build_sha(build_dir: &Path, sha: &str) -> Result<()> {
+    let path = build_dir.join(BUILD_SHA_SENTINEL);
+    fs::write(&path, format!("{sha}\n")).context("write build sha sentinel")?;
+    Ok(())
+}
+
+fn plan_makepkg(
     paths: &state::Paths,
     cwd: &Path,
     args: &[String],
     active_transaction: bool,
     makepkg: &Path,
-    aur_url: &str,
-    branch: &str,
 ) -> std::result::Result<MakepkgPlan, String> {
     if !active_transaction {
         return Err("no active audited transaction".into());
@@ -757,11 +822,13 @@ fn prepare_makepkg(
     if let Some(arg) = args.iter().find(|arg| unsafe_makepkg_arg(arg)) {
         return Err(format!("unsafe build mode/context '{arg}'"));
     }
-    // A helper/build may have poisoned this checkout after the audit. Reset
-    // before even asking Git for the worktree root; no old local config is
-    // evidence for that lookup.
+
+    // Purge object-view substitution artifacts in the helper checkout before any
+    // Git call reads from the object store. This does not restore the helper's
+    // remote; the materialization below resolves by immutable SHA, not by ref.
     git::reset_local_config(cwd, None, None)
-        .map_err(|error| format!("cannot reset checkout Git config: {error}"))?;
+        .map_err(|error| format!("cannot sanitize helper checkout Git config: {error}"))?;
+
     let top_out = git::safe_git(Some(cwd), &["rev-parse", "--show-toplevel"])
         .map_err(|_| "build directory is not a git checkout".to_string())?;
     if !top_out.status.success() {
@@ -769,8 +836,8 @@ fn prepare_makepkg(
     }
     let top_text = std::str::from_utf8(&top_out.stdout)
         .map_err(|_| "git checkout path is not UTF-8".to_string())?;
-    let top = PathBuf::from(top_text.trim());
-    let pkgbase = top
+    let source_repo = PathBuf::from(top_text.trim());
+    let pkgbase = source_repo
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| valid_pkg_name(name))
@@ -794,71 +861,45 @@ fn prepare_makepkg(
     if !is_object_id(staged_sha) {
         return Err(format!("malformed staged ref for {pkgbase}"));
     }
-    let expected_url = format!("{aur_url}/{pkgbase}.git");
-    git::reset_local_config(&top, Some(&expected_url), Some(branch))
-        .map_err(|error| format!("cannot generate checkout Git config: {error}"))?;
-    let head_out = git::safe_git_with_origin(
-        Some(&top),
-        &["rev-parse", "--verify", "HEAD"],
-        &expected_url,
-        branch,
-    )
-    .map_err(|_| format!("cannot resolve HEAD for {pkgbase}"))?;
-    if !head_out.status.success() {
-        return Err(format!("cannot resolve HEAD for {pkgbase}"));
-    }
-    let head = String::from_utf8_lossy(&head_out.stdout).trim().to_owned();
-    if head != staged_sha {
-        return Err(format!(
-            "{pkgbase} checkout changed after audit; rerun yay/paru"
-        ));
-    }
-    // The remote was needed only to validate this checkout's origin. The rest
-    // of the makepkg guard uses the static generated config contract.
-    git::reset_local_config(&top, None, None)
-        .map_err(|error| format!("cannot remove transient remote config: {error}"))?;
+
     if !matches!(
-        crate::classifier::package_surfaces_are_regular(&top, "HEAD"),
+        crate::classifier::package_surfaces_are_regular(&source_repo, staged_sha),
         Ok(true)
     ) {
         return Err(format!(
             "{pkgbase} has missing or symlinked package surfaces"
         ));
     }
-    let clean_wt = git::safe_git(Some(&top), &["diff", "--quiet", "HEAD", "--"])
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    let clean_idx = git::safe_git(Some(&top), &["diff", "--cached", "--quiet", "HEAD", "--"])
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !(clean_wt && clean_idx) {
-        return Err(format!("tracked files changed after audit for {pkgbase}"));
+
+    let build_dir = paths.build_dir(pkgbase);
+    if read_build_sha(&build_dir).as_deref() != Some(staged_sha) {
+        materialize_build_dir(&source_repo, staged_sha, &build_dir)
+            .map_err(|error| format!("cannot materialize build tree for {pkgbase}: {error}"))?;
+        write_build_sha(&build_dir, staged_sha)
+            .map_err(|error| format!("cannot record build tree sha: {error}"))?;
     }
-    let untracked = git::safe_git(Some(&top), &["ls-files", "--others", "-z", "--"])
-        .map_err(|_| format!("cannot inspect untracked files for {pkgbase}"))?;
-    if !untracked.status.success() {
-        return Err(format!("cannot inspect untracked files for {pkgbase}"));
-    }
-    if !untracked.stdout.is_empty() {
-        return Err(format!(
-            "untracked files are present for {pkgbase}; clean the helper checkout and retry"
-        ));
-    }
+
     let metadata = fs::metadata(makepkg).map_err(|_| "makepkg is unavailable".to_string())?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err("makepkg is unavailable or not executable".into());
     }
 
-    // Preserve the helper checkout's canonical remote after the guard's
-    // static-contract checks; yay/paru may still need it after makepkg.
-    git::reset_local_config(&top, Some(&expected_url), Some(branch))
-        .map_err(|error| format!("cannot restore helper Git remote: {error}"))?;
-
-    let mut planned_args = vec!["--cleanbuild".to_owned(), "--force".to_owned()];
+    let is_readonly = args.iter().any(|arg| arg == "--packagelist");
+    let mut planned_args = Vec::with_capacity(args.len() + 2);
+    if !is_readonly {
+        for &flag in &["--cleanbuild", "--force"] {
+            if !args.iter().any(|arg| arg == flag) {
+                planned_args.push(flag.to_owned());
+            }
+        }
+    }
     planned_args.extend_from_slice(args);
+
     Ok(MakepkgPlan {
         program: makepkg.to_owned(),
         args: planned_args,
+        build_dir,
+        pkgdest: cwd.to_path_buf(),
     })
 }
 
@@ -874,25 +915,21 @@ pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
             return 1;
         }
     };
-    let plan = match prepare_makepkg(
-        &app.paths,
-        &cwd,
-        args,
-        active,
-        &app.makepkg_path,
-        &app.aur_url,
-        &app.branch,
-    ) {
+    let plan = match plan_makepkg(&app.paths, &cwd, args, active, &app.makepkg_path) {
         Ok(plan) => plan,
         Err(error) => {
             app.reporter.review_msg(&format!("makepkg guard: {error}"));
             return 1;
         }
     };
-    let error = plan.command().exec();
-    app.reporter
-        .review_msg(&format!("makepkg guard: exec failed: {error}"));
-    1
+    match plan.run() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            app.reporter
+                .review_msg(&format!("makepkg guard: failed to run makepkg: {error}"));
+            1
+        }
+    }
 }
 
 // --- review UI ----------------------------------------------------------------
@@ -1417,14 +1454,12 @@ mod tests {
         }
 
         fn prepare(&self, args: &[&str]) -> std::result::Result<MakepkgPlan, String> {
-            prepare_makepkg(
+            plan_makepkg(
                 &self.paths,
                 &self.repo,
                 &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
                 true,
                 &self.makepkg,
-                "https://aur.archlinux.org",
-                "master",
             )
         }
 
@@ -1453,6 +1488,8 @@ mod tests {
             plan.args,
             ["--cleanbuild", "--force", "--syncdeps", "--noconfirm"]
         );
+        assert_eq!(plan.pkgdest, fixture.repo);
+        assert!(plan.build_dir.starts_with(&fixture.paths.build_base));
         let command = plan.command();
         let env: Vec<_> = command.get_envs().collect();
         for variable in CAPABILITY_ENV {
@@ -1460,22 +1497,23 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == variable && value.is_none()));
         }
+        assert!(env.iter().any(|(key, value)| {
+            *key == "PKGDEST" && value.map(|v| v == fixture.repo).unwrap_or(false)
+        }));
+
+        // The private build dir materialized the staged tree, not the repo.
+        assert!(plan.build_dir.join("PKGBUILD").is_file());
+        assert!(plan.build_dir.join(".SRCINFO").is_file());
     }
 
     #[test]
     fn makepkg_guard_rejects_transaction_and_state_mismatches() {
         let fixture = GuardFixture::new();
-        assert!(prepare_makepkg(
-            &fixture.paths,
-            &fixture.repo,
-            &[],
-            false,
-            &fixture.makepkg,
-            "https://aur.archlinux.org",
-            "master",
-        )
-        .unwrap_err()
-        .contains("no active"));
+        assert!(
+            plan_makepkg(&fixture.paths, &fixture.repo, &[], false, &fixture.makepkg,)
+                .unwrap_err()
+                .contains("no active")
+        );
         assert!(fixture
             .prepare(&["--repackage"])
             .unwrap_err()
@@ -1509,40 +1547,43 @@ mod tests {
     }
 
     #[test]
-    fn makepkg_guard_rejects_dirty_and_untracked_inputs() {
+    fn makepkg_guard_ignores_helper_worktree_changes() {
+        // With a private build checkout, the helper's dirty working tree,
+        // staged changes, and untracked files cannot affect the audited tree.
         let fixture = GuardFixture::new();
         fs::write(fixture.repo.join("PKGBUILD"), "pkgname=changed\n").unwrap();
-        assert!(fixture
-            .prepare(&[])
-            .unwrap_err()
-            .contains("tracked files changed"));
+        let plan = fixture.prepare(&[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(plan.build_dir.join("PKGBUILD")).unwrap(),
+            "pkgname=guard-pkg\npkgver=1\npkgrel=1\n"
+        );
 
         let fixture = GuardFixture::new();
         fs::write(fixture.repo.join("PKGBUILD"), "pkgname=changed\n").unwrap();
         fixture.git(&["add", "PKGBUILD"]);
-        assert!(fixture
-            .prepare(&[])
-            .unwrap_err()
-            .contains("tracked files changed"));
+        let plan = fixture.prepare(&[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(plan.build_dir.join("PKGBUILD")).unwrap(),
+            "pkgname=guard-pkg\npkgver=1\npkgrel=1\n"
+        );
 
         for name in ["evil.install", "source.tar.gz", "nested/arbitrary-name"] {
             let fixture = GuardFixture::new();
             let path = fixture.repo.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, "payload").unwrap();
-            assert!(
-                fixture
-                    .prepare(&[])
-                    .unwrap_err()
-                    .contains("untracked files"),
-                "{name}"
-            );
+            let plan = fixture.prepare(&[]).unwrap();
+            assert!(!plan.build_dir.join(name).exists(), "{name}");
         }
     }
 
     #[test]
-    fn makepkg_guard_rejects_moved_head_and_symlinked_surfaces() {
+    fn makepkg_guard_builds_staged_sha_not_helper_head() {
+        // If the helper's HEAD moved forward, the staged SHA is still in the
+        // object store, so the guard builds the audited tree rather than the
+        // helper's current tip.
         let fixture = GuardFixture::new();
+        let staged_content = fs::read_to_string(fixture.repo.join("PKGBUILD")).unwrap();
         fs::write(
             fixture.repo.join("PKGBUILD"),
             "pkgname=guard-pkg\npkgver=2\npkgrel=1\n",
@@ -1558,11 +1599,15 @@ mod tests {
             "-qm",
             "window-update",
         ]);
-        assert!(fixture
-            .prepare(&[])
-            .unwrap_err()
-            .contains("changed after audit"));
+        let plan = fixture.prepare(&[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(plan.build_dir.join("PKGBUILD")).unwrap(),
+            staged_content
+        );
+    }
 
+    #[test]
+    fn makepkg_guard_rejects_symlinked_staged_surfaces() {
         let fixture = GuardFixture::new();
         fs::remove_file(fixture.repo.join("PKGBUILD")).unwrap();
         std::os::unix::fs::symlink("outside", fixture.repo.join("PKGBUILD")).unwrap();
@@ -1589,6 +1634,43 @@ mod tests {
     }
 
     #[test]
+    fn makepkg_guard_ignores_index_flags() {
+        // `skip-worktree` and `assume-unchanged` index flags can make git trust
+        // working-tree bytes that differ from the staged tree. The private build
+        // checkout ignores both the index and the worktree.
+        for flag in ["--skip-worktree", "--assume-unchanged"] {
+            let fixture = GuardFixture::new();
+            fs::write(
+                fixture.repo.join("PKGBUILD"),
+                "pkgname=guard-pkg\npkgver=99\npkgrel=1\n",
+            )
+            .unwrap();
+            fixture.git(&["update-index", flag, "PKGBUILD"]);
+            let plan = fixture.prepare(&[]).unwrap();
+            assert_eq!(
+                fs::read_to_string(plan.build_dir.join("PKGBUILD")).unwrap(),
+                "pkgname=guard-pkg\npkgver=1\npkgrel=1\n",
+                "{flag} must not affect materialization"
+            );
+        }
+    }
+
+    #[test]
+    fn makepkg_guard_packagelist_does_not_force_build_flags() {
+        let fixture = GuardFixture::new();
+        let plan = fixture.prepare(&["--packagelist"]).unwrap();
+        assert!(
+            !plan.args.contains(&"--cleanbuild".into()),
+            "packagelist must not be forced into a clean build"
+        );
+        assert!(
+            !plan.args.contains(&"--force".into()),
+            "packagelist must not be forced into a rebuild"
+        );
+        assert_eq!(plan.pkgdest, fixture.repo);
+    }
+
+    #[test]
     fn makepkg_arg_guard() {
         assert!(unsafe_makepkg_arg("--repackage"));
         assert!(unsafe_makepkg_arg("--skipchecksums"));
@@ -1596,6 +1678,7 @@ mod tests {
         assert!(unsafe_makepkg_arg("--config=x"));
         assert!(unsafe_makepkg_arg("-De")); // cluster with e
         assert!(unsafe_makepkg_arg("-R"));
+        assert!(unsafe_makepkg_arg("-i")); // install with pacman
         assert!(!unsafe_makepkg_arg("--syncdeps"));
         assert!(!unsafe_makepkg_arg("--noconfirm"));
         assert!(!unsafe_makepkg_arg("--cleanbuild"));
