@@ -103,6 +103,8 @@ Status: ✓ fixed/closed · △ mitigated · ◷ open. Open findings link to the
 - ✓ **gh5** — Repo-local git config trusted; git invocation hardening incomplete (H1, #5) → [doc](gh5-git-invocation-hardening.md) · [#5](https://github.com/bermudi/aur-gate/issues/5)
 - ✓ **F** — Trust-anchor poisoning via attacker-crafted `.SRCINFO` → [doc](F-srcinfo-trust-anchor-poisoning.md)
 - △ **E** — IDN homograph `source=()` URL bypass → silent exit 0 (mitigated, review-level) → [doc](E-homograph-source-bypass.md)
+- ✓ **1** — `skip-worktree`/`assume-unchanged` poisoned index flags bypass working-tree checks → [doc](01-index-flag-poisoning.md)
+- ✓ **6** — Live `refs/` and symbolic `HEAD` re-resolve to a moved branch → [doc](06-symbolic-head-live-refs.md)
 - ✓ **S** — Helper can build a commit newer than the audited gate-time tip (TOCTOU) → [doc](S-helper-build-toctou.md)
 - ✓ **U** — PKGBUILD source-time execution auto-cleared as metadata → [doc](U-pkgbuild-source-time-execution-autoclear.md)
 
