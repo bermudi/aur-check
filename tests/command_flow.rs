@@ -591,6 +591,10 @@ static TESTS: &[(&str, fn())] = &[
         "cached_empty_diff_stages_the_candidate",
         cached_empty_diff_stages_the_candidate,
     ),
+    (
+        "cached_hard_fail_restores_helper_remote",
+        cached_hard_fail_restores_helper_remote,
+    ),
 ];
 
 fn cached_empty_diff_stages_the_candidate() {
@@ -668,6 +672,46 @@ fn cached_empty_diff_stages_the_candidate() {
         "empty diff must still stage the candidate SHA"
     );
     assert_eq!(fixture.read_manifest().trim(), pkgbase);
+}
+
+fn cached_hard_fail_restores_helper_remote() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+
+    // Version 2 adds an `install=` line, which is a hard-fail rule.
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[
+            ("1".into(), "".into()),
+            ("2".into(), "install=myhook\n".into()),
+        ],
+    );
+
+    // Clone the remote into the yay cache so the cached path is used.
+    let cache_dir = fixture.yay_cache.join(pkgbase);
+    let url = format!("{}/{pkgbase}.git", fixture.aur_url);
+    let status = Command::new("/usr/bin/git")
+        .args(["-c", "init.defaultBranch=master", "clone", "-q", "--", &url])
+        .arg(&cache_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
+    assert_eq!(rc, 1, "added install= line must hard-fail");
+
+    // The helper checkout must have its remote restored even on hard-fail.
+    let config = fs::read_to_string(cache_dir.join(".git/config")).unwrap();
+    assert!(
+        config.contains(r#"remote "origin""#),
+        "helper remote must be restored after a hard-fail gate"
+    );
 }
 
 fn main() {

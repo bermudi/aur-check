@@ -359,54 +359,67 @@ impl<'a> App<'a> {
             ));
             return 1;
         }
-        // Every reset purges stale replacement refs and grafts before this
-        // helper-facing handoff; safe_git and the helper environment retain
-        // their independent replacement/graft isolation for artifacts created
-        // after the reset.
-        let rev = format!("origin/{}", self.branch);
-        let candidate_sha = match git::safe_git(
-            Some(&dir),
-            &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
-        ) {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).trim().to_owned()
-            }
-            _ => {
-                self.reporter
-                    .review_msg(&format!("{pkg} — no {rev}; candidate unavailable"));
-                return 1;
-            }
-        };
-        if !is_object_id(&candidate_sha) {
-            self.reporter
-                .review_msg(&format!("{pkg} — candidate object id is malformed"));
-            return 1;
-        }
-        let Ok(base_ref) = state::accepted_ref(&self.paths, &dir, &pkgbase) else {
-            self.reporter
-                .review_msg(&format!("{pkg} — accepted ref is invalid or unavailable"));
-            return 1;
-        };
 
-        // Shared diff pipeline. Empty diffs are classified as boring but still
-        // run through the normal staging path so the makepkg guard has a record
-        // to bind against; this also runs candidate-surface validation, which
-        // the previous early-return path used to skip.
-        let rc = self.with_ctx(&candidate_sha, |ctx| {
-            classifier::scan_diff_rules(ctx, pkg, &dir, &base_ref)
-        });
-        match rc {
-            2 => {
-                if let Err(error) =
-                    git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
-                {
-                    self.reporter.review_msg(&format!(
-                        "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
-                    ));
+        // Resolve and classify the candidate. A single remote-restoration path
+        // at the end of this scope ensures the helper checkout always has its
+        // remote back, even on hard-fail and audit-unavailable exits.
+        let gate_result = (|| -> i32 {
+            // Every reset purges stale replacement refs and grafts before this
+            // helper-facing handoff; safe_git and the helper environment retain
+            // their independent replacement/graft isolation for artifacts created
+            // after the reset.
+            let rev = format!("origin/{}", self.branch);
+            let candidate_sha = match git::safe_git(
+                Some(&dir),
+                &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+            ) {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                }
+                _ => {
+                    self.reporter
+                        .review_msg(&format!("{pkg} — no {rev}; candidate unavailable"));
                     return 1;
                 }
-                if self.paths.flag_diff(pkg).is_file()
-                    && state::stage_scan_if_gating(
+            };
+            if !is_object_id(&candidate_sha) {
+                self.reporter
+                    .review_msg(&format!("{pkg} — candidate object id is malformed"));
+                return 1;
+            }
+            let Ok(base_ref) = state::accepted_ref(&self.paths, &dir, &pkgbase) else {
+                self.reporter
+                    .review_msg(&format!("{pkg} — accepted ref is invalid or unavailable"));
+                return 1;
+            };
+
+            // Shared diff pipeline. Empty diffs are classified as boring but still
+            // run through the normal staging path so the makepkg guard has a record
+            // to bind against; this also runs candidate-surface validation, which
+            // the previous early-return path used to skip.
+            let rc = self.with_ctx(&candidate_sha, |ctx| {
+                classifier::scan_diff_rules(ctx, pkg, &dir, &base_ref)
+            });
+            match rc {
+                2 => {
+                    if self.paths.flag_diff(pkg).is_file()
+                        && state::stage_scan_if_gating(
+                            &self.paths,
+                            self.staging,
+                            &pkgbase,
+                            &candidate_sha,
+                            &expected_url,
+                        )
+                        .is_err()
+                    {
+                        self.reporter
+                            .review_msg(&format!("{pkg} — could not persist staged audit state"));
+                        return 1;
+                    }
+                    2
+                }
+                0 => {
+                    if state::stage_scan_if_gating(
                         &self.paths,
                         self.staging,
                         &pkgbase,
@@ -414,40 +427,25 @@ impl<'a> App<'a> {
                         &expected_url,
                     )
                     .is_err()
-                {
-                    self.reporter
-                        .review_msg(&format!("{pkg} — could not persist staged audit state"));
-                    return 1;
+                    {
+                        self.reporter
+                            .review_msg(&format!("{pkg} — could not persist staged audit state"));
+                        return 1;
+                    }
+                    self.reporter.dim(&format!("ok    {pkg}"));
+                    0
                 }
-                2
+                _ => 1,
             }
-            0 => {
-                if let Err(error) =
-                    git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch))
-                {
-                    self.reporter.review_msg(&format!(
-                        "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
-                    ));
-                    return 1;
-                }
-                if state::stage_scan_if_gating(
-                    &self.paths,
-                    self.staging,
-                    &pkgbase,
-                    &candidate_sha,
-                    &expected_url,
-                )
-                .is_err()
-                {
-                    self.reporter
-                        .review_msg(&format!("{pkg} — could not persist staged audit state"));
-                    return 1;
-                }
-                self.reporter.dim(&format!("ok    {pkg}"));
-                0
-            }
-            _ => 1,
+        })();
+
+        if let Err(error) = git::reset_local_config(&dir, Some(&expected_url), Some(&self.branch)) {
+            self.reporter.review_msg(&format!(
+                "{pkg} — cannot restore cached Git remote; refusing helper: {error}"
+            ));
+            return 1;
         }
+        gate_result
     }
 
     // --- missing-cache two-tier pipeline -----------------------------------
