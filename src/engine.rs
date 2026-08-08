@@ -304,6 +304,11 @@ impl<'a> App<'a> {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
+        if !valid_pkg_name(&pkgbase) {
+            self.reporter
+                .review_msg(&format!("{pkg} — invalid pkgbase from cache directory"));
+            return 1;
+        }
 
         // First contact: no implicit HEAD seed — route through fresh-clone audit.
         let accepted = self.paths.accepted_file(&pkgbase);

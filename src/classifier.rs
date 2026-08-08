@@ -1881,6 +1881,8 @@ mod tests {
             dir,
             &["update-ref", "refs/remotes/origin/master", &candidate],
         );
+        crate::git::reset_local_config(dir, None, None).unwrap();
+
         assert_eq!(classify_repo(dir, &base), DiffClass::AuditUnavailable);
     }
 }

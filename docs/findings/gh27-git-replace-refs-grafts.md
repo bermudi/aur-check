@@ -3,7 +3,7 @@
 **Source:** adversarial review (Review 2 H7; Cohort 3), GitHub issue #27
 **Status:** fixed (2026-08-04)
 **Severity:** high
-**Lines:** `src/git.rs` (`safe_git_command`, `isolate_git_env`), `src/main.rs` (`isolate_process_environment`), `assets/wrapper.sh` (`_aur_gate_run_helper`)
+**Lines:** `src/git.rs` (`safe_git_command`, `isolate_git_env`, `reset_local_config`), `src/main.rs` (`isolate_process_environment`), `assets/wrapper.sh` (`_aur_gate_run_helper`)
 
 ## What happens
 

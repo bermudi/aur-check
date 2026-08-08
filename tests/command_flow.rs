@@ -711,10 +711,33 @@ fn cached_hard_fail_restores_helper_remote() {
     assert_eq!(rc, 1, "added install= line must hard-fail");
 
     // The helper checkout must have its remote restored even on hard-fail.
-    let config = fs::read_to_string(cache_dir.join(".git/config")).unwrap();
+    let url_out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&cache_dir)
+        .args(["config", "remote.origin.url"])
+        .output()
+        .unwrap();
+    assert!(url_out.status.success(), "remote.origin.url query failed");
+    assert_eq!(
+        String::from_utf8_lossy(&url_out.stdout).trim(),
+        url,
+        "helper remote URL must be restored after a hard-fail gate"
+    );
+
+    let fetch_out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&cache_dir)
+        .args(["config", "remote.origin.fetch"])
+        .output()
+        .unwrap();
     assert!(
-        config.contains(r#"remote "origin""#),
-        "helper remote must be restored after a hard-fail gate"
+        fetch_out.status.success(),
+        "remote.origin.fetch query failed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&fetch_out.stdout).trim(),
+        "+refs/heads/master:refs/remotes/origin/master",
+        "helper remote fetch refspec must target master after a hard-fail gate"
     );
 }
 

@@ -4,7 +4,9 @@
 
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -764,16 +766,16 @@ fn materialize_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Res
     if build_dir.exists() {
         fs::remove_dir_all(build_dir).context("remove stale build directory")?;
     }
-    fs::create_dir_all(build_dir).context("create build directory")?;
-    let mut permissions = fs::metadata(build_dir)
-        .context("stat build directory")?
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(build_dir, permissions).context("set build directory permissions")?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(build_dir)
+        .context("create build directory")?;
 
     let mut git = git::safe_git_command(Some(source_repo), &["archive", "--format=tar", sha])
         .context("prepare git archive")?
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .context("spawn git archive")?;
     let git_stdout = git.stdout.take().context("git archive stdout")?;
@@ -792,7 +794,8 @@ fn materialize_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Res
     let git_out = git.wait_with_output().context("git archive")?;
 
     if !git_out.status.success() {
-        bail!("git archive failed for {sha}");
+        let err = String::from_utf8_lossy(&git_out.stderr);
+        bail!("git archive failed for {sha}: {err}");
     }
     if !tar_out.status.success() {
         let err = String::from_utf8_lossy(&tar_out.stderr);
@@ -888,7 +891,11 @@ fn verify_build_dir(source_repo: &Path, sha: &str, build_dir: &Path) -> Result<(
     // Verify blob hashes: re-hash every extracted file and compare to the
     // tree's blob hash. This catches export-subst substitution, tar quirks,
     // and any other divergence between the archive and the true tree.
-    let hashes = git::hash_objects(build_dir, &actual_paths)?;
+    let abs_paths: Vec<PathBuf> = actual_paths
+        .iter()
+        .map(|path| build_dir.join(path))
+        .collect();
+    let hashes = git::hash_objects(source_repo, &abs_paths)?;
     for (path, hash) in actual_paths.iter().zip(hashes.iter()) {
         let expected_hash = expected
             .get(path)
@@ -999,6 +1006,16 @@ fn plan_makepkg(
     })
 }
 
+fn makepkg_exit_code(status: &std::process::ExitStatus) -> i32 {
+    match status.code() {
+        Some(code) => code,
+        None => match status.signal() {
+            Some(signo) => 128 + signo,
+            None => 1,
+        },
+    }
+}
+
 pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
     let active = std::env::var("AUR_GATE_AS_MAKEPKG").as_deref() == Ok("1")
         && std::env::var("AUR_GATE_TRANSACTION_ACTIVE").as_deref() == Ok("1");
@@ -1019,7 +1036,7 @@ pub fn cmd_makepkg(app: &mut App, args: &[String]) -> i32 {
         }
     };
     match plan.run() {
-        Ok(status) => status.code().unwrap_or(1),
+        Ok(status) => makepkg_exit_code(&status),
         Err(error) => {
             app.reporter
                 .review_msg(&format!("makepkg guard: failed to run makepkg: {error}"));
@@ -1832,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn makepkg_guard_rejects_poisoned_build_dir() {
+    fn makepkg_guard_replaces_poisoned_build_dir() {
         // In a multi-package transaction, package A's PKGBUILD (arbitrary user
         // code at source time) can pre-create B's build directory with a
         // poisoned PKGBUILD. Always re-materializing and verifying blob hashes
@@ -1882,5 +1899,22 @@ mod tests {
         assert!(!unsafe_makepkg_arg("--syncdeps"));
         assert!(!unsafe_makepkg_arg("--noconfirm"));
         assert!(!unsafe_makepkg_arg("--cleanbuild"));
+    }
+
+    #[test]
+    fn makepkg_exit_code_uses_signal_when_no_exit_code() {
+        let normal = Command::new("sh")
+            .arg("-c")
+            .arg("exit 42")
+            .status()
+            .unwrap();
+        assert_eq!(makepkg_exit_code(&normal), 42);
+
+        let signalled = Command::new("sh")
+            .arg("-c")
+            .arg("kill -TERM $$")
+            .status()
+            .unwrap();
+        assert_eq!(makepkg_exit_code(&signalled), 128 + 15);
     }
 }

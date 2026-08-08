@@ -48,7 +48,7 @@ The wrapper injects yay `--rebuildall --nomakepkgconf` or paru
 `--rebuild=all --nochroot --nolocalrepo`, replaces persisted helper mflags with
 the fixed safe set `--cleanbuild --force`, and rejects caller-supplied
 rebuild/custom makepkg/mflags/build-context options. The adapter rejects
-artifact-reuse, integrity-skip, alternate-directory, PKGBUILD, and config modes.
+artifact-reuse, integrity-skip, alternate-directory, PKGBUILD, install modes (covering both `makepkg --install` and `-i`), and config modes.
 `--cleanbuild --force` are enforced for build calls; `makepkg --packagelist` (the
 only read-only metadata call the helpers use for package discovery) passes
 through without the build flags. Package discovery works because `PKGDEST` points

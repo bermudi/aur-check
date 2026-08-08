@@ -150,15 +150,31 @@ impl Paths {
     /// boundaries so a stale or crashed transaction's private build trees do
     /// not leak into the next transaction.
     pub fn sweep_build_dirs(&self) -> Result<()> {
-        let Ok(entries) = fs::read_dir(&self.build_base) else {
-            return Ok(());
-        };
-        for e in entries.flatten() {
-            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
+        match fs::read_dir(&self.build_base) {
+            Ok(entries) => {
+                for entry in entries {
+                    let e = entry.with_context(|| {
+                        format!("read build base {}", self.build_base.display())
+                    })?;
+                    let ft = e
+                        .file_type()
+                        .with_context(|| format!("read file type of {}", e.path().display()))?;
+                    if !ft.is_dir() {
+                        bail!(
+                            "build base contains non-directory entry: {}",
+                            e.path().display()
+                        );
+                    }
+                    fs::remove_dir_all(e.path()).with_context(|| {
+                        format!("remove stale build directory {}", e.path().display())
+                    })?;
+                }
             }
-            fs::remove_dir_all(e.path())
-                .with_context(|| format!("remove stale build directory {}", e.path().display()))?;
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("read build base {}", self.build_base.display()));
+            }
         }
         Ok(())
     }
@@ -816,5 +832,69 @@ mod tests {
         )
         .is_err());
         assert!(!rollback.staged_file("fixture").exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_is_ok_when_build_base_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        assert!(paths.sweep_build_dirs().is_ok());
+        assert!(!paths.build_base.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_removes_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let a = paths.build_base.join("pkg-a");
+        let b = paths.build_base.join("pkg-b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("PKGBUILD"), "pkgbase=pkg-a\n").unwrap();
+        fs::write(b.join("PKGBUILD"), "pkgbase=pkg-b\n").unwrap();
+        paths.sweep_build_dirs().unwrap();
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(paths.build_base.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_rejects_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let stray = paths.build_base.join("stray");
+        fs::write(&stray, "not a directory\n").unwrap();
+        assert!(paths.sweep_build_dirs().is_err());
+        assert!(stray.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = paths.build_base.join("link-build");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(paths.sweep_build_dirs().is_err());
+        assert!(link.exists());
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_propagates_read_errors() {
+        if unsafe { nix::libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        fs::set_permissions(&paths.build_base, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = paths.sweep_build_dirs();
+        fs::set_permissions(&paths.build_base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
     }
 }

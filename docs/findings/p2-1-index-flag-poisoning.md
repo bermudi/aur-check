@@ -58,7 +58,7 @@ between the archive and the true tree.
   guard rejects the substituted bytes.
 - `commands::tests::makepkg_guard_rejects_export_ignore_missing_files` commits a
   `.gitattributes` with `export-ignore`; the guard rejects the missing file.
-- `commands::tests::makepkg_guard_rejects_poisoned_build_dir` pre-creates the
+- `commands::tests::makepkg_guard_replaces_poisoned_build_dir` pre-creates the
   build directory with a poisoned `PKGBUILD`; the guard overwrites it with the
   fresh materialization.
 - `commands::tests::makepkg_guard_ignores_helper_worktree_changes` covers

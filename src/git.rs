@@ -11,7 +11,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs as unix_fs;
 use std::path::{Component, Path, PathBuf};
@@ -89,46 +89,58 @@ pub fn safe_git(repo: Option<&Path>, args: &[&str]) -> Result<Output> {
 }
 
 /// Compute git blob hashes for a set of files using `git hash-object
-/// --stdin-paths`. Unlike `safe_git`, this does not require a repository — it
-/// is a pure hashing operation. The hardened environment (SAFE_PRE, env
-/// isolation, no-replace-objects) is still applied so a poisoned global config
-/// or environment cannot redirect the hash. Paths are interpreted relative to
-/// `cwd`. Returns one SHA-1 hex string per input path, in order.
-pub(crate) fn hash_objects(cwd: &Path, paths: &[String]) -> Result<Vec<String>> {
-    let mut cmd = Command::new("/usr/bin/git");
-    cmd.arg("--no-pager")
-        .arg("--no-replace-objects")
-        .args(SAFE_PRE);
-    isolate_git_env(&mut cmd);
-    cmd.arg("hash-object")
-        .arg("--stdin-paths")
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
+/// --no-filters --stdin-paths` inside `repo`. Unlike `safe_git`, this does not
+/// resolve objects, but it does use the repository's configured object format
+/// (SHA-1 or SHA-256) and the hardened environment from [`safe_git_command`].
+/// `files` must be absolute paths. Returns one object id hex string per input
+/// file, in order.
+pub(crate) fn hash_objects(repo: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+    let mut cmd = safe_git_command(
+        Some(repo),
+        &["hash-object", "--no-filters", "--stdin-paths"],
+    )?;
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("spawn git hash-object")?;
+
+    // Start draining stdout immediately. git hash-object emits one hash per
+    // path as it processes stdin; for attacker-controlled file counts the
+    // stdout pipe could otherwise fill and deadlock the writer.
+    let mut stdout = child.stdout.take().context("hash-object stdout")?;
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+
     {
         let stdin = child.stdin.take().context("hash-object stdin")?;
         let mut writer = std::io::BufWriter::new(stdin);
-        for path in paths {
-            writeln!(writer, "{path}")?;
+        for file in files {
+            writeln!(writer, "{}", file.to_string_lossy())?;
         }
     }
+
     let out = child.wait_with_output().context("git hash-object")?;
+    let stdout_bytes = stdout_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("hash-object stdout thread panicked"))?
+        .context("read hash-object stdout")?;
+
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         bail!("git hash-object failed: {err}");
     }
-    let hashes: Vec<String> = std::str::from_utf8(&out.stdout)
+    let hashes: Vec<String> = std::str::from_utf8(&stdout_bytes)
         .context("hash-object output is not UTF-8")?
         .lines()
         .map(String::from)
         .collect();
-    if hashes.len() != paths.len() {
+    if hashes.len() != files.len() {
         bail!(
-            "git hash-object returned {} hashes for {} paths",
+            "git hash-object returned {} hashes for {} files",
             hashes.len(),
-            paths.len()
+            files.len()
         );
     }
     Ok(hashes)
@@ -412,6 +424,15 @@ impl TrustedGitView {
         let objects = config.git_dir.join("objects");
         if !real_directory_if_present(&objects)? {
             bail!("Git object directory is missing: {}", objects.display());
+        }
+
+        let alternates = objects.join("info").join("alternates");
+        match fs::symlink_metadata(&alternates) {
+            Ok(_) => bail!("Git alternates file is present: {}", alternates.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", alternates.display()));
+            }
         }
 
         let refs = config.git_dir.join("refs");
@@ -1562,6 +1583,96 @@ mod tests {
     }
 
     #[test]
+    fn hash_objects_uses_repository_object_format() {
+        for object_format in [None, Some("sha256")] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut init = Command::new("/usr/bin/git");
+            init.args(["init", "-q"]);
+            if let Some(format) = object_format {
+                init.arg(format!("--object-format={format}"));
+            }
+            init.arg(temp.path());
+            let initialized = init.status().unwrap();
+            if !initialized.success() {
+                assert_eq!(
+                    object_format,
+                    Some("sha256"),
+                    "git init failed unexpectedly"
+                );
+                eprintln!("git lacks SHA-256 object format; skipping");
+                continue;
+            }
+
+            std::fs::write(temp.path().join("PKGBUILD"), "pkgname=fixture\n").unwrap();
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(temp.path())
+                .args(["add", "PKGBUILD"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(temp.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "fixture",
+                ])
+                .status()
+                .unwrap()
+                .success());
+            reset_local_config(temp.path(), None, None).unwrap();
+
+            let build_dir = temp.path().join("build");
+            std::fs::create_dir(&build_dir).unwrap();
+            let content = b"pkgname=fixture\n";
+            let build_file = build_dir.join("PKGBUILD");
+            std::fs::write(&build_file, content).unwrap();
+
+            let expected = String::from_utf8(
+                Command::new("/usr/bin/git")
+                    .arg("-C")
+                    .arg(temp.path())
+                    .arg("hash-object")
+                    .arg("--stdin")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        child.stdin.as_mut().unwrap().write_all(content)?;
+                        child.wait_with_output()
+                    })
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string();
+
+            let expected_len = if object_format == Some("sha256") {
+                64
+            } else {
+                40
+            };
+            assert_eq!(
+                expected.len(),
+                expected_len,
+                "hash length matches object format"
+            );
+
+            let hashes = hash_objects(temp.path(), &[build_file]).unwrap();
+            assert_eq!(hashes, vec![expected]);
+        }
+    }
+
+    #[test]
     fn replace_objects_are_disabled_by_git_command() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
@@ -1826,7 +1937,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         assert!(Command::new("/usr/bin/git")
-            .args(["init", "-q"])
+            .args(["init", "-q", "--object-format=sha1"])
             .arg(repo)
             .status()
             .unwrap()
@@ -1957,6 +2068,54 @@ mod tests {
             String::from_utf8_lossy(&safe.stdout).trim(),
             true_tree,
             "safe_git must ignore the commit-graph and use the commit object"
+        );
+    }
+
+    #[test]
+    fn safe_git_rejects_object_alternates() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        assert!(Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .arg(repo)
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [("user.name", "t"), ("user.email", "t@example.invalid")] {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(repo)
+                .args(["config", k, v])
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        std::fs::write(repo.join("PKGBUILD"), b"pkg\n").unwrap();
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(["add", "PKGBUILD"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-qm", "initial"])
+            .status()
+            .unwrap()
+            .success());
+
+        reset_local_config(repo, None, None).unwrap();
+
+        let objects_info = repo.join(".git/objects/info");
+        std::fs::create_dir_all(&objects_info).unwrap();
+        std::fs::write(objects_info.join("alternates"), b"/tmp/other-objects\n").unwrap();
+
+        assert!(
+            safe_git(Some(repo), &["status", "--short"]).is_err(),
+            "safe_git must reject an object alternates file"
         );
     }
 

@@ -42,6 +42,10 @@ A single `git()` wrapper function shadows the external `git` binary for all git 
   - `git-config-local-unsafe-blocks` — a `.git/config` poisoned with `diff.*`, `color.*`, `core.pager`, `core.gitProxy`, `core.worktree`, `url.insteadOf`, `remote.*.proxy`, `credential.*`, and `submodule.*` returns rc 1 (fail-closed).
   - `git-config-local-override-hard-rules-fire` — a repo with `color.ui=always`, `color.diff=always`, `core.quotepath=true`, and a committed `.gitattributes` that marks `PKGBUILD` as `binary` still has its diff parsed deterministically and the `curl | sh` payload is detected.
   - `git-proxy-command-env-neutralized` — a repo with a `git://` remote and an inherited `GIT_PROXY_COMMAND` pointing to an evil script does not execute the script.
+- `cargo test --all-targets --no-fail-fast` passes; the `git` module in `src/git.rs` exercises the Rust local-config hardening with:
+  - `git::tests::generated_local_config_rejects_mutated_values` — after `reset_local_config` writes the exact generated local config, mutating any allowed key to a new value (core fields, `extensions.objectFormat`, or `remote.origin.*`) is rejected and fails closed.
+  - `git::tests::generated_local_config_rejects_duplicate_allowed_keys` — adding a duplicate value for an allowed key (`core.bare` or `remote.origin.url`) breaks the exact key/value contract and is rejected.
+  - `git::tests::safe_git_uses_validated_config_snapshot_after_local_swap` — a `safe_git_command` is built with the validated private metadata view, `.git/config` is then swapped for an attacker-controlled symlink, and the spawned Git child still succeeds without consulting the swapped local config.
 
 ## Lesson
 
