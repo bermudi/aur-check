@@ -104,6 +104,7 @@ pub struct Paths {
     pub state_dir: PathBuf,
     pub accepted_dir: PathBuf,
     pub staged_dir: PathBuf,
+    pub build_base: PathBuf,
     pub manifest_file: PathBuf,
 }
 
@@ -112,6 +113,7 @@ impl Paths {
         Paths {
             accepted_dir: state_dir.join("accepted"),
             staged_dir: state_dir.join("staged"),
+            build_base: state_dir.join("build"),
             manifest_file: state_dir.join("last-gate"),
             state_dir,
         }
@@ -121,6 +123,7 @@ impl Paths {
         secure_private_dir(&self.state_dir)?;
         secure_private_dir(&self.accepted_dir)?;
         secure_private_dir(&self.staged_dir)?;
+        secure_private_dir(&self.build_base)?;
         for file in [&self.manifest_file, &self.state_dir.join("run.lock")] {
             reject_unsafe_existing_file(file)?;
         }
@@ -133,6 +136,9 @@ impl Paths {
     pub fn staged_file(&self, pkgbase: &str) -> PathBuf {
         self.staged_dir.join(pkgbase)
     }
+    pub fn build_dir(&self, pkgbase: &str) -> PathBuf {
+        self.build_base.join(pkgbase)
+    }
     pub fn flag_diff(&self, pkg: &str) -> PathBuf {
         self.state_dir.join(format!("flag.{pkg}.diff"))
     }
@@ -140,7 +146,42 @@ impl Paths {
         self.state_dir.join(format!("flag.{pkg}.context"))
     }
 
+    /// Remove all per-pkgbase build directories. Called at transaction
+    /// boundaries so a stale or crashed transaction's private build trees do
+    /// not leak into the next transaction.
+    pub fn sweep_build_dirs(&self) -> Result<()> {
+        match fs::read_dir(&self.build_base) {
+            Ok(entries) => {
+                for entry in entries {
+                    let e = entry.with_context(|| {
+                        format!("read build base {}", self.build_base.display())
+                    })?;
+                    let ft = e
+                        .file_type()
+                        .with_context(|| format!("read file type of {}", e.path().display()))?;
+                    if !ft.is_dir() {
+                        bail!(
+                            "build base contains non-directory entry: {}",
+                            e.path().display()
+                        );
+                    }
+                    fs::remove_dir_all(e.path()).with_context(|| {
+                        format!("remove stale build directory {}", e.path().display())
+                    })?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("read build base {}", self.build_base.display()));
+            }
+        }
+        Ok(())
+    }
+
     pub fn reset_manifest(&self) -> Result<()> {
+        self.sweep_build_dirs()
+            .context("sweep stale build directories")?;
         reject_unsafe_existing_file(&self.manifest_file)?;
         let file = OpenOptions::new()
             .create(true)
@@ -517,7 +558,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(temp.path().join("state"));
         paths.ensure_dirs().unwrap();
-        for dir in [&paths.state_dir, &paths.accepted_dir, &paths.staged_dir] {
+        for dir in [
+            &paths.state_dir,
+            &paths.accepted_dir,
+            &paths.staged_dir,
+            &paths.build_base,
+        ] {
             assert_eq!(fs::symlink_metadata(dir).unwrap().mode() & 0o777, 0o700);
         }
 
@@ -786,5 +832,69 @@ mod tests {
         )
         .is_err());
         assert!(!rollback.staged_file("fixture").exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_is_ok_when_build_base_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        assert!(paths.sweep_build_dirs().is_ok());
+        assert!(!paths.build_base.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_removes_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let a = paths.build_base.join("pkg-a");
+        let b = paths.build_base.join("pkg-b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("PKGBUILD"), "pkgbase=pkg-a\n").unwrap();
+        fs::write(b.join("PKGBUILD"), "pkgbase=pkg-b\n").unwrap();
+        paths.sweep_build_dirs().unwrap();
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(paths.build_base.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_rejects_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let stray = paths.build_base.join("stray");
+        fs::write(&stray, "not a directory\n").unwrap();
+        assert!(paths.sweep_build_dirs().is_err());
+        assert!(stray.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = paths.build_base.join("link-build");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(paths.sweep_build_dirs().is_err());
+        assert!(link.exists());
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn sweep_build_dirs_propagates_read_errors() {
+        if unsafe { nix::libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("state"));
+        fs::create_dir_all(&paths.build_base).unwrap();
+        fs::set_permissions(&paths.build_base, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = paths.sweep_build_dirs();
+        fs::set_permissions(&paths.build_base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
     }
 }

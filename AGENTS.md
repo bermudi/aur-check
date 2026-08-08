@@ -55,12 +55,16 @@ After every meaningful change:
 
 ```sh
 cargo fmt --check
-cargo test --all-targets
+cargo test --all-targets --no-fail-fast
 cargo clippy --all-targets -- -D warnings
 cargo run --quiet -- selftest
 bash -n assets/wrapper.sh
 zsh -n assets/wrapper.sh
 ```
+
+`--no-fail-fast` ensures a lib-unit flake (e.g. ETXTBSY on a freshly-written
+test fixture) cannot mask the `harness = false` integration suites that carry
+the wrapper/transaction proof tests.
 
 For a controlled live missing-cache boundary, use disposable state/caches and
 `check ventoy-bin`; expected result is review (`2`), never clean.

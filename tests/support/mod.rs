@@ -1133,6 +1133,13 @@ fn fake_makepkg() {
     }
 
     let cwd = std::env::current_dir().expect("makepkg cwd");
+    if let Some(obj) = log.as_object_mut() {
+        obj.insert("cwd".into(), cwd.to_string_lossy().into_owned().into());
+    }
+    let pkgbuild = fs::read_to_string(cwd.join("PKGBUILD")).unwrap_or_default();
+    if let Some(obj) = log.as_object_mut() {
+        obj.insert("pkgbuild".into(), pkgbuild.clone().into());
+    }
     let srcinfo = fs::read_to_string(cwd.join(".SRCINFO")).unwrap_or_default();
     let pkgbase = srcinfo
         .lines()

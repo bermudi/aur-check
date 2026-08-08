@@ -59,9 +59,17 @@ validates state, and holds fd 9 across:
 
 The helper child closes fd 9 and loses lock/staging capabilities. It receives only
 pinned pacman/git/gpg/sudo programs, fixed fresh-build flags, and the aur-gate
-binary as `--makepkg`. Immediately before PKGBUILD execution, `cmd_makepkg`
-requires manifest membership, exact `HEAD == staged SHA`, regular committed
-surfaces, a clean index/worktree, and zero untracked files.
+binary as `--makepkg`. `cmd_makepkg` requires manifest membership and a valid
+staged SHA, then materializes the exact audited tree into a private build
+directory (`~/.cache/aur-gate/build/<pkgbase>/`) using `git archive <staged_sha>`
+and `tar -x`. The build directory is re-materialized on every invocation (no
+sentinel reuse). Post-extraction verification re-hashes every file with
+`git hash-object` and compares to `git ls-tree -r -z <staged_sha>`, catching
+`export-subst`/`export-ignore` divergence and any extra or missing files. It
+runs real `makepkg` in that directory with `PKGDEST` pointing back at the helper
+checkout, so package discovery via `makepkg --packagelist` finds the built
+artifacts. The helper checkout's index, worktree, refs, and HEAD are not used
+for the build surface.
 
 ## Gate paths
 
@@ -102,7 +110,8 @@ inheritance.
 - Git: absolute `/usr/bin/git`, isolated `GIT_*` and config, safe rendering
   options, HTTP(S)-only transport, generated repo-local config with an exact
   fail-closed contract, private command-scoped Git metadata views, and purge
-  of replacement/graft state before helper-facing resets.
+  of commit-graph, object alternates, and replacement/graft state before
+  helper-facing resets.
 - RPC: typed JSON, exact pkgname match, validated pkgbase, bounded curl timeout.
 - Pacman: installed version, pkgname, pkgbase, build time, and install time must
   match staged `.SRCINFO` claims and freshness threshold.

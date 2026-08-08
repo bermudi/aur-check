@@ -24,29 +24,39 @@ remaining ordinary two-fetch race.
 
 The generated wrapper passes the aur-gate executable through both helpers'
 `--makepkg` option. `AUR_GATE_AS_MAKEPKG=1` selects `cmd_makepkg`, which runs at
-the final safe seam before PKGBUILD is sourced and requires:
+the final safe seam before `makepkg` is invoked and requires:
 
 1. a valid git checkout whose directory names the pkgbase;
 2. that pkgbase in the current transaction manifest;
 3. a valid `staged/<pkgbase>` record;
-4. `HEAD == staged SHA`;
-5. no tracked/index changes; and
-6. no untracked PKGBUILD, `.SRCINFO`, `*.install`, or `*.sh` files.
+4. the staged SHA's tree consists of only regular files with PKGBUILD and `.SRCINFO`.
+
+`cmd_makepkg` then materializes the exact staged tree into a private build
+directory at `~/.cache/aur-gate/build/<pkgbase>/` using `git archive <staged_sha>`
+|`tar -x`, and runs `/usr/bin/makepkg` there with `PKGDEST` redirected back to the
+helper checkout. The helper checkout's `HEAD`, index, worktree, and refs are not
+used as the build surface, so a moved branch, dirty tree, staged changes,
+`skip-worktree`/`assume-unchanged` flags, or untracked files cannot influence the
+build. The build directory is re-materialized on every invocation (no sentinel
+reuse, preventing cross-package poisoning in multi-package transactions) and is
+swept at `begin`, `accept`, and `abort` boundaries. Post-extraction verification
+re-hashes every file with `git hash-object` and compares to `git ls-tree -r -z
+<staged_sha>`, catching `export-subst`/`export-ignore` divergence and any extra
+or missing files.
 
 The wrapper injects yay `--rebuildall --nomakepkgconf` or paru
 `--rebuild=all --nochroot --nolocalrepo`, replaces persisted helper mflags with
 the fixed safe set `--cleanbuild --force`, and rejects caller-supplied
 rebuild/custom makepkg/mflags/build-context options. The adapter rejects
-artifact-reuse, integrity-skip, alternate-directory, PKGBUILD, and config modes,
-then adds
-`--cleanbuild --force` when executing
-`/usr/bin/makepkg`, ensuring stale source/build state is removed and an existing
-`.pkg.tar.*` is overwritten by this guarded build rather than reused. X→X′,
-dirty checkout, cached artifacts, and missing staged records all block or
-rebuild before installation. Missing state also prevents a helper-discovered
-transitive AUR dependency from building without an audit. The transaction lock
-remains in the parent wrapper, but its fd and capability environment are removed
-from the untrusted helper.
+artifact-reuse, integrity-skip, alternate-directory, PKGBUILD, install modes (covering both `makepkg --install` and `-i`), and config modes.
+`--cleanbuild --force` are enforced for build calls; `makepkg --packagelist` (the
+only read-only metadata call the helpers use for package discovery) passes
+through without the build flags. Package discovery works because `PKGDEST` points
+at the helper checkout, so `makepkg --packagelist` returns the absolute paths
+where the built packages will land. Missing state also prevents a helper-discovered transitive AUR
+dependency from building without an audit. The transaction lock remains in the
+parent wrapper, but its fd and capability environment are removed from the
+untrusted helper.
 
 ## Verification
 

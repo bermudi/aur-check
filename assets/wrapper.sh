@@ -36,7 +36,7 @@ if command -v aur-gate >/dev/null 2>&1; then
       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
       GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null \
       GIT_ASKPASS=/bin/true GIT_TERMINAL_PROMPT=0 \
-      GIT_CONFIG_COUNT=8 \
+      GIT_CONFIG_COUNT=9 \
       GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
       GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false \
       GIT_CONFIG_KEY_2=core.sshCommand GIT_CONFIG_VALUE_2=/bin/false \
@@ -45,6 +45,7 @@ if command -v aur-gate >/dev/null 2>&1; then
       GIT_CONFIG_KEY_5=protocol.http.allow GIT_CONFIG_VALUE_5=always \
       GIT_CONFIG_KEY_6=protocol.https.allow GIT_CONFIG_VALUE_6=always \
       GIT_CONFIG_KEY_7=protocol.ext.allow GIT_CONFIG_VALUE_7=never \
+      GIT_CONFIG_KEY_8=core.commitGraph GIT_CONFIG_VALUE_8=false \
       "$@"
   }
 

@@ -141,6 +141,7 @@ fn explicit_aur_install_yay_audits_builds_accepts() {
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
             "helper:yay:install",
             "helper:yay:end:0",
             "cli:accept:start",
@@ -263,6 +264,7 @@ fn split_pkgname_to_pkgbase_transaction() {
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
             "helper:yay:install",
             "helper:yay:end:0",
             "cli:accept:start",
@@ -384,6 +386,7 @@ fn failed_helper_never_promotes_even_with_fresh_matching_evidence() {
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
             "helper:yay:unrelated-install",
             "helper:yay:end:1",
             "cli:abort:start",
@@ -449,6 +452,7 @@ fn wrapper_shows_accept_failure() {
             "helper:yay:start",
             "cli:makepkg-guard:start",
             "makepkg:real:start",
+            "cli:makepkg-guard:end:0",
             "helper:yay:install",
             "helper:yay:end:0",
             "cli:accept:start",
@@ -587,7 +591,155 @@ static TESTS: &[(&str, fn())] = &[
         "repo_package_skips_aur_audit_in_explicit_install",
         repo_package_skips_aur_audit_in_explicit_install,
     ),
+    (
+        "cached_empty_diff_stages_the_candidate",
+        cached_empty_diff_stages_the_candidate,
+    ),
+    (
+        "cached_hard_fail_restores_helper_remote",
+        cached_hard_fail_restores_helper_remote,
+    ),
 ];
+
+fn cached_empty_diff_stages_the_candidate() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+
+    // Build one commit, then add an empty commit with the same tree so the
+    // candidate has a different SHA but no changed paths. This is the
+    // version-bump-only path that previously returned 0 without staging.
+    let shas = build_http_repo(&fixture.http_repo, pkgbase, &[("1".into(), "".into())]);
+    let src = fixture.http_repo.with_extension("src");
+    assert!(Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&src)
+        .args(["commit", "--allow-empty", "-qm", "v2"])
+        .status()
+        .unwrap()
+        .success());
+    let status = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&src)
+        .args(["push", "-q", fixture.http_repo.to_str().unwrap(), "master"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&fixture.http_repo)
+        .arg("update-server-info")
+        .status()
+        .unwrap()
+        .success());
+    let out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&fixture.http_repo)
+        .args(["rev-parse", "refs/heads/master"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let candidate_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_ne!(
+        candidate_sha, shas[0],
+        "empty commit must have a different SHA"
+    );
+
+    // Clone the remote into the yay cache so the cached path is used.
+    let cache_dir = fixture.yay_cache.join(pkgbase);
+    let url = format!("{}/{pkgbase}.git", fixture.aur_url);
+    let status = Command::new("/usr/bin/git")
+        .args(["-c", "init.defaultBranch=master", "clone", "-q", "--", &url])
+        .arg(&cache_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Accepted is the first commit; the remote tip is the empty v2 commit.
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
+    assert_eq!(rc, 0, "version-bump-only cached update must be clean");
+    assert_eq!(
+        fixture
+            .read_staged(pkgbase)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .next()
+            .unwrap(),
+        candidate_sha,
+        "empty diff must still stage the candidate SHA"
+    );
+    assert_eq!(fixture.read_manifest().trim(), pkgbase);
+}
+
+fn cached_hard_fail_restores_helper_remote() {
+    let pkgbase = "gatepkg";
+    let rpc_json = format!(
+        r#"{{"resultcount":1,"results":[{{"Name":"{pkgbase}","PackageBase":"{pkgbase}"}}]}}"#
+    );
+    let fixture = Fixture::new(pkgbase, &rpc_json);
+
+    // Version 2 adds an `install=` line, which is a hard-fail rule.
+    let shas = build_http_repo(
+        &fixture.http_repo,
+        pkgbase,
+        &[
+            ("1".into(), "".into()),
+            ("2".into(), "install=myhook\n".into()),
+        ],
+    );
+
+    // Clone the remote into the yay cache so the cached path is used.
+    let cache_dir = fixture.yay_cache.join(pkgbase);
+    let url = format!("{}/{pkgbase}.git", fixture.aur_url);
+    let status = Command::new("/usr/bin/git")
+        .args(["-c", "init.defaultBranch=master", "clone", "-q", "--", &url])
+        .arg(&cache_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    fs::write(fixture.state.join("accepted").join(pkgbase), &shas[0]).unwrap();
+
+    let (rc, _out, _err) = fixture.run_aur_gate(&["check", pkgbase], &[]);
+    assert_eq!(rc, 1, "added install= line must hard-fail");
+
+    // The helper checkout must have its remote restored even on hard-fail.
+    let url_out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&cache_dir)
+        .args(["config", "remote.origin.url"])
+        .output()
+        .unwrap();
+    assert!(url_out.status.success(), "remote.origin.url query failed");
+    assert_eq!(
+        String::from_utf8_lossy(&url_out.stdout).trim(),
+        url,
+        "helper remote URL must be restored after a hard-fail gate"
+    );
+
+    let fetch_out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&cache_dir)
+        .args(["config", "remote.origin.fetch"])
+        .output()
+        .unwrap();
+    assert!(
+        fetch_out.status.success(),
+        "remote.origin.fetch query failed"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&fetch_out.stdout).trim(),
+        "+refs/heads/master:refs/remotes/origin/master",
+        "helper remote fetch refspec must target master after a hard-fail gate"
+    );
+}
 
 fn main() {
     support::main(TESTS);
